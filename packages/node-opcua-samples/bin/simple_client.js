@@ -1,11 +1,13 @@
 #!/usr/bin/env node
+/* eslint-disable max-statements */
+/* eslint-disable no-prototype-builtins */
 // PLEASE use simple_client_ts.ts , simple_client_ts presents a more modern approach...*
 const fs = require("fs");
 const path = require("path");
 const treeify = require("treeify");
-const _ = require("underscore");
 const chalk = require("chalk");
 const Table = require("easy-table");
+const util = require("util");
 const {
     ApplicationType,
     assert,
@@ -30,6 +32,8 @@ const {
     resolveNodeId,
     SecurityPolicy,
     VariableIds,
+    ObjectIds,
+    UserTokenType,
 } = require("node-opcua");
 const { toPem } = require("node-opcua-crypto");
 
@@ -302,7 +306,7 @@ async function main() {
         securityMode,
         securityPolicy,
 
-        endpoint_must_exist: false,
+        endpointMustExist: false,
         keepSessionAlive: true,
 
         connectionStrategy: {
@@ -325,6 +329,8 @@ async function main() {
 
     try {
         await client.connect(endpointUrl);
+        console.log(" Connected ! exact endpoint url is ", client.endpointUrl);
+
     } catch (err) {
         console.log(chalk.red(" Cannot connect to ") + endpointUrl);
         console.log(" Error = ", err.message);
@@ -335,6 +341,7 @@ async function main() {
 
     if (argv.debug) {
         fs.writeFileSync("tmp/endpoints.log", JSON.stringify(endpoints, null, " "));
+        endpoints.forEach((a) => a.serverCertificate = a.serverCertificate.toString("base64"));
         console.log(treeify.asTree(endpoints, true));
     }
 
@@ -387,14 +394,18 @@ async function main() {
     console.log(chalk.cyan("Server Certificate :"));
     console.log(chalk.yellow(hexDump(serverCertificate)));
 
+    const adjustedEndpointUrl = client.endpointUrl;
+
     const options = {
         securityMode,
         securityPolicy,
-        serverCertificate,
+
+        // we provide here server certificate , so it is important to connect with proper endpoint Url
+        // serverCertificate,
 
         defaultSecureTokenLifetime: 40000,
 
-        endpoint_must_exist: false,
+        endpointMustExist: false,
 
         connectionStrategy: {
             initialDelay: 2000,
@@ -406,15 +417,18 @@ async function main() {
 
     client = OPCUAClient.create(options);
 
-    console.log(" reconnecting to ", chalk.cyan.bold(endpointUrl));
-    await client.connect(endpointUrl);
+    console.log(" reconnecting to ", chalk.cyan.bold(adjustedEndpointUrl));
+    await client.connect(adjustedEndpointUrl);
+
+    console.log(" Connected ! exact endpoint url is ", client.endpointUrl);
 
     let userIdentity; // anonymous
     if (argv.userName && argv.password) {
 
         userIdentity = {
             password: argv.password,
-            userName: argv.userName
+            userName: argv.userName,
+            type: UserTokenType.UserName
         };
 
     }
@@ -442,10 +456,10 @@ async function main() {
     const dataValue = await the_session.readVariableValue(server_NamespaceArray_Id);
 
     console.log(" --- NAMESPACE ARRAY ---");
-    const namespaceArray = dataValue.value.value;
-    for (const namespace of namespaceArray) {
-        console.log(" Namespace ", namespace.index, "  : ", namespace);
-    }
+    const namespaceArray = dataValue.value.value /*as string[] */;
+    namespaceArray.forEach((namespace, index) => {
+        console.log(" Namespace ", index, "  : ", namespace);
+    });
     console.log(" -----------------------");
 
     // -----------------------------------------------------------------------------------------------------------
@@ -463,14 +477,19 @@ async function main() {
     let t2;
 
     function print_stat() {
-        t2 = Date.now();
-        const str = util.format("R= %d W= %d T=%d t= %d",
-            client.bytesRead, client.bytesWritten, client.transactionsPerformed, (t2 - t1));
-        console.log(chalk.yellow.bold(str));
+        try {
+
+            t2 = Date.now();
+            const str = util.format("R= %d W= %d T=%d t= %d",
+                client.bytesRead, client.bytesWritten, client.transactionsPerformed, (t2 - t1));
+            console.log(chalk.yellow.bold(str));
+        } catch (err) {
+            console.log("err =", err);
+        }
     }
 
     if (doCrawling) {
-        assert(_.isObject(the_session));
+        assert((the_session !== null && typeof the_session === "object"));
         const crawler = new NodeCrawler(the_session);
 
         let t5 = Date.now();
@@ -481,20 +500,25 @@ async function main() {
         client.on("receive_response", print_stat);
 
         t5 = Date.now();
-        // xx crawler.on("browsed", function (element) {
-        // xx     console.log("->",(new Date()).getTime()-t,element.browseName.name,element.nodeId.toString());
-        // xx });
+        crawler.on("browsed", function(element) {
+            try {
+                console.log("->", (new Date()).getTime() - t, element.browseName.name, element.nodeId.toString());
+            } catch (err) {
+                console.log("err =", err);
+            }
+        });
 
-        const nodeId = "ObjectsFolder";
+        const nodeId = resolveNodeId(ObjectIds.Server);
         console.log("now crawling object folder ...please wait...");
 
         const obj = await crawler.read(nodeId);
+
         console.log(" Time        = ", (new Date()).getTime() - t5);
         console.log(" read        = ", crawler.readCounter);
         console.log(" browse      = ", crawler.browseCounter);
         console.log(" browseNext  = ", crawler.browseNextCounter);
         console.log(" transaction = ", crawler.transactionCounter);
-        if (false) {
+        if (true) {
             // todo : treeify.asTree performance is *very* slow on large object, replace with better implementation
             // xx console.log(treeify.asTree(obj, true));
             treeify.asLines(obj, true, true, (line) => {
@@ -594,6 +618,8 @@ async function main() {
     console.log("  revised lifetimeCount      ", the_subscription.lifetimeCount, " ( requested ", parameters.requestedLifetimeCount + ")");
     console.log("  revised publishingInterval ", the_subscription.publishingInterval, " ( requested ", parameters.requestedPublishingInterval + ")");
 
+    console.log("subscription duration ",
+        ((the_subscription.lifetimeCount * the_subscription.publishingInterval) / 1000).toFixed(3), "seconds")
     the_subscription.on("internal_error", (err) => {
         console.log(" received internal error", err.message);
     }).on("keepalive", () => {
@@ -604,6 +630,8 @@ async function main() {
             " pending request on server = ", the_subscription.getPublishEngine().nbPendingPublishRequests);
 
     }).on("terminated", () => { /* */
+
+        console.log("Subscription is terminated ....")
     });
 
     try {
@@ -747,7 +775,7 @@ async function main() {
 
         await new Promise((resolve) => {
             setTimeout(async () => {
-                console.log("time out => shutting down ");
+                console.log(chalk.yellow("------------------------------"), "time out => shutting down ");
                 if (!the_subscription) {
                     return resolve();
                 }

@@ -15,15 +15,16 @@ import { StatusCode, StatusCodes } from "node-opcua-status-code";
 import {
     decodeByte,
     decodeInt32,
-    decodeStatusCode, decodeString,
-    encodeByte, encodeInt32,
-    encodeStatusCode, encodeString,
-    Int32, UAString
+    decodeStatusCode,
+    decodeString,
+    encodeByte,
+    encodeInt32,
+    encodeStatusCode,
+    encodeString,
+    Int32,
+    UAString
 } from "node-opcua-basic-types";
-import {
-    check_options_correctness_against_schema,
-    initialize_field
-} from "node-opcua-factory";
+import { check_options_correctness_against_schema, initialize_field } from "node-opcua-factory";
 
 // --------------------------------------------------------------------------------------------
 export const schemaDiagnosticInfo: StructuredTypeSchema = buildStructuredType({
@@ -85,11 +86,15 @@ export const schemaDiagnosticInfo: StructuredTypeSchema = buildStructuredType({
 });
 
 export class DiagnosticInfo extends BaseUAObject {
-
     public static schema = schemaDiagnosticInfo;
     public static possibleFields = [
-        "symbolicId", "namespaceURI", "locale", "localizedText",
-        "additionalInfo", "innerStatusCode", "innerDiagnosticInfo"
+        "symbolicId",
+        "namespaceURI",
+        "locale",
+        "localizedText",
+        "additionalInfo",
+        "innerStatusCode",
+        "innerDiagnosticInfo"
     ];
 
     public symbolicId: Int32;
@@ -107,8 +112,7 @@ export class DiagnosticInfo extends BaseUAObject {
      * @extends BaseUAObject
      * @param  options {Object}
      */
-    constructor(options?: any) {
-        options = options || {};
+    constructor(options: DiagnosticInfoOptions = {}) {
         super();
         const schema = schemaDiagnosticInfo;
         /* istanbul ignore next */
@@ -140,7 +144,15 @@ export class DiagnosticInfo extends BaseUAObject {
 DiagnosticInfo.prototype.schema = DiagnosticInfo.schema;
 DiagnosticInfo.schema.fields[6].schema = DiagnosticInfo.schema;
 
-export type DiagnosticInfoOptions = any;
+export interface DiagnosticInfoOptions {
+    symbolicId?: Int32;
+    namespaceURI?: Int32;
+    locale?: Int32;
+    localizedText?: Int32;
+    additionalInfo?: UAString;
+    innerStatusCode?: StatusCode;
+    innerDiagnosticInfo?: DiagnosticInfo;
+}
 
 export enum DiagnosticInfo_EncodingByte {
     SymbolicId = 0x01,
@@ -183,7 +195,6 @@ function getDiagnosticInfoEncodingByte(diagnosticInfo: DiagnosticInfo): Diagnost
 }
 
 function encode_DiagnosticInfo(diagnosticInfo: DiagnosticInfo, stream: OutputBinaryStream): void {
-
     const encodingMask = getDiagnosticInfoEncodingByte(diagnosticInfo);
 
     // write encoding byte
@@ -223,7 +234,6 @@ function encode_DiagnosticInfo(diagnosticInfo: DiagnosticInfo, stream: OutputBin
 }
 
 function decodeDebug_DiagnosticInfo(diagnosticInfo: DiagnosticInfo, stream: BinaryStream, options: any): void {
-
     const tracer = options.tracer;
 
     tracer.trace("start", options.name + "(" + "DiagnosticInfo" + ")", stream.length, stream.length);
@@ -269,8 +279,7 @@ function decodeDebug_DiagnosticInfo(diagnosticInfo: DiagnosticInfo, stream: Bina
     // read inner status code
     if (encodingMask & DiagnosticInfo_EncodingByte.InnerStatusCode) {
         diagnosticInfo.innerStatusCode = decodeStatusCode(stream);
-        tracer.trace("member", "innerStatusCode",
-          diagnosticInfo.innerStatusCode, cursorBefore, stream.length, "StatusCode");
+        tracer.trace("member", "innerStatusCode", diagnosticInfo.innerStatusCode, cursorBefore, stream.length, "StatusCode");
         cursorBefore = stream.length;
     }
     // read inner status code
@@ -279,16 +288,20 @@ function decodeDebug_DiagnosticInfo(diagnosticInfo: DiagnosticInfo, stream: Bina
         if (diagnosticInfo.innerDiagnosticInfo) {
             diagnosticInfo.innerDiagnosticInfo.decodeDebug(stream, options);
         }
-        tracer.trace("member", "innerDiagnosticInfo",
-          diagnosticInfo.innerDiagnosticInfo, cursorBefore, stream.length, "DiagnosticInfo");
+        tracer.trace(
+            "member",
+            "innerDiagnosticInfo",
+            diagnosticInfo.innerDiagnosticInfo,
+            cursorBefore,
+            stream.length,
+            "DiagnosticInfo"
+        );
     }
 
     tracer.trace("end", options.name, stream.length, stream.length);
-
 }
 
 function decode_DiagnosticInfo(diagnosticInfo: DiagnosticInfo, stream: BinaryStream): void {
-
     const encodingMask = decodeByte(stream);
 
     // read symbolic id
@@ -326,7 +339,7 @@ function decode_DiagnosticInfo(diagnosticInfo: DiagnosticInfo, stream: BinaryStr
 
 const emptyDiagnosticInfo = new DiagnosticInfo({});
 
-export function encodeDiagnosticInfo(value: DiagnosticInfo, stream: OutputBinaryStream): void {
+export function encodeDiagnosticInfo(value: DiagnosticInfo | null, stream: OutputBinaryStream): void {
     if (value === null) {
         emptyDiagnosticInfo.encode(stream);
     } else {
@@ -334,8 +347,8 @@ export function encodeDiagnosticInfo(value: DiagnosticInfo, stream: OutputBinary
     }
 }
 
-export function decodeDiagnosticInfo(stream: BinaryStream): DiagnosticInfo {
-    const value = new DiagnosticInfo({});
+export function decodeDiagnosticInfo(stream: BinaryStream, _value?: DiagnosticInfo | null): DiagnosticInfo {
+    const value = _value || new DiagnosticInfo();
     value.decode(stream);
     return value;
 }

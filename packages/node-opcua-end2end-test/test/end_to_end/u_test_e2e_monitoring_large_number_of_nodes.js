@@ -1,34 +1,45 @@
-/*global xit,it,describe,before,after,beforeEach,afterEach,require*/
 "use strict";
 
-const assert = require("node-opcua-assert").assert;
 const should = require("should");
 const sinon = require("sinon");
 
-const opcua = require("node-opcua");
-const OPCUAClient        = opcua.OPCUAClient;
-const ClientSession      = opcua.ClientSession;
-const ClientSubscription = opcua.ClientSubscription;
-const AttributeIds       = opcua.AttributeIds;
-const resolveNodeId      = opcua.resolveNodeId;
+const {
+    assert,
+    OPCUAClient,
+    ClientSession,
+    ClientSubscription,
+    AttributeIds,
+    resolveNodeId,
+    MonitoringParameters,
+    MonitoringMode,
+    ReadValueId,
+    TimestampsToReturn,
+    CreateMonitoredItemsRequest,
+    ClientMonitoredItem,
+} = require("node-opcua");
 
-const perform_operation_on_client_session = require("../../test_helpers/perform_operation_on_client_session").perform_operation_on_client_session;
+const { perform_operation_on_client_session } = require("../../test_helpers/perform_operation_on_client_session");
 
+const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 module.exports = function (test) {
     describe("Testing client with many monitored items", function () {
-
         let client, endpointUrl;
 
         beforeEach(function (done) {
-            if (process.gc) { process.gc(); }
+            if (process.gc) {
+                process.gc();
+            }
             client = OPCUAClient.create();
             endpointUrl = test.endpointUrl;
 
-            console.log("client.tokenRenewalInterval = ", client.tokenRenewalInterval);
-            client.on("lifetime_75",() => console.log("token about to expire"));
-            client.on("send_chunk", (buf) => console.log("chunk =>", buf.length));
-            client.on("receive_chunk",(buf) =>  console.log("chunk <= ", buf.length));
-
+            if (false) {
+                console.log("client.tokenRenewalInterval = ", client.tokenRenewalInterval);
+            }
+            client.on("lifetime_75", () => console.log("token about to expire"));
+            if (false) {
+                client.on("send_chunk", (buf) => console.log("chunk =>", buf.length));
+                client.on("receive_chunk", (buf) => console.log("chunk <= ", buf.length));
+            }
             done();
         });
 
@@ -38,12 +49,9 @@ module.exports = function (test) {
         });
 
         it("should monitor a large number of node (see #69)", function (done) {
-
-
             const changeByNodes = {};
 
             function make_callback(_nodeId) {
-
                 const nodeId = _nodeId;
                 return function (dataValue) {
                     //Xx console.log(nodeId.toString() , "\t value : ",dataValue.value.value.toString());
@@ -52,49 +60,50 @@ module.exports = function (test) {
                 };
             }
 
-            perform_operation_on_client_session(client, endpointUrl, function (session, inner_done) {
+            perform_operation_on_client_session(
+                client,
+                endpointUrl,
+                function (session, inner_done) {
+                    const subscription = ClientSubscription.create(session, {
+                        requestedPublishingInterval: 150,
+                        requestedLifetimeCount: 10 * 60 * 10,
+                        requestedMaxKeepAliveCount: 10,
+                        maxNotificationsPerPublish: 20000,
+                        publishingEnabled: true,
+                        priority: 6,
+                    });
 
-                const subscription = ClientSubscription.create(session, {
-                    requestedPublishingInterval: 150,
-                    requestedLifetimeCount: 10 * 60 * 10,
-                    requestedMaxKeepAliveCount: 10,
-                    maxNotificationsPerPublish: 20000,
-                    publishingEnabled: true,
-                    priority: 6
-                });
+                    const monitoredItems = [];
 
+                    const ids = [
+                        "Scalar_Simulation_Double",
+                        "Scalar_Simulation_Boolean",
+                        "Scalar_Simulation_String",
+                        "Scalar_Simulation_Int64",
+                        "Scalar_Simulation_LocalizedText",
+                    ];
+                    ids.forEach(function (id) {
+                        const nodeId = "ns=2;s=" + id;
 
-                const monitoredItems = [];
+                        const monitoredItem = ClientMonitoredItem.create(
+                            subscription,
+                            { nodeId: resolveNodeId(nodeId), attributeId: AttributeIds.Value },
+                            { samplingInterval: 10, discardOldest: true, queueSize: 1 }
+                        );
 
-                const ids = [
-                    "Scalar_Simulation_Double",
-                    "Scalar_Simulation_Boolean",
-                    "Scalar_Simulation_String",
-                    "Scalar_Simulation_Int64",
-                    "Scalar_Simulation_LocalizedText"
-                ];
-                ids.forEach(function (id) {
-                    const nodeId = "ns=2;s=" + id;
+                        monitoredItem.on("changed", make_callback(nodeId));
+                    });
 
-                    const monitoredItem = opcua.ClientMonitoredItem.create(subscription,
-                        {nodeId: resolveNodeId(nodeId), attributeId: AttributeIds.Value},
-                        {samplingInterval: 10, discardOldest: true, queueSize: 1});
-
-                    monitoredItem.on("changed", make_callback(nodeId));
-                });
-
-                subscription.once("started", function (subscriptionId) {
-                    setTimeout(function () {
-                        subscription.terminate(inner_done);
-                        Object.keys(changeByNodes).length.should.eql(ids.length);
-                    }, 3000);
-
-                });
-
-
-            }, done);
+                    subscription.once("started", function (subscriptionId) {
+                        setTimeout( () => {
+                            subscription.terminate(inner_done);
+                            Object.keys(changeByNodes).length.should.eql(ids.length);
+                        }, 3000);
+                    });
+                },
+                done
+            );
         });
-
 
         it("should monitor a very large number of nodes (5000) ", function (done) {
             const ids = [
@@ -113,7 +122,7 @@ module.exports = function (test) {
                 "Scalar_Simulation_LocalizedText",
                 "Scalar_Simulation_ByteString",
                 "Scalar_Simulation_DateTime",
-                "Scalar_Simulation_Duration"
+                "Scalar_Simulation_Duration",
             ];
 
             let ids50000 = ids;
@@ -128,71 +137,66 @@ module.exports = function (test) {
 
                 ids50000.forEach(function (s) {
                     const nodeId = "ns=2;s=" + s;
-                    const itemToMonitor = new opcua.ReadValueId({
-                        attributeId: opcua.AttributeIds.Value,
-                        nodeId: nodeId
+                    const itemToMonitor = new ReadValueId({
+                        attributeId: AttributeIds.Value,
+                        nodeId: nodeId,
                     });
-                    const monitoringMode = opcua.MonitoringMode.Reporting;
-
+                    const monitoringMode = MonitoringMode.Reporting;
                     clientHandle++;
 
-                    const monitoringParameters = new opcua.MonitoringParameters({
+                    const monitoringParameters = new MonitoringParameters({
                         clientHandle: clientHandle,
                         samplingInterval: 100,
                         filter: null,
                         queueSize: 1,
-                        discardOldest: true
+                        discardOldest: true,
                     });
 
                     const itemToCreate = {
                         itemToMonitor: itemToMonitor,
                         monitoringMode: monitoringMode,
-                        requestedParameters: monitoringParameters
+                        requestedParameters: monitoringParameters,
                     };
                     itemsToCreate.push(itemToCreate);
                 });
                 return itemsToCreate;
-
             }
 
-            perform_operation_on_client_session(client, endpointUrl, function (session, inner_done) {
+            perform_operation_on_client_session(
+                client,
+                endpointUrl,
+                function (session, inner_done) {
+                    const subscription = ClientSubscription.create(session, {
+                        requestedPublishingInterval: 10,
+                        requestedLifetimeCount: 10 * 60 * 10,
+                        requestedMaxKeepAliveCount: 3,
+                        maxNotificationsPerPublish: 0, // unlimited
+                        publishingEnabled: true,
+                        priority: 6,
+                    });
 
-                const subscription = ClientSubscription.create(session, {
-                    requestedPublishingInterval: 10,
-                    requestedLifetimeCount:      10 * 60 * 10,
-                    requestedMaxKeepAliveCount:            3,
-                    maxNotificationsPerPublish:             0, // unlimited
-                    publishingEnabled: true,
-                    priority: 6
-                });
+                    const notificationMessageSpy = new sinon.spy();
 
+                    subscription.on("raw_notification", notificationMessageSpy);
 
-                const notificationMessageSpy = new sinon.spy();
-
-                subscription.on("raw_notification",notificationMessageSpy);
-
-                subscription.once("started", function (subscriptionId) {
-
-
-                        const timestampsToReturn = opcua.TimestampsToReturn.Neither;
+                    subscription.once("started", (subscriptionId) => {
+                        const timestampsToReturn = TimestampsToReturn.Neither;
 
                         const itemsToCreate = make5000Items();
-                        const createMonitorItemsRequest = new opcua.CreateMonitoredItemsRequest({
+                        const createMonitorItemsRequest = new CreateMonitoredItemsRequest({
                             subscriptionId: subscription.subscriptionId,
                             timestampsToReturn: timestampsToReturn,
-                            itemsToCreate: itemsToCreate
+                            itemsToCreate: itemsToCreate,
                         });
 
-                     console.log(createMonitorItemsRequest.toString());
-                     session.createMonitoredItems(createMonitorItemsRequest, function (err, response) {
-
-                            if(err){
-                                return; subscription.terminate(inner_done);
-
+                        //xx console.log(createMonitorItemsRequest.toString());
+                        session.createMonitoredItems(createMonitorItemsRequest, function (err, response) {
+                            if (err) {
+                                subscription.terminate(inner_done);
+                                return;
                             }
                             //Xx console.log(response.toString());
-                            subscription.on("raw_notification",function(n){
-
+                            subscription.on("raw_notification", function (n) {
                                 //xx console.log(n.notificationData[0].monitoredItems[0].toString());
 
                                 n.notificationData[0].monitoredItems.length.should.eql(itemsToCreate.length);
@@ -203,13 +207,11 @@ module.exports = function (test) {
 
                                 subscription.terminate(inner_done);
                             });
-
                         });
-
-                });
-
-            }, done);
+                    });
+                },
+                done
+            );
         });
     });
-
 };

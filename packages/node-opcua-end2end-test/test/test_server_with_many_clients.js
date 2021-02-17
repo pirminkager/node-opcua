@@ -1,9 +1,8 @@
 "use strict";
 const chalk = require("chalk");
 const should = require("should");
-const assert = require("node-opcua-assert").assert;
+const { assert } = require("node-opcua-assert");
 const async = require("async");
-const _ = require("underscore");
 
 const opcua = require("node-opcua");
 
@@ -19,7 +18,7 @@ const VariableIds = opcua.VariableIds;
 //xx opcua.utils.setDebugFlag(__filename,true);
 const debugLog = require("node-opcua-debug").make_debugLog(__filename);
 
-const port = 2000;
+const port = 2003;
 const maxConnectionsPerEndpoint = 100;
 const maxAllowedSessionNumber = 50;
 
@@ -30,18 +29,18 @@ const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("Functional test : one server with many concurrent clients", function() {
     let server, temperatureVariableId, endpointUrl;
 
-    this.timeout(Math.max(20000, this._timeout));
+    this.timeout(Math.max(20000, this.timeout()));
 
     let serverCertificateChain = null;
     before(function(done) {
         server = build_server_with_temperature_device(
             {
-                port: port,
+                port,
                 maxAllowedSessionNumber: maxAllowedSessionNumber,
                 maxConnectionsPerEndpoint: maxConnectionsPerEndpoint
             },
             function(err) {
-                endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl;
+                endpointUrl = server.getEndpointUrl();
                 temperatureVariableId = server.temperatureVariableId;
                 serverCertificateChain = server.getCertificateChain();
                 done(err);
@@ -209,10 +208,10 @@ describe("Functional test : one server with many concurrent clients", function()
                         nb_received_changed_event.should.be.greaterThan(
                             1,
                             "client " +
-                                index +
-                                " has received " +
-                                nb_received_changed_event +
-                                " events ( expecting at least 2)"
+                            index +
+                            " has received " +
+                            nb_received_changed_event +
+                            " events ( expecting at least 2)"
                         );
                     });
 

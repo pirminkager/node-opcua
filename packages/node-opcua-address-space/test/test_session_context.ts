@@ -1,4 +1,5 @@
 import * as path from "path";
+import * as fs from "fs";
 
 import { readCertificate } from "node-opcua-crypto";
 import { X509IdentityToken } from "node-opcua-types";
@@ -9,16 +10,18 @@ import { AddressSpace, BaseNode, Namespace, SessionContext, UAObject } from ".."
 // let's make sure should don't get removed by typescript optimizer
 const keep_should = should;
 
-import { getMiniAddressSpace } from "../";
+import { getMiniAddressSpace } from "../testHelpers";
+import { NodeId } from "node-opcua-nodeid";
+
+const certificateFolder = path.join(__dirname, "../../node-opcua-samples/certificates");
+fs.existsSync(certificateFolder).should.eql(true, "expecting certificate store at " + certificateFolder);
 
 // tslint:disable-next-line:no-var-requires
 const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("SessionContext", () => {
-
     let addressSpace: AddressSpace;
     let namespace: Namespace;
     before(async () => {
-
         addressSpace = await getMiniAddressSpace();
         namespace = addressSpace.getOwnNamespace();
     });
@@ -42,19 +45,15 @@ describe("SessionContext", () => {
         });
         context.checkPermission(someNode, "CurrentRead").should.eql(true);
         context.checkPermission(someNode, "CurrentWrite").should.eql(false);
-
     });
 });
 describe("SessionContext - with  dedicated SessionContext and certificate ", () => {
-
     let addressSpace: AddressSpace;
     let namespace: Namespace;
     let sessionContext: SessionContext;
 
     const mockUserManager = {
-
         isValidUser: (userName: string, password: string) => {
-
             if (userName === "NodeOPCUA") {
                 return true;
             }
@@ -99,17 +98,20 @@ describe("SessionContext - with  dedicated SessionContext and certificate ", () 
         userManager: mockUserManager
     };
 
-    const certificateFilename = path.join(__dirname, "../../node-opcua-samples/certificates/client_cert_2048.pem");
+
+    const certificateFilename = path.join(certificateFolder, "client_cert_2048.pem");
 
     const certificate = readCertificate(certificateFilename);
     const mockSession = {
         userIdentityToken: new X509IdentityToken({
             certificateData: certificate
-        })
+        }),
+        getSessionId() {
+            return NodeId.nullNodeId;
+        }
     };
 
     before(async () => {
-
         sessionContext = new SessionContext({
             server: mockServer,
             session: mockSession
@@ -137,6 +139,5 @@ describe("SessionContext - with  dedicated SessionContext and certificate ", () 
         });
         context.checkPermission(someNode, "CurrentRead").should.eql(true);
         context.checkPermission(someNode, "CurrentWrite").should.eql(false);
-
     });
 });

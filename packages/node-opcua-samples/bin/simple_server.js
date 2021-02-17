@@ -1,9 +1,9 @@
-#!/usr/bin/env node
+#!/usr/bin / env node
+/* eslint-disable max-statements */
 /* eslint no-process-exit: 0 */
 "use strict";
 const path = require("path");
 const fs = require("fs");
-const _ = require("underscore");
 const assert = require("assert");
 const chalk = require("chalk");
 const yargs = require("yargs/yargs");
@@ -25,12 +25,7 @@ const {
   extractFullyQualifiedDomainName
 } = require("node-opcua");
 
-
 Error.stackTraceLimit = Infinity;
-
-function constructFilename(filename) {
-  return path.join(__dirname, "../", filename);
-}
 
 
 const argv = yargs(process.argv)
@@ -53,6 +48,9 @@ const argv = yargs(process.argv)
   .default("silent", false)
   .describe("silent", "no trace")
 
+
+  .string("alternateHostname")
+  .default("alternateHostname", null)
 
   .number("keySize")
   .describe("keySize", "certificate keySize [1024|2048|3072|4096]")
@@ -83,22 +81,22 @@ const os = require('os');
 async function getIpAddresses() {
 
   const ipAddresses = [];
-  const ifaces = os.networkInterfaces();
-  Object.keys(ifaces).forEach(function(ifname) {
+  const interfaces = os.networkInterfaces();
+  Object.keys(interfaces).forEach(function(interfaceName) {
     let alias = 0;
 
-    ifaces[ifname].forEach(function(iface) {
+    interfaces[interfaceName].forEach(function(iface) {
       if ('IPv4' !== iface.family || iface.internal !== false) {
         // skip over internal (i.e. 127.0.0.1) and non-ipv4 addresses
         return;
       }
       if (alias >= 1) {
         // this single interface has multiple ipv4 addresses
-        console.log(ifname + ':' + alias, iface.address);
+        console.log(interfaceName + ':' + alias, iface.address);
         ipAddresses.push(iface.address);
       } else {
-        // this interface has only one ipv4 adress
-        console.log(ifname, iface.address);
+        // this interface has only one ipv4 address
+        console.log(interfaceName, iface.address);
         ipAddresses.push(iface.address);
       }
       ++alias;
@@ -122,40 +120,37 @@ const userManager = {
 
 const keySize = argv.keySize;
 
-const productUri = argv.applicationName || "NodeOPCUA-Server";
-//const applicationUri = "NODEOPCUA-DemoServer";
+const productUri = argv.applicationName || "NodeOPCUASample-Simple-Server";
 
 const paths = envPaths(productUri);
 
 (async function main() {
 
   const fqdn = await extractFullyQualifiedDomainName();
+  console.log("FQDN = ", fqdn);
+
   const applicationUri = makeApplicationUrn(fqdn, productUri);
   // -----------------------------------------------
   const configFolder = paths.config;
-  const certificateFolder = path.join(configFolder);
-  const pkiFolder = path.join(configFolder, "pki");
-  const userPkiFolder = path.join(configFolder, "userPki");
+  const pkiFolder = path.join(configFolder, "PKI");
+  const userPkiFolder = path.join(configFolder, "UserPKI");
 
   const userCertificateManager = new OPCUACertificateManager({
-    automaticallyAcceptUnknownCertificate: false,
-    name: "userPki",
+    automaticallyAcceptUnknownCertificate: true,
+    name: "UserPKI",
     rootFolder: userPkiFolder,
   });
   await userCertificateManager.initialize();
 
   const serverCertificateManager = new OPCUACertificateManager({
     automaticallyAcceptUnknownCertificate: true,
-    name: "pki",
+    name: "PKI",
     rootFolder: pkiFolder,
   });
 
   await serverCertificateManager.initialize();
 
   const certificateFile = path.join(pkiFolder, `server_certificate1.pem`);
-  const privateKeyFile = serverCertificateManager.privateKey;
-  assert(fs.existsSync(privateKeyFile), "expecting private key");
-
   if (!fs.existsSync(certificateFile)) {
 
     console.log("Creating self-signed certificate");
@@ -176,19 +171,19 @@ const paths = envPaths(productUri);
   const server_options = {
 
     serverCertificateManager,
+    certificateFile,
+
     userCertificateManager,
 
-    certificateFile,
-    privateKeyFile,
 
-    port: port,
+    port,
 
     maxAllowedSessionNumber: maxAllowedSessionNumber,
     maxConnectionsPerEndpoint: maxConnectionsPerEndpoint,
 
     nodeset_filename: [
-      nodesets.standard_nodeset_file,
-      nodesets.di_nodeset_filename
+      nodesets.standard,
+      nodesets.di
     ],
 
     serverInfo: {
@@ -230,7 +225,10 @@ const paths = envPaths(productUri);
   const server = new OPCUAServer(server_options);
 
   const hostname = require("os").hostname();
-  server.on("post_initialize", function() {
+
+  await server.initialize();
+
+  function post_initialize() {
 
     const addressSpace = server.engine.addressSpace;
 
@@ -445,18 +443,19 @@ const paths = envPaths(productUri);
       nodeId: node.nodeId
     });
 
-  });
+  }
+
+  post_initialize();
 
 
-  function dumpObject(obj) {
+  function dumpObject(node) {
     function w(str, width) {
       const tmp = str + "                                        ";
       return tmp.substr(0, width);
     }
-
-    return _.map(obj, function(value, key) {
-      return "      " + w(key, 30) + "  : " + ((value === null) ? null : value.toString());
-    }).join("\n");
+    return Object.entries(node).map((key, value) =>
+      "      " + w(key, 30) + "  : " + ((value === null) ? null : value.toString())
+    ).join("\n");
   }
 
 
@@ -468,7 +467,7 @@ const paths = envPaths(productUri);
 
   console.log(chalk.yellow("\nregistering server to :") + server.discoveryServerEndpointUrl);
 
-  const endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl;
+  const endpointUrl = server.getEndpointUrl();
 
   console.log(chalk.yellow("  server on port      :"), server.endpoints[0].port.toString());
   console.log(chalk.yellow("  endpointUrl         :"), endpointUrl);
@@ -523,20 +522,33 @@ const paths = envPaths(productUri);
       return spacer + s;
     }).join("\n");
   }
+  function isIn(obj, arr) {
+    try {
+      return arr.findIndex((a) => a === obj.constructor.name.replace(/Response|Request/, "")) >= 0;
 
+    } catch (err) {
+      return true;
+    }
+  }
+
+  const servicesToTrace = ["Publish", "TransferSubscriptions", "Republish", "CreateSubscription", "CreateMonitoredItems"];
   server.on("response", function(response) {
 
     if (argv.silent) { return; }
-
-    console.log(t(response.responseHeader.timestamp), response.responseHeader.requestHandle,
-      response.schema.name.padEnd(30, " "), " status = ", response.responseHeader.serviceResult.toString());
-
+    if (isIn(response, servicesToTrace)) {
+      console.log(t(response.responseHeader.timestamp), response.responseHeader.requestHandle,
+        response.schema.name.padEnd(30, " "), " status = ", response.responseHeader.serviceResult.toString());
+      console.log(response.constructor.name, response.toString());
+    }
   });
 
   server.on("request", function(request, channel) {
     if (argv.silent) { return; }
-    console.log(t(request.requestHeader.timestamp), request.requestHeader.requestHandle,
-      request.schema.name.padEnd(30, " "), " ID =", channel.channelId.toString());
+    if (isIn(request, servicesToTrace)) {
+      console.log(t(request.requestHeader.timestamp), request.requestHeader.requestHandle,
+        request.schema.name.padEnd(30, " "), " ID =", channel.channelId.toString());
+      console.log(request.constructor.name, request.toString());
+    }
   });
 
   process.on("SIGINT", function() {
@@ -551,22 +563,22 @@ const paths = envPaths(productUri);
     });
   });
 
-  server.on("serverRegistered", function() {
+  server.on("serverRegistered", () => {
     console.log("server has been registered");
   });
-  server.on("serverUnregistered", function() {
+  server.on("serverUnregistered", () => {
     console.log("server has been unregistered");
   });
-  server.on("serverRegistrationRenewed", function() {
+  server.on("serverRegistrationRenewed", () => {
     console.log("server registration has been renewed");
   });
-  server.on("serverRegistrationPending", function() {
+  server.on("serverRegistrationPending", () => {
     console.log("server registration is still pending (is Local Discovery Server up and running ?)");
   });
-  server.on("newChannel", function(channel) {
-    console.log(chalk.bgYellow("Client connected with address = "), channel.remoteAddress, " port = ", channel.remotePort);
+  server.on("newChannel", (channel) => {
+    console.log(chalk.bgYellow("Client connected with address = "), channel.remoteAddress, " port = ", channel.remotePort, "timeout=", channel.timeout);
   });
-  server.on("closeChannel", function(channel) {
+  server.on("closeChannel", (channel) => {
     console.log(chalk.bgCyan("Client disconnected with address = "), channel.remoteAddress, " port = ", channel.remotePort);
     if (global.gc) {
       global.gc();

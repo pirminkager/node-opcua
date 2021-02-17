@@ -1,45 +1,44 @@
 
 const chalk = require("chalk");
 const should = require("should");
-const assert = require("node-opcua-assert").assert;
+const { assert } = require("node-opcua-assert");
 const async = require("async");
-const _ = require("underscore");
 const util = require("util");
 
 
 const opcua = require("node-opcua");
 const OPCUAClient = opcua.OPCUAClient;
-const StatusCodes = opcua.StatusCodes;
-const Variant = opcua.Variant;
-const DataType = opcua.DataType;
 const NodeCrawler = opcua.NodeCrawler;
 
 
-const redirectToFile = require("node-opcua-debug").redirectToFile;
-const debugLog = require("node-opcua-debug").make_debugLog(__filename);
+const { redirectToFile } = require("node-opcua-debug/nodeJS");
+const { make_debugLog } = require("node-opcua-debug");
+
+const debugLog = make_debugLog("TEST");
 
 function xredirectToFile(file, fun, callback) {
     fun(callback);
 }
 
-const perform_operation_on_client_session = require("../../test_helpers/perform_operation_on_client_session").perform_operation_on_client_session;
+const { perform_operation_on_client_session } = require("../../test_helpers/perform_operation_on_client_session");
 
 const nodeToCrawl = opcua.makeNodeId(opcua.ObjectIds.Server);
 
-module.exports = function (test) {
+const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
+module.exports = function(test) {
 
-    describe("NodeCrawler", function () {
+    describe("NodeCrawler", function() {
 
         let client, endpointUrl;
 
 
-        beforeEach(function (done) {
+        beforeEach(function(done) {
             client = OPCUAClient.create({});
             endpointUrl = test.endpointUrl;
             done();
         });
 
-        afterEach(function (done) {
+        afterEach(function(done) {
             client = null;
             done();
         });
@@ -51,7 +50,7 @@ module.exports = function (test) {
                 return (text + "                                                     ").substring(0, width);
             }
 
-            console.log("    referenceTypeId ",
+            debugLog("    referenceTypeId ",
                 f(chalk.yellow(reference.referenceTypeId.displayText(), 35)) +
                 (reference.isForward ? " => " : " <= ") +
                 f(chalk.blue.bold(reference.browseName.name, 20)) +
@@ -60,42 +59,42 @@ module.exports = function (test) {
         }
 
         function myDumpReferences(index, references) {
-            //xxx console.log(" xxxxxxxxxxxxxxxxx ",references);
+            //xxx debugLog(" xxxxxxxxxxxxxxxxx ",references);
             references.forEach(MyDumpReference);
         }
 
 
-        it("CRAWL1- should crawl for a complete tree", function (done) {
+        it("CRAWL1- should crawl for a complete tree", function(done) {
 
-            redirectToFile("NodeCrawler_complete_tree.log", function (done) {
+            redirectToFile("NodeCrawler_complete_tree.log", function(done) {
 
-                perform_operation_on_client_session(client, endpointUrl, function (session, done) {
+                perform_operation_on_client_session(client, endpointUrl, function(session, done) {
 
                     const crawler = new NodeCrawler(session);
 
                     const data = {};
-                    crawler.on("browsed", function (nodeElement, data) {
+                    crawler.on("browsed", function(nodeElement, data) {
 
-                        //xx console.log(chalk.yellow("nodeElement "), nodeElement.browseName.toString(), nodeElement.nodeId.displayText());
+                        //xx debugLog(chalk.yellow("nodeElement "), nodeElement.browseName.toString(), nodeElement.nodeId.displayText());
                         const objectIndex = {
-                            findNode: function (nodeId) {
+                            findNode: function(nodeId) {
                                 return null;
                             }
                         };
-                        console.log(" Node => ", nodeElement.browseName.toString(), nodeElement.nodeId.toString());
+                        debugLog(" Node => ", nodeElement.browseName.toString(), nodeElement.nodeId.toString());
                         myDumpReferences(objectIndex, nodeElement.references);
 
-                    }).on("end", function () {
-                        console.log("Data ", data);
-                    }).on("error", function (err) {
+                    }).on("end", function() {
+                        debugLog("Data ", data);
+                    }).on("error", function(err) {
                         done(err);
                     });
 
-                    crawler.crawl(nodeToCrawl, data, function (err) {
+                    crawler.crawl(nodeToCrawl, data, function(err) {
                         if (err) {
                             return done(err);
                         }
-                        crawler.crawl(nodeToCrawl, data, function (err) {
+                        crawler.crawl(nodeToCrawl, data, function(err) {
 
                             crawler.dispose();
                             done(err);
@@ -108,9 +107,9 @@ module.exports = function (test) {
             }, done);
         });
 
-        it("CRAWL2- should crawl for a complete tree with limited node per browse and read request", function (done) {
+        it("CRAWL2- should crawl for a complete tree with limited node per browse and read request", function(done) {
 
-            perform_operation_on_client_session(client, endpointUrl, function (session, done) {
+            perform_operation_on_client_session(client, endpointUrl, function(session, done) {
 
                 // crawler 1 has no limit in the number of node inside Browse or Read request
                 const crawler1 = new NodeCrawler(session);
@@ -124,15 +123,15 @@ module.exports = function (test) {
 
                 let browsed_node1 = 0;
                 let browsed_node2 = 0;
-                crawler1.on("browsed", function (nodeElement, data) {
+                crawler1.on("browsed", function(nodeElement, data) {
                     browsed_node1++;
                 });
-                crawler2.on("browsed", function (nodeElement, data) {
+                crawler2.on("browsed", function(nodeElement, data) {
                     browsed_node2++;
                 });
                 const data1 = { onBrowse: NodeCrawler.follow };
 
-                crawler1.crawl(nodeToCrawl, data1, function (err) {
+                crawler1.crawl(nodeToCrawl, data1, function(err) {
                     if (err) {
                         return done(err);
                     }
@@ -140,7 +139,7 @@ module.exports = function (test) {
                     browsed_node2.should.equal(0);
 
                     const data2 = { onBrowse: NodeCrawler.follow };
-                    crawler2.crawl(nodeToCrawl, data2, function (err) {
+                    crawler2.crawl(nodeToCrawl, data2, function(err) {
                         if (err) {
                             return done(err);
                         }
@@ -156,21 +155,21 @@ module.exports = function (test) {
             }, done);
         });
 
-        it("CRAWL3- should crawl one at a time", function (done) {
+        it("CRAWL3- should crawl one at a time", function(done) {
 
-            perform_operation_on_client_session(client, endpointUrl, function (session, done) {
+            perform_operation_on_client_session(client, endpointUrl, function(session, done) {
 
-                assert(_.isFunction(done));
+                assert(typeof done === "function");
 
                 const crawler = new NodeCrawler(session);
 
                 const nodeId = "RootFolder";
-                crawler.read(nodeId, function (err, obj) {
+                crawler.read(nodeId, function(err, obj) {
 
                     if (!err) {
 
-                        obj.organizes.forEach(function (o) {
-                            console.log(o.browseName.toString());
+                        obj.organizes.forEach(function(o) {
+                           // debugLog(o.browseName.toString());
                         });
 
                         obj.browseName.toString().should.equal("Root");
@@ -187,11 +186,11 @@ module.exports = function (test) {
             }, done);
         });
 
-        it("CRAWL4- should crawl faster the second time", function (done) {
+        it("CRAWL4- should crawl faster the second time", function(done) {
 
-            perform_operation_on_client_session(client, endpointUrl, function (session, done) {
+            perform_operation_on_client_session(client, endpointUrl, function(session, done) {
 
-                assert(_.isFunction(done));
+                assert(typeof done === "function");
 
                 const crawler = new NodeCrawler(session);
 
@@ -199,7 +198,7 @@ module.exports = function (test) {
 
                 const startTime = Date.now();
 
-                crawler.read(nodeId, function (err, obj) {
+                crawler.read(nodeId, function(err, obj) {
 
                     if (err) {
                         return done(err);
@@ -209,7 +208,7 @@ module.exports = function (test) {
                     const duration1 = intermediateTime1 - startTime;
 
 
-                    crawler.read(nodeId, function (err, obj) {
+                    crawler.read(nodeId, function(err, obj) {
                         const intermediateTime2 = Date.now();
                         const duration2 = intermediateTime2 - intermediateTime1;
 
@@ -223,28 +222,27 @@ module.exports = function (test) {
             }, done);
         });
 
-        it("CRAWL5- should display a tree", function (done) {
+        it("CRAWL5- should display a tree", function(done) {
 
-            const redirectToFile = require("node-opcua-debug").redirectToFile;
+  
+            redirectToFile("crawler_display_tree.log", function(inner_callback) {
 
-            redirectToFile("crawler_display_tree.log", function (inner_callback) {
-
-                const treeify = require('treeify');
-
-                perform_operation_on_client_session(client, endpointUrl, function (the_session, callback) {
+                perform_operation_on_client_session(client, endpointUrl, function(the_session, callback) {
 
                     const crawler = new NodeCrawler(the_session);
 
-                    crawler.on("browsed", function (element) {
+                    crawler.on("browsed", function(element) {
                     });
 
                     const nodeId = "ObjectsFolder";
-                    console.log("now crawling object folder ...please wait...");
-                    crawler.read(nodeId, function (err, obj) {
+                    debugLog("now crawling object folder ...please wait...");
+                    crawler.read(nodeId, function(err, obj) {
                         if (!err) {
-                            treeify.asLines(obj, true, true, function (line) {
-                                console.log(line);
-                            });
+                            /*
+                                treeify.asLines(obj, true, true, function(line) {
+                                    debugLog(line);
+                                });
+                            */
                         }
                         crawler.dispose();
                         callback(err);

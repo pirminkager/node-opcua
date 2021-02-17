@@ -3,41 +3,37 @@
 // tslint:disable:no-console
 import * as chalk from "chalk";
 
-import {
-    nodesets,
-    OPCUACertificateManager,
-    OPCUAServer
-} from "node-opcua";
+import { nodesets, OPCUACertificateManager, OPCUAServer } from "node-opcua";
 import { CertificateManager } from "node-opcua-pki";
 import { installPushCertificateManagement } from "node-opcua-server-configuration";
-import * as  path from "path";
+import * as path from "path";
 import * as yargs from "yargs";
 
-const argv = yargs
-  .wrap(132)
-  .option("port", {
-      alias: "p",
-      default: "26543",
-      describe: "port to listen"
-  })
-  .argv;
+const argv = yargs.wrap(132).option("port", {
+    alias: "p",
+    default: "26543",
+    describe: "port to listen"
+}).argv;
 
 const rootFolder = path.join(__dirname, "../../..");
 
 const port = parseInt(argv.port, 10) || 26555;
 
+// tslint:disable-next-line: no-var-requires
+const envPaths = require("env-paths");
+const config = envPaths("node-opcua-default").config;
+const pkiFolder = path.join(config, "PKI");
+
 const certificateManager = new OPCUACertificateManager({
     automaticallyAcceptUnknownCertificate: true,
-
-    rootFolder: path.join(__dirname, "certificate"),
+    name: "PKI",
+    rootFolder: pkiFolder
 });
 
 const server_options = {
     port,
 
-    nodeset_filename: [
-        nodesets.standard_nodeset_file
-    ],
+    nodeset_filename: [nodesets.standard],
 
     serverCertificateManager: certificateManager
 };
@@ -45,7 +41,6 @@ const server_options = {
 process.title = "Node OPCUA Server on port : " + server_options.port;
 
 async function main() {
-
     const tmpFolder = path.join(__dirname, "../certificates/myApp");
 
     const applicationGroup = new CertificateManager({
@@ -60,18 +55,18 @@ async function main() {
     console.log(chalk.yellow("  server PID          :"), process.pid);
 
     server.on("post_initialize", () => {
-
         const addressSpace = server.engine.addressSpace!;
         // to do: expose new nodeid here
         const ns = addressSpace.getNamespaceIndex("http://yourorganisation.org/my_data_type/");
 
         installPushCertificateManagement(addressSpace, {
             applicationGroup: server.serverCertificateManager,
-            userTokenGroup: server.userCertificateManager
+            userTokenGroup: server.userCertificateManager,
+
+            applicationUri: server.serverInfo.applicationUri!
         });
 
         console.log("Certificate rejected folder ", server.serverCertificateManager.rejectedFolder);
-
     });
 
     try {
@@ -81,7 +76,7 @@ async function main() {
         process.exit(-3);
     }
 
-    const endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl!;
+    const endpointUrl = server.getEndpointUrl()!;
 
     console.log(chalk.yellow("  server on port      :"), chalk.cyan(server.endpoints[0].port.toString()));
     console.log(chalk.yellow("  endpointUrl         :"), chalk.cyan(endpointUrl));

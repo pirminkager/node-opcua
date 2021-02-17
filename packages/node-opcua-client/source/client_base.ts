@@ -4,6 +4,7 @@
 // tslint:disable:no-unused-expression
 import { EventEmitter } from "events";
 import { LocaleId } from "node-opcua-basic-types";
+import { OPCUACertificateManager } from "node-opcua-certificate-manager";
 import { OPCUASecureObject } from "node-opcua-common";
 import { Certificate, makeSHA1Thumbprint, Nonce, toPem } from "node-opcua-crypto";
 import { ObjectRegistry } from "node-opcua-object-registry";
@@ -15,20 +16,20 @@ import {
     SecurityToken
 } from "node-opcua-secure-channel";
 import {
-    FindServersOnNetworkRequest, FindServersOnNetworkRequestOptions,
+    FindServersOnNetworkRequest,
+    FindServersOnNetworkRequestOptions,
     FindServersRequest,
-    FindServersRequestOptions, ServerOnNetwork
+    FindServersRequestOptions,
+    ServerOnNetwork
 } from "node-opcua-service-discovery";
 import {
-    ApplicationDescription, EndpointDescription,
-    GetEndpointsRequest, GetEndpointsResponse
+    ApplicationDescription,
+    EndpointDescription,
+    GetEndpointsRequest,
+    GetEndpointsResponse
 } from "node-opcua-service-endpoints";
-import {
-    MessageSecurityMode
-} from "node-opcua-service-secure-channel";
-import {
-    ErrorCallback,
-} from "node-opcua-status-code";
+import { MessageSecurityMode } from "node-opcua-service-secure-channel";
+import { ErrorCallback } from "node-opcua-status-code";
 
 import { ResponseCallback } from "./client_session";
 import { Request, Response } from "./common";
@@ -44,6 +45,8 @@ export interface FindEndpointOptions {
     certificateFile: string;
     privateKeyFile: string;
     applicationName: string;
+    applicationUri: string;
+    clientCertificateManager: OPCUACertificateManager;
 }
 
 export interface FindEndpointResult {
@@ -54,12 +57,17 @@ export interface FindEndpointResult {
 export type FindEndpointCallback = (err: Error | null, result?: FindEndpointResult) => void;
 
 export interface OPCUAClientBaseOptions {
-
     /**
      * the client application name
      * @default "NodeOPCUA-Client"
      */
     applicationName?: string;
+
+    /**
+     * the application Uri
+     * @default: `urn:${hostname}:${applicationName}`
+     */
+    applicationUri?: string;
 
     connectionStrategy?: ConnectionStrategyOptions;
 
@@ -106,15 +114,21 @@ export interface OPCUAClientBaseOptions {
     keepSessionAlive?: boolean;
 
     /**
+     * certificate Manager
+     */
+    clientCertificateManager?: OPCUACertificateManager;
+
+    /**
      * client certificate pem file.
-     * @default "certificates/client_selfsigned_cert_2048.pem"
+     * @default `${clientCertificateManager/rootFolder}/own/certs/client_certificate.pem"
      */
     certificateFile?: string;
     /**
      * client private key pem file.
-     * @default "certificates/client_key_2048.pem"
+     * @default `${clientCertificateManager/rootFolder}/own/private/private_key.pem"
      */
     privateKeyFile?: string;
+
     /**
      * a client name string that will be used to generate session names.
      */
@@ -133,7 +147,6 @@ export interface GetEndpointsOptions {
 }
 
 export interface OPCUAClientBase extends OPCUASecureObject {
-
     /***
      *
      * @param endpointUrl the endpoint of the server to connect to ( i.e "opc.tcp://machine.name:3434/name" )
@@ -149,8 +162,7 @@ export interface OPCUAClientBase extends OPCUASecureObject {
 
     disconnect(callback: ErrorCallback): void;
 
-    findEndpointForSecurity(
-        securityMode: MessageSecurityMode, securityPolicy: SecurityPolicy): EndpointDescription | undefined;
+    findEndpointForSecurity(securityMode: MessageSecurityMode, securityPolicy: SecurityPolicy): EndpointDescription | undefined;
 
     getEndpoints(options?: GetEndpointsOptions): Promise<EndpointDescription[]>;
 
@@ -169,7 +181,6 @@ export interface OPCUAClientBase extends OPCUASecureObject {
     findServersOnNetwork(callback: ResponseCallback<ServerOnNetwork[]>): void;
 
     findServersOnNetwork(options: FindServersOnNetworkRequestLike, callback: ResponseCallback<ServerOnNetwork[]>): void;
-
 }
 
 // Events -----------------------------------------------------------------------------
@@ -217,9 +228,9 @@ export interface OPCUAClientBase extends EventEmitter {
     on(event: "reconnection_attempt_has_failed", eventHandler: (err: Error, message: string) => void): this;
 
     /**
-     * this event is raised after the client has successfully manage to re-establish the connection with
+     * this event is raised after the client has successfully managed to re-establish the connection with
      * the remote OPCUA Server.
-     * You can intercept start_reconnection event to resume your interaction with the remote
+     * You can intercept after_reconnection event to resume your interaction with the remote
      * OPCUA server.
      *
      * @param event
@@ -250,7 +261,7 @@ export interface OPCUAClientBase extends EventEmitter {
     on(event: "send_chunk", eventHandler: (chunk: Buffer) => void): this;
 
     /**
-     * this event is raised when the client has recevied a new message chunk from the servers
+     * this event is raised when the client has received a new message chunk from the servers
      * (advanced use only)
      * @param event
      * @param eventHandler
@@ -262,7 +273,7 @@ export interface OPCUAClientBase extends EventEmitter {
     on(event: "receive_response", eventHandler: (response: Response) => void): this;
 
     /**
-     * this event is raised when the current security token has reached 75% of its livetime and is therefore
+     * this event is raised when the current security token has reached 75% of its lifetime and is therefore
      * about to expired.
      * @param event
      * @param eventHandler
@@ -271,14 +282,14 @@ export interface OPCUAClientBase extends EventEmitter {
 
     /**
      * this event is raised after the (about ) security token as been renewed
-     * and renegociated with the server.to expire
+     * and renegotiated with the server.to expire
      * @param event
      * @param eventHandler
      */
     on(event: "security_token_renewed", eventHandler: () => void): this;
 
     /**
-     * this event is raised when a broken connection with the remote Server has been reestablished
+     * this event is raised when the connection has been broken
      * @param event
      * @param eventHandler
      */
@@ -300,7 +311,6 @@ export interface OPCUAClientBase extends EventEmitter {
     on(event: "timed_out_request", eventHandler: (request: Request) => void): this;
 
     on(event: string | symbol, listener: (...args: any[]) => void): this;
-
 }
 
 export interface OPCUAClientBase {
@@ -327,11 +337,11 @@ export interface OPCUAClientBase {
 }
 
 export class OPCUAClientBase {
-
     public static registry = new ObjectRegistry();
 
     public static create(options: OPCUAClientBaseOptions): OPCUAClientBase {
         /* istanbul ignore next*/
+        options;
         throw new Error("Not Implemented");
     }
 }

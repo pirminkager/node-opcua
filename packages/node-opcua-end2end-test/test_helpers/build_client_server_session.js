@@ -1,16 +1,18 @@
 const should = require("should");
-const assert = require("node-opcua-assert").assert;
-const _ = require("underscore");
+const { assert } = require("node-opcua-assert");
 
 const opcua = require("node-opcua");
 
 const OPCUAServer = opcua.OPCUAServer;
 const OPCUAClient = opcua.OPCUAClient;
 
-const debugLog = require("node-opcua-debug").make_debugLog(__filename);
+const { make_debugLog, checkDebugFlag } = require("node-opcua-debug");
+const debugLog = make_debugLog("TEST");
+const doDebug = checkDebugFlag("TEST");
 
 const empty_nodeset_filename = opcua.get_empty_nodeset_filename();
 
+const port = 2001;
 
 /**
  * @method build_client_server_session
@@ -32,20 +34,20 @@ const empty_nodeset_filename = opcua.get_empty_nodeset_filename();
  * });
  *
  */
-function build_client_server_session(options,done) {
+function build_client_server_session(options, done) {
 
     let server, client;
     let endpointUrl;
 
-    if (_.isFunction(options)) {
+    if (typeof options === "function") {
         done = options;
         options = {
-            port: 2001,
+            port,
             nodeset_filename: empty_nodeset_filename
         };
     }
 
-    options.port = options.port || 2001;
+    options.port = options.port || 2240;
 
     server = new OPCUAServer(options);
 
@@ -53,20 +55,20 @@ function build_client_server_session(options,done) {
     client = OPCUAClient.create({});
 
     function start(done) {
-        server.start(function () {
+        server.start(function() {
 
             // we will connect to first server end point
-            endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl;
+            endpointUrl = server.getEndpointUrl();
             debugLog("endpointUrl", endpointUrl);
             opcua.is_valid_endpointUrl(endpointUrl).should.equal(true);
 
 
-            setImmediate(function () {
-                client.connect(endpointUrl, function (err) {
+            setImmediate(function() {
+                client.connect(endpointUrl, function(err) {
                     if (err) {
                         return done(err);
                     }
-                    client.createSession(function (err, session) {
+                    client.createSession(function(err, session) {
                         if (!err) {
                             client_server.g_session = session;
                         }
@@ -80,19 +82,19 @@ function build_client_server_session(options,done) {
     function shutdown(done) {
 
         // let's verify that the server has got at least one session active (the one we created above)
-        assert(server.engine.currentSessionCount >= 1 , "expecting at least one active session on service side");
+        assert(server.engine.currentSessionCount >= 1, "expecting at least one active session on service side");
         assert(client_server.g_session);
 
-        client_server.g_session.close(function () {
+        client_server.g_session.close(function() {
 
             // disconnect client abruptly
-            client.disconnect(function () {
+            client.disconnect(function() {
 
                 //xx // disconnecting the client should have cause the server to discard the subscriptions
                 //xx assert(server.engine.currentSessionCount === 0);
 
                 // OK, it  is now time to shutdown the server.
-                server.shutdown(function () {
+                server.shutdown(function() {
 
                     // let's perform some more verification
                     assert(server.engine.currentSessionCount === 0);

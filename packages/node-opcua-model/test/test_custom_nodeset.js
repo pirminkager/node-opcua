@@ -1,13 +1,14 @@
-const assert = require("node-opcua-assert").assert;
+const { assert } = require("node-opcua-assert");
 const path = require("path");
 const fs = require("fs");
 
 const {
     AddressSpace,
-    generateAddressSpace
 } = require("node-opcua-address-space");
+const { generateAddressSpace } = require("node-opcua-address-space/nodeJS");
+
 const { PseudoSession } = require("node-opcua-address-space");
-const { parse_opcua_common } = require("../lib/parse_server_common");
+const { parse_opcua_common } = require("..");
 const { nodesets } = require("node-opcua-nodesets");
 const should = require("should");
 
@@ -28,9 +29,9 @@ async function parse_xml(nodeset_files) {
 const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("testing custom nodeset", function() {
 
-    this.timeout(Math.min(30000, this._timeout));
+    this.timeout(Math.max(30000, this.timeout()));
 
-    xit("should parse a custom nodeset", async () => {
+    it("should parse a custom nodeset", async () => {
 
         const nodeset_files = [
             nodesets.standard,

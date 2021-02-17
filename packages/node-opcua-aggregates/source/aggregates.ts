@@ -1,13 +1,16 @@
 /**
- * @module node-opca-aggregates
+ * @module node-opcua-aggregates
  */
-import { ObjectIds } from "node-opcua-constants";
+import { AggregateFunction } from "node-opcua-constants";
 import { makeNodeId } from "node-opcua-nodeid";
 import * as utils from "node-opcua-utils";
 import { DataType } from "node-opcua-variant";
 
 import { AddressSpace, BaseNode, UAObject, UAServerCapabilities, UAVariable } from "node-opcua-address-space";
 import { AggregateConfigurationOptionsEx } from "./interval";
+import { AddressSpacePrivate } from "node-opcua-address-space/src/address_space_private";
+import { readProcessedDetails } from "./read_processed_details";
+
 // import { HistoryServerCapabilities } from "node-opcua-server";
 
 /*
@@ -43,11 +46,7 @@ const historicalCapabilitiesDefaultProperties /*: HistoryServerCapabilities */ =
     updateEventCapability: false // Boolean PropertyType Mandatory
 };
 
-export function createHistoryServerCapabilities(
-  addressSpace: AddressSpace,
-  serverCapabilities: UAServerCapabilities
-): UAObject {
-
+export function createHistoryServerCapabilities(addressSpace: AddressSpace, serverCapabilities: UAServerCapabilities): UAObject {
     /* istanbul ignore next */
     if (serverCapabilities.browseName.toString() !== "ServerCapabilities") {
         throw new Error("Expecting server Capabilities");
@@ -65,10 +64,7 @@ export function createHistoryServerCapabilities(
     });
 }
 
-function setHistoricalServerCapabilities(
-  historyServerCapabilities: any,
-  defaultProperties: any
-) {
+function setHistoricalServerCapabilities(historyServerCapabilities: any, defaultProperties: any) {
     function setBoolean(propName: string) {
         const lowerCase = utils.lowerFirstLetter(propName);
 
@@ -84,7 +80,6 @@ function setHistoricalServerCapabilities(
             throw new Error(" Cannot find property " + propName);
         }
         prop.setValueFromSource({ dataType: DataType.Boolean, value });
-
     }
 
     function setUInt32(propName: string) {
@@ -115,51 +110,49 @@ function setHistoricalServerCapabilities(
     setBoolean("DeleteEventCapability");
 
     /// FOUND A BUG HERE spec says InsertAnnotationsCapability
-    /// Standard dnodeset2 says InsertAnnotationCapability ( without s )
+    /// Standard nodeset2 says InsertAnnotationCapability ( without s )
     // xx setBoolean("InsertAnnotationsCapability");
 }
 
-export type AggregateFunctioName =
-  "AnnotationCount" |
-  "Average" |
-  "Count" |
-  "Delta" |
-  "DeltaBounds" |
-  "DurationBad" |
-  "DurationGood" |
-  "DurationInStateNonZero" |
-  "DurationInStateZero" |
-  "EndBound" |
-  "Interpolative" |
-  "Maximum" |
-  "Maximum2" |
-  "MaximumActualTime" |
-  "MaximumActualTime2" |
-  "Minimum" |
-  "Minimum2" |
-  "MinimumActualTime" |
-  "MinimumActualTime2" |
-  "NumberOfTransitions" |
-  "PercentBad" |
-  "PercentGood" |
-  "Range" |
-  "Range2" |
-  "StandardDeviationPopulation" |
-  "StandardDeviationSample" |
-  "Start" |
-  "StartBound" |
-  "TimeAverage" |
-  "TimeAverage2" |
-  "Total" |
-  "Total2" |
-  "VariancePopulation" |
-  "VarianceSample" |
-  "WorstQuality" |
-  "WorstQuality2";
+export type AggregateFunctionName =
+    | "AnnotationCount"
+    | "Average"
+    | "Count"
+    | "Delta"
+    | "DeltaBounds"
+    | "DurationBad"
+    | "DurationGood"
+    | "DurationInStateNonZero"
+    | "DurationInStateZero"
+    | "EndBound"
+    | "Interpolative"
+    | "Maximum"
+    | "Maximum2"
+    | "MaximumActualTime"
+    | "MaximumActualTime2"
+    | "Minimum"
+    | "Minimum2"
+    | "MinimumActualTime"
+    | "MinimumActualTime2"
+    | "NumberOfTransitions"
+    | "PercentBad"
+    | "PercentGood"
+    | "Range"
+    | "Range2"
+    | "StandardDeviationPopulation"
+    | "StandardDeviationSample"
+    | "Start"
+    | "StartBound"
+    | "TimeAverage"
+    | "TimeAverage2"
+    | "Total"
+    | "Total2"
+    | "VariancePopulation"
+    | "VarianceSample"
+    | "WorstQuality"
+    | "WorstQuality2";
 
-function addAggregateFunctionSupport(
-  addressSpace: AddressSpace, functionName: number): void {
-
+function addAggregateFunctionSupport(addressSpace: AddressSpace, functionName: number): void {
     /* istanbul ignore next */
     if (!functionName) {
         throw new Error("Invalid function name");
@@ -192,45 +185,6 @@ function addAggregateFunctionSupport(
         nodeId: functionNode.nodeId,
         referenceType: "Organizes"
     });
-}
-
-const enum AggregateFunction {
-    AnnotationCount = ObjectIds.AggregateFunction_AnnotationCount,
-    Average = ObjectIds.AggregateFunction_Average,
-    Count = ObjectIds.AggregateFunction_Count,
-    Delta = ObjectIds.AggregateFunction_Delta,
-    DeltaBounds = ObjectIds.AggregateFunction_DeltaBounds,
-    DurationBad = ObjectIds.AggregateFunction_DurationBad,
-    DurationGood = ObjectIds.AggregateFunction_DurationGood,
-    DurationInStateNonZero = ObjectIds.AggregateFunction_DurationInStateNonZero,
-    DurationInStateZero = ObjectIds.AggregateFunction_End,
-    EndBound = ObjectIds.AggregateFunction_EndBound,
-    Interpolative = ObjectIds.AggregateFunction_Interpolative,
-    Maximum = ObjectIds.AggregateFunction_Maximum,
-    Maximum2 = ObjectIds.AggregateFunction_Maximum2,
-    MaximumActualTime = ObjectIds.AggregateFunction_MaximumActualTime,
-    MaximumActualTime2 = ObjectIds.AggregateFunction_MaximumActualTime2,
-    Minimum = ObjectIds.AggregateFunction_Minimum,
-    Minimum2 = ObjectIds.AggregateFunction_Minimum2,
-    MinimumActualTime = ObjectIds.AggregateFunction_MinimumActualTime,
-    MinimumActualTime2 = ObjectIds.AggregateFunction_MinimumActualTime2,
-    NumberOfTransitions = ObjectIds.AggregateFunction_NumberOfTransitions,
-    PercentBad = ObjectIds.AggregateFunction_PercentBad,
-    PercentGood = ObjectIds.AggregateFunction_PercentGood,
-    Range = ObjectIds.AggregateFunction_Range,
-    Range2 = ObjectIds.AggregateFunction_Range2,
-    StandardDeviationPopulation = ObjectIds.AggregateFunction_StandardDeviationPopulation,
-    StandardDeviationSample = ObjectIds.AggregateFunction_StandardDeviationSample,
-    Start = ObjectIds.AggregateFunction_Start,
-    StartBound = ObjectIds.AggregateFunction_StartBound,
-    TimeAverage = ObjectIds.AggregateFunction_TimeAverage,
-    TimeAverage2 = ObjectIds.AggregateFunction_TimeAverage2,
-    Total = ObjectIds.AggregateFunction_Total,
-    Total2 = ObjectIds.AggregateFunction_Total2,
-    VariancePopulation = ObjectIds.AggregateFunction_VariancePopulation,
-    VarianceSample = ObjectIds.AggregateFunction_VarianceSample,
-    WorstQuality = ObjectIds.AggregateFunction_WorstQuality,
-    WorstQuality2 = ObjectIds.AggregateFunction_WorstQuality2
 }
 
 export function addAggregateSupport(addressSpace: AddressSpace) {
@@ -271,13 +225,13 @@ export function addAggregateSupport(addressSpace: AddressSpace) {
     addAggregateFunctionSupport(addressSpace, AggregateFunction.Interpolative);
     addAggregateFunctionSupport(addressSpace, AggregateFunction.Minimum);
     addAggregateFunctionSupport(addressSpace, AggregateFunction.Maximum);
+    addAggregateFunctionSupport(addressSpace, AggregateFunction.Average);
 
+    const addressSpaceInternal = (addressSpace as unknown) as AddressSpacePrivate;
+    addressSpaceInternal._readProcessedDetails = readProcessedDetails as any;
 }
 
-export function installAggregateConfigurationOptions(
-  node: UAVariable,
-  options: AggregateConfigurationOptionsEx
-) {
+export function installAggregateConfigurationOptions(node: UAVariable, options: AggregateConfigurationOptionsEx) {
     const nodePriv = node as any;
     const aggregateConfiguration = nodePriv.$historicalDataConfiguration.aggregateConfiguration;
     aggregateConfiguration.percentDataBad.setValueFromSource({ dataType: "Byte", value: options.percentDataBad });
@@ -298,11 +252,12 @@ export function installAggregateConfigurationOptions(
 }
 
 export function getAggregateConfiguration(node: BaseNode): AggregateConfigurationOptionsEx {
-
     const nodePriv = node as any;
 
     /* istanbul ignore next */
-    if (!nodePriv.$historicalDataConfiguration) { throw new Error("internal error"); }
+    if (!nodePriv.$historicalDataConfiguration) {
+        throw new Error("internal error");
+    }
     const aggregateConfiguration = nodePriv.$historicalDataConfiguration.aggregateConfiguration;
 
     // Beware ! Stepped value comes from Historical Configuration !

@@ -3,17 +3,19 @@
  */
 // tslint:disable:no-console
 import * as chalk from "chalk";
-import * as path from "path";
-import * as _ from "underscore";
+import { EventEmitter } from "events";
+import { basename } from "path";
 import { format } from "util";
 
 const debugFlags: { [id: string]: boolean } = {};
 
-const maxLines = (process.env && process.env.NODEOPCUA_DEBUG_MAXLINE_PER_MESSAGE) ?
-    parseInt(process.env.NODEOPCUA_DEBUG_MAXLINE_PER_MESSAGE, 10) : 25;
+const maxLines =
+    process.env && process.env.NODEOPCUA_DEBUG_MAXLINE_PER_MESSAGE
+        ? parseInt(process.env.NODEOPCUA_DEBUG_MAXLINE_PER_MESSAGE, 10)
+        : 25;
 
-function extractBasename(name: string) {
-    return path.basename(name).replace(/\.(js|ts)$/, "");
+function extractBasename(name: string): string {
+    return basename(name).replace(/\.(js|ts)$/, "");
 }
 
 function w(str: string, l: number): string {
@@ -22,7 +24,7 @@ function w(str: string, l: number): string {
 
 export function setDebugFlag(scriptFullPath: string, flag: boolean) {
     const filename = extractBasename(scriptFullPath);
-    if (process.env.DEBUG && process.env.DEBUG.length > 1) {
+    if (process.env.DEBUG && process.env.DEBUG.length > 1 && flag) {
         const decoratedFilename = chalk.yellow(w(filename, 60));
         console.log(
             " Setting debug for ",
@@ -38,20 +40,22 @@ export function checkDebugFlag(scriptFullPath: string): boolean {
     const filename = extractBasename(scriptFullPath);
     let doDebug: boolean = debugFlags[filename];
     if (process && process.env && process.env.DEBUG && !debugFlags.hasOwnProperty(filename)) {
-        doDebug = (process.env.DEBUG.indexOf(filename) >= 0 || process.env.DEBUG.indexOf("ALL") >= 0);
+        doDebug = process.env.DEBUG.indexOf(filename) >= 0 || process.env.DEBUG.indexOf("ALL") >= 0;
         setDebugFlag(filename, doDebug);
     }
     return doDebug;
 }
 
 /**
- * file_line return a 51 caracter string
+ * file_line return a 51 character string
  * @param filename
  * @param callerLine
  */
-function file_line(mode: "E" | "D", filename: string, callerLine: number): string {
-    const d = (new Date()).toISOString().substr(11);
-    if (mode === "D") {
+function file_line(mode: "E" | "D" | "W", filename: string, callerLine: number): string {
+    const d = new Date().toISOString().substr(11);
+    if (mode === "W") {
+        return chalk.bgCyan.white(w(d, 14) + ":" + w(filename, 30) + ":" + w(callerLine.toString(), 5));
+    } else if (mode === "D") {
         return chalk.bgWhite.cyan(w(d, 14) + ":" + w(filename, 30) + ":" + w(callerLine.toString(), 5));
     } else {
         return chalk.bgRed.white(w(d, 14) + ":" + w(filename, 30) + ":" + w(callerLine.toString(), 5));
@@ -60,7 +64,7 @@ function file_line(mode: "E" | "D", filename: string, callerLine: number): strin
 
 const continuation = w(" ...                                                            ", 51);
 
-function buildPrefix(mode: "E" | "D"): string {
+function buildPrefix(mode: "E" | "D" | "W"): string {
     const stack: string = new Error("").stack || "";
     // caller line number
     const l: string[] = stack.split("\n")[4].split(":");
@@ -69,9 +73,8 @@ function buildPrefix(mode: "E" | "D"): string {
     return file_line(mode, filename, callerLine);
 }
 
-function dump(mode: "E" | "D", args1: [any?, ...any[]]) {
-
-    const a2 = _.values(args1) as [string, ...string[]];
+function dump(mode: "E" | "D" | "W", args1: [any?, ...any[]]) {
+    const a2 = Object.values(args1) as [string, ...string[]];
     const output = format.apply(null, a2);
     let a1 = [buildPrefix(mode)];
 
@@ -87,7 +90,7 @@ function dump(mode: "E" | "D", args1: [any?, ...any[]]) {
             break;
         }
     }
-
+    return output;
 }
 
 /**
@@ -98,7 +101,6 @@ function dump(mode: "E" | "D", args1: [any?, ...any[]]) {
  *
  */
 export function make_debugLog(scriptFullPath: string): (...arg: any[]) => void {
-
     const filename = extractBasename(scriptFullPath);
 
     function debugLogFunc(...args: [any?, ...any[]]) {
@@ -110,10 +112,28 @@ export function make_debugLog(scriptFullPath: string): (...arg: any[]) => void {
     return debugLogFunc;
 }
 
-export function make_errorLog(context: string): (...arg: any[]) => void {
+export class MessageLogger extends EventEmitter {
+    constructor() {
+        super();
+    }
+    public on(eventName: "warningMessage" | "errorMessage", eventHandler: any): this {
+        return super.on(eventName, eventHandler);
+    }
+}
+export const messageLogger = new MessageLogger();
 
+export function make_errorLog(context: string): (...arg: any[]) => void {
     function errorLogFunc(...args: [any?, ...any[]]) {
-        dump("E", args);
+        const output = dump("E", args);
+        messageLogger.emit("errorMessage", output);
+    }
+    return errorLogFunc;
+}
+
+export function make_warningLog(context: string): (...arg: any[]) => void {
+    function errorLogFunc(...args: [any?, ...any[]]) {
+        const output = dump("W", args);
+        messageLogger.emit("warningMessage", output);
     }
 
     return errorLogFunc;

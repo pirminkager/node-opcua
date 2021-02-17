@@ -1,44 +1,38 @@
 "use strict";
 const should = require("should");
-const assert = require("node-opcua-assert").assert;
 const async = require("async");
-const _ = require("underscore");
+const chalk = require("chalk");
+
+const { OPCUAClient, OPCUAServer, SessionContext } = require("node-opcua");
+const context = SessionContext.defaultContext;
+
+const { perform_operation_on_client_session } = require("../../test_helpers/perform_operation_on_client_session");
+
+const { makeBoiler } = require("node-opcua-address-space/testHelpers");
+const { UAProxyManager } = require("node-opcua-client-proxy");
 
 
-const opcua = require("node-opcua");
-const OPCUAClient = opcua.OPCUAClient;
-const OPCUAServer = opcua.OPCUAServer;
-
-const context = opcua.SessionContext.defaultContext;
-
-const perform_operation_on_client_session = require("../../test_helpers/perform_operation_on_client_session").perform_operation_on_client_session;
-
-const makeBoiler = require("node-opcua-address-space").makeBoiler;
-
-
-const doDebug = false;
-
-const UAProxyManager = require("node-opcua-client-proxy").UAProxyManager;
+const { make_debugLog, checkDebugFlag} = require("node-opcua-debug");
+const debugLog = make_debugLog("TEST");
+const doDebug = checkDebugFlag("TEST");
 
 const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
+describe("testing monitoring Executable flags on methods", function() {
 
-describe("testing monitoring Executable flags on methods", function () {
 
-
-    this.timeout(Math.max(60000, this._timeout));
+    this.timeout(Math.max(60000, this.timeout()));
 
     let server, client, endpointUrl;
 
     let boiler_on_server;
-    let port = 20000;
-    before(function (done) {
-        port += 1;
+    const port = 2006;
+    before(function(done) {
 
-        const options = {port: port};
+        const options = { port };
         server = new OPCUAServer(options);
 
-        server.on("post_initialize", function () {
-            boiler_on_server = makeBoiler(server.engine.addressSpace, {browseName: "Boiler#1"});
+        server.on("post_initialize", function() {
+            boiler_on_server = makeBoiler(server.engine.addressSpace, { browseName: "Boiler#1" });
 
             const haltMethod = boiler_on_server.simulation.getMethodByName("Halt");
             const resetMethod = boiler_on_server.simulation.getMethodByName("Reset");
@@ -52,38 +46,37 @@ describe("testing monitoring Executable flags on methods", function () {
 
             boiler_on_server = boiler_on_server.nodeId;
         });
-        server.start(function (err) {
+        server.start(function(err) {
 
-            endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl;
+            endpointUrl = server.getEndpointUrl();
 
             if (err) {
                 return done(err);
             }
-            assert(server.engine.status === "initialized");
             done();
         });
     });
 
-    beforeEach(function (done) {
+    beforeEach(function(done) {
         client = OPCUAClient.create();
         done();
     });
 
-    afterEach(function (done) {
+    afterEach(function(done) {
         client = null;
         done();
     });
 
-    after(function (done) {
+    after(function(done) {
         server.shutdown(done);
     });
 
 
-    it("#187 ...... ", function (done) {
+    it("#187 ...... ", function(done) {
 
         let proxyManager;
 
-        perform_operation_on_client_session(client, endpointUrl, function (session, inner_done) {
+        perform_operation_on_client_session(client, endpointUrl, function(session, inner_done) {
 
             proxyManager = new UAProxyManager(session);
             const nodeId = boiler_on_server;
@@ -92,23 +85,22 @@ describe("testing monitoring Executable flags on methods", function () {
             let boiler;
             async.series([
 
-                function (callback) {
+                function(callback) {
                     proxyManager.start(callback);
                 },
 
-                function (callback) {
-                    //xx var smType = "BoilerStateMachineType";
+                function(callback) {
                     const smType = "ProgramStateMachineType";
-                    proxyManager.getStateMachineType(smType, function (err, obj) {
+                    proxyManager.getStateMachineType(smType, function(err, obj) {
 
                         if (!err) {
 
                             if (doDebug) {
-                                console.log("InitialState = ", obj.initialState ? obj.initialState.toString() : "<null>");
-                                console.log("States       = ", obj.states.map(function (state) {
+                                debugLog("InitialState = ", obj.initialState ? obj.initialState.toString() : "<null>");
+                                debugLog("States       = ", obj.states.map(function(state) {
                                     return state.browseName.toString();
                                 }));
-                                console.log("Transitions  = ", obj.transitions.map(function (transition) {
+                                debugLog("Transitions  = ", obj.transitions.map(function(transition) {
                                     return transition.browseName.toString();
                                 }));
                             }
@@ -117,54 +109,53 @@ describe("testing monitoring Executable flags on methods", function () {
                         callback(err);
                     });
                 },
-                function (callback) {
+                function(callback) {
 
                     if (doDebug) {
-                        console.log(" NodeId = ", nodeId.toString());
+                        debugLog(" NodeId = ", nodeId.toString());
                     }
-                    proxyManager.getObject(nodeId, function (err, data) {
+                    proxyManager.getObject(nodeId, function(err, data) {
                         if (!err) {
-
                             boiler = data;
-                            //xx console.log("xXXXXX",hvac);
-
                             if (doDebug) {
-                                console.log("Current State", boiler.simulation.currentState.toString());
+                                debugLog("Current State", boiler.simulation.currentState.toString());
                             }
-                            boiler.simulation.currentState.readValue(function (err, value) {
+                            boiler.simulation.currentState.readValue(function(err, value) {
                                 if (doDebug) {
-                                    console.log(" Interior temperature updated ...", value.toString());
+                                    debugLog(" Interior temperature updated ...", value.toString());
                                 }
                                 callback(err);
                             });
-
                             return;
                         }
                         callback(err);
                     });
                 },
-                function (callback) {
-                    boiler.simulation.halt([], function (err) {
+                function(callback) {
+                    boiler.simulation.halt([], function(err) {
                         if (doDebug) {
-                            console.log(" HALT => ", err);
+                            debugLog(" HALT => ", err);
                         }
                         callback();
                     });
                 },
-                function (callback) {
-                    boiler.simulation.reset([], function (err) {
+                function(callback) {
+                    boiler.simulation.reset([], function(err) {
                         if (doDebug) {
-                            console.log(" Reset => ", err);
+                            debugLog(" Reset => ", err);
                         }
                         callback();
                     });
                 },
 
-                function (callback) {
+                function(callback) {
                     setTimeout(callback, 500);
                 },
 
-                function (callback) {
+                function(callback) {
+
+                    debugLog(boiler.simulation.currentState.toString());
+
                     boiler.simulation.currentState.dataValue.value.value.text.should.eql("Ready");
 
                     boiler.simulation.$methods["start"].executableFlag.should.eql(true, "When system is Ready, start method shall be executable");
@@ -173,23 +164,23 @@ describe("testing monitoring Executable flags on methods", function () {
 
 
                     if (doDebug) {
-                        console.log(chalk.bgWhite.cyan("    ====================================================================== STARTING .... "));
+                        debugLog(chalk.bgWhite.cyan("    ====================================================================== STARTING .... "));
                     }
-                    boiler.simulation.start([], function (err) {
+                    boiler.simulation.start([], function(err) {
                         if (doDebug) {
-                            console.log(" start => ", err);
+                            debugLog(" start => ", err);
                         }
                         callback();
                     });
                 },
 
-                function (callback) {
+                function(callback) {
                     setTimeout(callback, 500);
                 },
 
-                function (callback) {
+                function(callback) {
                     if (doDebug) {
-                        console.log(chalk.bgWhite.cyan("    ====================================================================== STARTED .... "));
+                        debugLog(chalk.bgWhite.cyan("    ====================================================================== STARTED .... "));
                     }
 
                     boiler.simulation.currentState.dataValue.value.value.text.should.eql("Running");
@@ -197,15 +188,15 @@ describe("testing monitoring Executable flags on methods", function () {
                     boiler.simulation.$methods["suspend"].executableFlag.should.eql(true, "when system is Running, suspend method shall be executable");
                     boiler.simulation.$methods["resume"].executableFlag.should.eql(false, "when system is Running, resume method shall NOT be executable");
 
-                    boiler.simulation.suspend([], function (err) {
+                    boiler.simulation.suspend([], function(err) {
                         if (doDebug) {
-                            console.log(" start => ", err);
+                            debugLog(" start => ", err);
                         }
                         callback();
                     });
                 },
 
-                function (callback) {
+                function(callback) {
                     proxyManager.stop(callback);
                 }
 

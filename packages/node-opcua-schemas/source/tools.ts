@@ -67,6 +67,24 @@ export function getOrCreateStructuredTypeSchema(
         structuredType.baseType = _removeNamespacePart(structuredType.baseType);
         structuredType.baseType = structuredType.baseType ? structuredType.baseType : "ExtensionObject";
 
+        const baseSchema = typeDictionary.getStructuredTypesRawByName(structuredType.baseType);
+
+        // remove redundant fields
+        // Note :some file do no thave SourceType property and may be replicated here ..
+        //       but they belongs to the base class and shall be remove/
+        //       For instance DataTypeSchemaHeader => UABinaryFileDataType
+        if (baseSchema && baseSchema.fields && baseSchema.name !== "ExtensionObject") {
+            structuredType.fields = structuredType.fields.filter((field)=> {
+                const name = field.name;
+                const index = baseSchema.fields.findIndex((f)=> f.name === name);
+                if(index>=0) {
+                    // tslint:disable-next-line: no-console
+                    console.log("Warning : find duplicated field from base structure : field name ", name, 
+                            "baseSchema = ",baseSchema.name, "schema =", structuredType.name);
+                }
+                return index < 0;
+            });
+        }
         for (const field of structuredType.fields) {
             const fieldType = field.fieldType;
             if (!field.schema) {
@@ -85,7 +103,9 @@ export function getOrCreateStructuredTypeSchema(
                         } else {
                             // must be a structure then ....
                             field.category = FieldCategory.complex;
-                            field.schema = _getOrCreateStructuredTypeSchema(fieldTypeName);
+                            const schema1 = dataTypeFactory.getStructuredTypeSchema(fieldTypeName);
+                            field.schema = schema1;
+                            // _getOrCreateStructuredTypeSchema(fieldTypeName);
                             if (!field.schema) {
                                 // tslint:disable-next-line:no-console
                                 console.log("cannot find schema for ", fieldTypeName);
@@ -97,9 +117,9 @@ export function getOrCreateStructuredTypeSchema(
                         if (hasBuiltInType(fieldTypeName)) {
                             field.category = FieldCategory.basic;
                             field.schema = getBuildInType(fieldTypeName);
-                        } else if (hasStructuredType(fieldTypeName)) {
+                        } else if (dataTypeFactory.hasStructuredType(fieldTypeName)) {
                             field.category = FieldCategory.complex;
-                            field.schema = getStructuredTypeSchema(fieldTypeName);
+                            field.schema = dataTypeFactory.getStructuredTypeSchema(fieldTypeName);
 
                         } else {
                             field.category = FieldCategory.basic;
@@ -129,6 +149,17 @@ export function getOrCreateStructuredTypeSchema(
                         }
                         field.category = FieldCategory.basic;
                         break;
+                    default:
+                        if (dataTypeFactory.hasEnumeration(fieldTypeName)) {
+                            field.category = FieldCategory.enumeration;
+                            const enumeratedType = dataTypeFactory.getEnumeration(fieldTypeName);
+                            field.schema = enumeratedType;
+                        } else if (dataTypeFactory.hasStructuredType(fieldTypeName)) {
+                            field.category = FieldCategory.complex;
+                            const schema1 = dataTypeFactory.getStructuredTypeSchema(fieldTypeName);
+                            field.schema = schema1;
+                        }
+                        break;
                 }
             }
         }
@@ -136,7 +167,11 @@ export function getOrCreateStructuredTypeSchema(
         const schema = buildStructuredType(structuredType as StructuredTypeOptions);
         const ids = idProvider.getDataTypeAndEncodingId(schema.name);
         if (!ids) {
-            throw new Error("Cannot find getDataTypeAndEncodingId for " + schema.name);
+            // this may happen if the type is abstract or if the type referes to a internal ExtnsionObject
+            // that can only exists inside an other extension object.this Type of extension object cannot 
+            // instantiated as standalone object and do not have encoding nodeIds...
+            const Constructor = createDynamicObjectConstructor(schema, dataTypeFactory) as ConstructorFuncWithSchema;
+            return schema;
         }
         schema.id = ids.dataTypeNodeId;
         schema.dataTypeNodeId = ids.dataTypeNodeId;

@@ -1,36 +1,28 @@
 "use strict";
 
-const _ = require("underscore");
-const assert = require("node-opcua-assert").assert;
+const { assert } = require("node-opcua-assert");
 require("should");
 const chalk = require("chalk");
+const os = require("os");
+const { prepareFQDN, getFullyQualifiedDomainName } = require("node-opcua-hostname");
+const { callbackify } = require("util");
+const { checkDebugFlag, make_debugLog } = require("node-opcua-debug");
 const {
-    prepareFQDN,
-    getFullyQualifiedDomainName
-} = require("node-opcua-hostname");
-const {
-    callbackify
-} = require("util");
-const {
-    checkDebugFlag,
-    make_debugLog
-} = require("node-opcua-debug");
-
-const opcua = require("node-opcua");
-
-const OPCUAServer = opcua.OPCUAServer;
-const StatusCodes = opcua.StatusCodes;
-const Variant = opcua.Variant;
-const DataType = opcua.DataType;
-const DataValue = opcua.DataValue;
-const is_valid_endpointUrl = opcua.is_valid_endpointUrl;
+    nodesets,
+    standardUnits,
+    makeApplicationUrn,
+    OPCUAServer,
+    StatusCodes,
+    Variant,
+    DataType,
+    DataValue,
+    is_valid_endpointUrl
+} = require("node-opcua");
 
 const doDebug = checkDebugFlag(__filename);
 const debugLog = make_debugLog(__filename);
 
-const address_space_for_conformance_testing = require("node-opcua-address-space-for-conformance-testing");
-const build_address_space_for_conformance_testing = address_space_for_conformance_testing.build_address_space_for_conformance_testing;
-
+const { build_address_space_for_conformance_testing } = require("node-opcua-address-space-for-conformance-testing");
 
 /**
  * add a fake analog data item for testing
@@ -39,8 +31,7 @@ const build_address_space_for_conformance_testing = address_space_for_conformanc
  * @param parentNode
  */
 function addTestUAAnalogItem(parentNode) {
-
-//xx    assert(parentNode instanceof opcua.BaseNode);
+    //xx    assert(parentNode instanceof BaseNode);
 
     const addressSpace = parentNode.addressSpace;
     const namespace = addressSpace.getOwnNamespace();
@@ -54,7 +45,7 @@ function addTestUAAnalogItem(parentNode) {
         valuePrecision: 0.5,
         engineeringUnitsRange: { low: 100, high: 200 },
         instrumentRange: { low: -100, high: +200 },
-        engineeringUnits: opcua.standardUnits.degree_celsius,
+        engineeringUnits: standardUnits.degree_celsius,
         dataType: "Double",
         value: {
             get: function () {
@@ -62,13 +53,10 @@ function addTestUAAnalogItem(parentNode) {
             }
         }
     });
-
 }
-
 
 const userManager = {
     isValidUser: function (userName, password) {
-
         if (userName === "user1" && password === "password1") {
             return true;
         }
@@ -97,23 +85,23 @@ const userManager = {
  * @return {OPCUAServer}
  */
 function build_server_with_temperature_device(options, done) {
-
-    assert(_.isFunction(done, "expecting a callback function"));
-    assert(typeof opcua.nodesets.standard_nodeset_file === "string");
+    assert(typeof done, "expecting a callback function" === "function");
+    assert(typeof nodesets.standard === "string");
 
     // use mini_nodeset_filename for speed up if not otherwise specified
-    options.nodeset_filename = options.nodeset_filename ||
-      [
-          opcua.nodesets.standard_nodeset_file
-      ];
+    options.nodeset_filename = options.nodeset_filename || [nodesets.standard];
 
-    options.userManager = userManager;
+    options.userManager = options.userManager || userManager;
+
+    options.serverInfo = options.serverInfo ||
+        {
+            applicationUri: makeApplicationUrn(os.hostname(), "NodeOPCUA-Server")
+        };
 
     const server = new OPCUAServer(options);
     // we will connect to first server end point
 
     callbackify(prepareFQDN)((err) => {
-
         if (err) {
             console.log(err);
         }
@@ -123,16 +111,14 @@ function build_server_with_temperature_device(options, done) {
 }
 
 function _build_server_with_temperature_device(server, options, done) {
-
     //xx console.log("xxx building server with temperature device");
 
     server.on("session_closed", function (session, reason) {
-        debugLog(" server_with_temperature_device has closed a session :",reason);
-        debugLog(chalk.cyan("              session name: "),session.sessionName.toString());
+        debugLog(" server_with_temperature_device has closed a session :", reason);
+        debugLog(chalk.cyan("              session name: "), session.sessionName.toString());
     });
 
     server.on("post_initialize", function () {
-
         const addressSpace = server.engine.addressSpace;
 
         const namespace = addressSpace.getOwnNamespace();
@@ -189,10 +175,9 @@ function _build_server_with_temperature_device(server, options, done) {
         });
         assert(server.pumpSpeed.nodeId.toString() === "ns=1;" + pumpSpeedId);
 
-        const endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl;
+        const endpointUrl = server.getEndpointUrl();
         debugLog("endpointUrl", endpointUrl);
         is_valid_endpointUrl(endpointUrl).should.equal(true);
-
 
         if (options.add_simulation) {
             build_address_space_for_conformance_testing(server.engine.addressSpace);
@@ -200,7 +185,6 @@ function _build_server_with_temperature_device(server, options, done) {
 
         // add a Analog Data Item
         addTestUAAnalogItem(myDevices);
-
 
         // add a variable that can be written asynchronously
         const asyncWriteNodeId = "s=AsynchronousVariable";
@@ -215,7 +199,6 @@ function _build_server_with_temperature_device(server, options, done) {
             value: {
                 // asynchronous read
                 refreshFunc: function (callback) {
-
                     const dataValue = new DataValue({
                         value: {
                             dataType: DataType.Double,
@@ -235,9 +218,7 @@ function _build_server_with_temperature_device(server, options, done) {
                     return StatusCodes.GoodCompletesAsynchronously;
                 }
             }
-
         });
-
 
         // add a variable that can be written asynchronously and that supports TimeStamps and StatusCodes
         const asyncWriteFullNodeId = "s=AsynchronousFullVariable";
@@ -254,7 +235,7 @@ function _build_server_with_temperature_device(server, options, done) {
             value: {
                 // asynchronous read
                 timestamped_get: function (callback) {
-                    assert(_.isFunction(callback), "callback must be a function");
+                    assert(typeof callback === "function", "callback must be a function");
                     setTimeout(function () {
                         callback(null, asyncWriteFull_dataValue);
                     }, 100);
@@ -264,7 +245,7 @@ function _build_server_with_temperature_device(server, options, done) {
                 // as we want to control and deal with the dataValue provided by the client write
                 // This will allow us to handle more specifically timestamps and statusCodes
                 timestamped_set: function (dataValue, callback) {
-                    assert(_.isFunction(callback), "callback must be a function");
+                    assert(typeof callback === "function", "callback must be a function");
                     //xxx console.log(chalk.cyan(" DATA VALUE !!!"), chalk.yellow(dataValue.toString()));
                     setTimeout(function () {
                         asyncWriteFull_dataValue = new DataValue(dataValue);
@@ -272,24 +253,18 @@ function _build_server_with_temperature_device(server, options, done) {
                     }, 500);
                 }
             }
-
         });
-
     });
 
     server.set_point_temperature = 20.0;
 
     function start(done) {
         server.start(function (err) {
-
             if (err) {
                 return done(err);
             }
 
-            assert(server.engine.status === "initialized");
-
             done();
-
         });
     }
 

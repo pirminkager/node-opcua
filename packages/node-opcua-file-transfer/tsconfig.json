@@ -3,7 +3,8 @@
   "compilerOptions": {
     "rootDir": "source",
     "outDir": "dist",
-    "composite": true
+    "composite": true,
+            "incremental": true
   },
   "include": [
     "source/**/*.ts"
@@ -68,6 +69,9 @@
     },
     {
       "path": "../node-opcua-leak-detector"
+    },
+    {
+      "path": "../node-opcua-constants"
     }
   ],
   "exclude": [

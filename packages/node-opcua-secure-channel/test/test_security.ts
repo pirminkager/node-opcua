@@ -2,6 +2,7 @@
 // or compile with  tsc  -t es2017 -m commonjs test\test_security.ts  --outdir toto
 import * as async from "async";
 import * as fs from "fs";
+import * as path from "path";
 import { Socket } from "net";
 import { OPCUACertificateManager } from "node-opcua-certificate-manager";
 import {
@@ -17,7 +18,6 @@ import {
 import { EndpointDescription } from "node-opcua-service-endpoints";
 import { StatusCode } from "node-opcua-status-code";
 import { DirectTransport } from "node-opcua-transport/dist/test_helpers";
-import * as path from "path";
 import * as should from "should";
 import {
     ClientSecureChannelLayer,
@@ -40,14 +40,17 @@ interface TestParam {
     shouldFailAtClientConnection?: boolean;
 }
 
-const certificateFolder = path.join(__dirname, "../../../packages/node-opcua-end2end-test/certificates");
+const certificateFolder = path.join(__dirname, "../../../packages/node-opcua-samples/certificates");
+fs.existsSync(certificateFolder).should.eql(true, "expecting certificate store at " + certificateFolder);
 
 // tslint:disable:no-var-requires
 const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("Testing secure client and server connection", () => {
-
     const certificateManager = new OPCUACertificateManager({});
+
     before(async () => {
+        certificateManager.referenceCounter++;
+        await certificateManager.initialize();
         const issuerCertificateFile = path.join(certificateFolder, "CA/public/cacert.pem");
         const issuerCertificate = readCertificate(issuerCertificateFile);
         await certificateManager.addIssuer(issuerCertificate);
@@ -57,26 +60,26 @@ describe("Testing secure client and server connection", () => {
         await certificateManager.addRevocationList(crl);
     });
 
+    after(() => {
+        certificateManager.referenceCounter--;
+        certificateManager.dispose();
+    });
+
     let directTransport: DirectTransport;
     beforeEach((done) => {
-
         directTransport = new DirectTransport();
         directTransport.initialize(done);
-
     });
     afterEach((done) => {
         directTransport.shutdown(done);
     });
 
     function performTest(param: TestParam, done: (err?: Error) => void) {
-
         const parentS: ServerSecureChannelParent = {
-
             certificateManager,
 
             // tslint:disable-next-line:object-literal-shorthand
             getCertificate: function () {
-
                 const chain = this.getCertificateChain();
                 const firstCertificateInChain = split_der(chain)[0];
                 return firstCertificateInChain!;
@@ -86,7 +89,11 @@ describe("Testing secure client and server connection", () => {
                 return param.serverCertificate!;
             },
 
-            getEndpointDescription: (securityMode: MessageSecurityMode, securityPolicy: SecurityPolicy) => {
+            getEndpointDescription: (
+                securityMode: MessageSecurityMode,
+                securityPolicy: SecurityPolicy,
+                endpointUri: string | null
+            ) => {
                 return new EndpointDescription({});
             },
 
@@ -105,7 +112,6 @@ describe("Testing secure client and server connection", () => {
         const transportServer = (directTransport.server as any) as Socket;
 
         const parentC: ClientSecureChannelParent = {
-
             // tslint:disable-next-line:object-literal-shorthand
             getCertificate: function () {
                 const chain = this.getCertificateChain();
@@ -126,7 +132,6 @@ describe("Testing secure client and server connection", () => {
             connectionStrategy: {
                 maxDelay: 100,
                 maxRetry: 0
-
             },
             defaultSecureTokenLifetime: 1000000,
             parent: parentC,
@@ -137,75 +142,67 @@ describe("Testing secure client and server connection", () => {
             transportTimeout: 0
         });
 
-        serverSChannel.init(transportServer, (err?: Error) => {
+        serverSChannel.init(transportServer, (err?: Error) => {});
 
-        });
-
-        async.series([
-            (callback: SimpleCallback) => {
-                serverSChannel.setSecurity(param.securityMode, param.securityPolicy);
-                if (param.clientCertificate) {
-                    const certMan = serverSChannel.certificateManager;
-                    certMan.trustCertificate(param.clientCertificate,
-                        (err?: Error | null) => {
+        async.series(
+            [
+                (callback: SimpleCallback) => {
+                    serverSChannel.setSecurity(param.securityMode, param.securityPolicy);
+                    if (param.clientCertificate) {
+                        const certMan = serverSChannel.certificateManager;
+                        certMan.trustCertificate(param.clientCertificate, (err?: Error | null) => {
                             callback(err!);
                         });
-                } else {
-                    callback();
-                }
-            },
-
-            (callback: SimpleCallback) => {
-
-                clientChannel.create("fake://foobar:123", (err?: Error) => {
-
-                    if (param.shouldFailAtClientConnection) {
-                        if (!err) {
-                            return callback(new Error(" Should have failed here !"));
-                        }
-                        callback();
-
                     } else {
-                        if (err) {
-                            return callback(err);
-                        }
                         callback();
                     }
-                });
-            },
+                },
 
-            (callback: SimpleCallback) => {
-                if (param.shouldFailAtClientConnection) {
-                    return callback();
+                (callback: SimpleCallback) => {
+                    clientChannel.create("fake://foobar:123", (err?: Error) => {
+                        if (param.shouldFailAtClientConnection) {
+                            if (!err) {
+                                return callback(new Error(" Should have failed here !"));
+                            }
+                            callback();
+                        } else {
+                            if (err) {
+                                return callback(err);
+                            }
+                            callback();
+                        }
+                    });
+                },
+
+                (callback: SimpleCallback) => {
+                    if (param.shouldFailAtClientConnection) {
+                        return callback();
+                    }
+                    clientChannel.close(callback);
+                },
+
+                (callback: SimpleCallback) => {
+                    serverSChannel.close();
+                    serverSChannel.dispose();
+                    callback();
                 }
-                clientChannel.close(callback);
-            },
-
-            (callback: SimpleCallback) => {
-                serverSChannel.close();
-                serverSChannel.dispose();
-                callback();
-            }
-        ], (err) => done(err!));
-
+            ],
+            (err) => done(err!)
+        );
     }
 
     it("client & server channel  - no security ", (done) => {
-
-        performTest({
-            securityMode: MessageSecurityMode.None,
-            securityPolicy: SecurityPolicy.None,
-            serverCertificate: undefined
-        }, done);
-
+        performTest(
+            {
+                securityMode: MessageSecurityMode.None,
+                securityPolicy: SecurityPolicy.None,
+                serverCertificate: undefined
+            },
+            done
+        );
     });
 
-    function performTest1(
-        sizeC: number,
-        sizeS: number,
-        securityPolicy: SecurityPolicy,
-        done: (err?: Error) => void
-    ): void {
+    function performTest1(sizeC: number, sizeS: number, securityPolicy: SecurityPolicy, done: (err?: Error) => void): void {
         function m(file: string): string {
             const fullpathname = path.join(certificateFolder, file);
             if (!fs.existsSync(fullpathname)) {
@@ -224,16 +221,18 @@ describe("Testing secure client and server connection", () => {
         const clientCertificate = readCertificate(clientCertificateFile);
         const clientPrivateKey = readKeyPem(clientPrivateKeyFile);
 
-        performTest({
-            clientCertificate,
-            clientPrivateKey,
-            securityMode: MessageSecurityMode.Sign,
-            securityPolicy,
-            serverCertificate,
-            serverPrivateKey
-            //   shouldFailAtClientConnection: false,
-        }, done);
-
+        performTest(
+            {
+                clientCertificate,
+                clientPrivateKey,
+                securityMode: MessageSecurityMode.Sign,
+                securityPolicy,
+                serverCertificate,
+                serverPrivateKey
+                //   shouldFailAtClientConnection: false,
+            },
+            done
+        );
     }
 
     it("client & server channel  - with security ", (done) => {
@@ -254,12 +253,10 @@ describe("Testing secure client and server connection", () => {
                 SecurityPolicy.Basic256Sha256,
                 SecurityPolicy.Basic256
             ]) {
-
                 it("client & server channel  - " + sizeC + " " + sizeS + " " + policy, (done) => {
                     performTest1(sizeC, sizeS, policy, done);
                 });
             }
         }
     }
-
 });

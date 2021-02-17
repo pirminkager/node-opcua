@@ -14,49 +14,49 @@ import { NodeId, NodeIdLike } from "node-opcua-nodeid";
 import { IBasicSession } from "node-opcua-pseudo-session";
 import { ErrorCallback } from "node-opcua-status-code";
 import {
-    BrowseDescription, BrowseDescriptionOptions, BrowseRequest, BrowseResponse, BrowseResult
+    BrowseDescriptionOptions,
+    BrowseResult
 } from "node-opcua-service-browse";
-import {
-    CallMethodRequest, CallMethodRequestOptions, CallMethodResult
-} from "node-opcua-service-call";
+import { CallMethodRequest, CallMethodRequestOptions, CallMethodResult } from "node-opcua-service-call";
 import { EndpointDescription } from "node-opcua-service-endpoints";
 import { HistoryReadResult } from "node-opcua-service-history";
-import {
-    QueryFirstRequest, QueryFirstRequestOptions, QueryFirstResponse
-} from "node-opcua-service-query";
-import {
-    ReadValueId, ReadValueIdOptions
-} from "node-opcua-service-read";
+import { QueryFirstRequest, QueryFirstRequestOptions, QueryFirstResponse } from "node-opcua-service-query";
+import { ReadValueId, ReadValueIdOptions } from "node-opcua-service-read";
 import {
     CreateMonitoredItemsRequest,
-    CreateMonitoredItemsRequestOptions, CreateMonitoredItemsResponse,
+    CreateMonitoredItemsRequestOptions,
+    CreateMonitoredItemsResponse,
     CreateSubscriptionRequest,
-    CreateSubscriptionRequestOptions, CreateSubscriptionResponse,
+    CreateSubscriptionRequestOptions,
+    CreateSubscriptionResponse,
     DeleteMonitoredItemsRequest,
     DeleteMonitoredItemsRequestOptions,
+    DeleteMonitoredItemsResponse,
     DeleteSubscriptionsRequest,
-    DeleteSubscriptionsRequestOptions, DeleteSubscriptionsResponse,
+    DeleteSubscriptionsRequestOptions,
+    DeleteSubscriptionsResponse,
     ModifyMonitoredItemsRequest,
-    ModifyMonitoredItemsRequestOptions, ModifyMonitoredItemsResponse,
+    ModifyMonitoredItemsRequestOptions,
+    ModifyMonitoredItemsResponse,
     ModifySubscriptionRequest,
-    ModifySubscriptionRequestOptions, ModifySubscriptionResponse,
-    PublishRequest, PublishResponse,
-    RepublishRequest, RepublishResponse,
-    SetMonitoringModeRequest, SetMonitoringModeRequestOptions,
+    ModifySubscriptionRequestOptions,
+    ModifySubscriptionResponse,
+    PublishRequest,
+    PublishResponse,
+    RepublishRequest,
+    RepublishResponse,
+    SetMonitoringModeRequest,
+    SetMonitoringModeRequestOptions,
     SetMonitoringModeResponse,
     TransferSubscriptionsRequest,
-    TransferSubscriptionsRequestOptions, TransferSubscriptionsResponse
+    TransferSubscriptionsRequestOptions,
+    TransferSubscriptionsResponse
 } from "node-opcua-service-subscription";
-import {
-    BrowsePath, BrowsePathResult
-} from "node-opcua-service-translate-browse-path";
-import {
-    WriteValue, WriteValueOptions
-} from "node-opcua-service-write";
+import { BrowsePath, BrowsePathResult } from "node-opcua-service-translate-browse-path";
+import { WriteValue, WriteValueOptions } from "node-opcua-service-write";
 import { StatusCode } from "node-opcua-status-code";
 import { DataType, Variant } from "node-opcua-variant";
 import { Callback } from "node-opcua-status-code";
-
 
 import { ClientSubscription } from "./client_subscription";
 
@@ -84,8 +84,6 @@ export interface CreateSubscriptionOptions {
 }
 
 export type BrowseDescriptionLike = string | BrowseDescriptionOptions;
-export type ReadValueIdLike = ReadValueIdOptions;
-export type WriteValueLike = WriteValueOptions;
 export type DeleteMonitoredItemsRequestLike = DeleteMonitoredItemsRequestOptions;
 export type CreateSubscriptionRequestLike = CreateSubscriptionRequestOptions;
 export type DeleteSubscriptionsRequestLike = DeleteSubscriptionsRequestOptions;
@@ -101,12 +99,13 @@ export type SubscriptionId = number;
 import { ExtraDataTypeManager } from "node-opcua-client-dynamic-extension-object";
 import { ExtensionObject } from "node-opcua-extension-object";
 import { ArgumentDefinition, CallMethodRequestLike, MethodId } from "node-opcua-pseudo-session";
+import { AggregateFunction } from "node-opcua-constants";
+import { HistoryReadValueIdOptions } from "node-opcua-types";
 export { ExtraDataTypeManager } from "node-opcua-client-dynamic-extension-object";
 export { ExtensionObject } from "node-opcua-extension-object";
 export { ArgumentDefinition, CallMethodRequestLike, MethodId } from "node-opcua-pseudo-session";
 
 export interface ClientSessionBase {
-
     // properties
     /** the session Id */
     timeout: number;
@@ -159,12 +158,10 @@ export interface ClientSession extends EventEmitter {
     on(event: "session_restored", eventHandler: () => void): this;
 
     on(event: string | symbol, listener: (...args: any[]) => void): this;
-
 }
 
 // browse services
 export interface ClientSessionBrowseService {
-
     /**
      * the maximum number of reference that the server should return per browseResult
      * Continuous points will be return by server to allow retrieving remaining references
@@ -180,25 +177,13 @@ export interface ClientSessionBrowseService {
 
     browse(nodesToBrowse: BrowseDescriptionLike[]): Promise<BrowseResult[]>;
 
-    browseNext(
-        continuationPoint: Buffer,
-        releaseContinuationPoints: boolean,
-        callback: ResponseCallback<BrowseResult>): void;
+    browseNext(continuationPoint: Buffer, releaseContinuationPoints: boolean, callback: ResponseCallback<BrowseResult>): void;
 
-    browseNext(
-        continuationPoints: Buffer[],
-        releaseContinuationPoints: boolean,
-        callback: ResponseCallback<BrowseResult[]>): void;
+    browseNext(continuationPoints: Buffer[], releaseContinuationPoints: boolean, callback: ResponseCallback<BrowseResult[]>): void;
 
-    browseNext(
-        continuationPoint: Buffer,
-        releaseContinuationPoints: boolean
-    ): Promise<BrowseResult>;
+    browseNext(continuationPoint: Buffer, releaseContinuationPoints: boolean): Promise<BrowseResult>;
 
-    browseNext(
-        continuationPoints: Buffer[],
-        releaseContinuationPoints: boolean
-    ): Promise<BrowseResult[]>;
+    browseNext(continuationPoints: Buffer[], releaseContinuationPoints: boolean): Promise<BrowseResult[]>;
 }
 
 // translate browsePathTo NodeId services
@@ -210,24 +195,17 @@ export interface ClientSessionTranslateBrowsePathService {
     translateBrowsePath(browsePath: BrowsePath): Promise<BrowsePathResult>;
 
     translateBrowsePath(browsePaths: BrowsePath[]): Promise<BrowsePathResult[]>;
-
 }
 
 // query services
 export interface ClientSessionQueryService {
-    queryFirst(
-        queryFirstRequest: QueryFirstRequestLike
-    ): Promise<QueryFirstResponse>;
+    queryFirst(queryFirstRequest: QueryFirstRequestLike): Promise<QueryFirstResponse>;
 
-    queryFirst(
-        queryFirstRequest: QueryFirstRequestLike,
-        callback: ResponseCallback<QueryFirstResponse>
-    ): void;
+    queryFirst(queryFirstRequest: QueryFirstRequestLike, callback: ResponseCallback<QueryFirstResponse>): void;
 }
 
 // call services
 export interface ClientSessionCallService {
-
     /**
      *
      * @method call
@@ -285,19 +263,13 @@ export interface ClientSessionCallService {
      * ```
      */
 
-    call(
-        methodToCall: CallMethodRequestLike,
-        callback: (err: Error | null, result?: CallMethodResult) => void): void;
+    call(methodToCall: CallMethodRequestLike, callback: (err: Error | null, result?: CallMethodResult) => void): void;
 
-    call(
-        methodsToCall: CallMethodRequestLike[],
-        callback: (err: Error | null, results?: CallMethodResult[]) => void): void;
+    call(methodsToCall: CallMethodRequestLike[], callback: (err: Error | null, results?: CallMethodResult[]) => void): void;
 
-    call(
-        methodToCall: CallMethodRequestLike): Promise<CallMethodResult>;
+    call(methodToCall: CallMethodRequestLike): Promise<CallMethodResult>;
 
-    call(
-        methodsToCall: CallMethodRequestLike[]): Promise<CallMethodResult[]>;
+    call(methodsToCall: CallMethodRequestLike[]): Promise<CallMethodResult[]>;
 
     getArgumentDefinition(methodId: MethodId): Promise<ArgumentDefinition>;
 
@@ -306,67 +278,70 @@ export interface ClientSessionCallService {
 
 // register services
 export interface ClientSessionRegisterService {
-
     registerNodes(nodesToRegister: NodeIdLike[]): Promise<NodeId[]>;
 
-    registerNodes(
-        nodesToRegister: NodeIdLike[],
-        callback: (err: Error | null, registeredNodeIds?: NodeId[]) => void
-    ): void;
+    registerNodes(nodesToRegister: NodeIdLike[], callback: (err: Error | null, registeredNodeIds?: NodeId[]) => void): void;
 
     unregisterNodes(nodesToRegister: NodeIdLike[]): Promise<void>;
 
-    unregisterNodes(
-        nodesToRegister: NodeIdLike[],
-        callback: (err?: Error) => void
-    ): void;
-
+    unregisterNodes(nodesToRegister: NodeIdLike[], callback: (err?: Error) => void): void;
 }
 
 // read services
 export interface ClientSessionReadService {
+    read(nodeToRead: ReadValueIdOptions, maxAge: number, callback: ResponseCallback<DataValue>): void;
 
-    read(nodeToRead: ReadValueIdLike, maxAge: number, callback: ResponseCallback<DataValue>): void;
+    read(nodesToRead: ReadValueIdOptions[], maxAge: number, callback: ResponseCallback<DataValue[]>): void;
 
-    read(nodesToRead: ReadValueIdLike[], maxAge: number, callback: ResponseCallback<DataValue[]>): void;
+    read(nodeToRead: ReadValueIdOptions, callback: ResponseCallback<DataValue>): void;
 
-    read(nodeToRead: ReadValueIdLike, callback: ResponseCallback<DataValue>): void;
+    read(nodesToRead: ReadValueIdOptions[], callback: ResponseCallback<DataValue[]>): void;
 
-    read(nodesToRead: ReadValueIdLike[], callback: ResponseCallback<DataValue[]>): void;
+    read(nodeToRead: ReadValueIdOptions, maxAge?: number): Promise<DataValue>;
 
-    read(nodeToRead: ReadValueIdLike, maxAge?: number): Promise<DataValue>;
+    read(nodesToRead: ReadValueIdOptions[], maxAge?: number): Promise<DataValue[]>;
 
-    read(nodesToRead: ReadValueIdLike[], maxAge?: number): Promise<DataValue[]>;
-
+    /**
+     * @deprecated
+     */
     readVariableValue(nodeId: NodeIdLike, callback: ResponseCallback<DataValue>): void;
-
+    /**
+     * @deprecated
+     */
     readVariableValue(nodeId: NodeIdLike): Promise<DataValue>;
-
+    /**
+     * @deprecated
+     */
     readVariableValue(nodeIds: NodeIdLike[], callback: ResponseCallback<DataValue[]>): void;
-
+    /**
+     * @deprecated
+     */
     readVariableValue(nodeIds: NodeIdLike[]): Promise<DataValue[]>;
-
 }
 
 // write services
 export interface ClientSessionWriteService {
-    write(nodeToWrite: WriteValueLike, callback: ResponseCallback<StatusCode>): void;
+    write(nodeToWrite: WriteValueOptions, callback: ResponseCallback<StatusCode>): void;
 
-    write(nodesToWrite: WriteValueLike[], callback: ResponseCallback<StatusCode[]>): void;
+    write(nodesToWrite: WriteValueOptions[], callback: ResponseCallback<StatusCode[]>): void;
 
-    write(nodesToWrite: WriteValueLike[]): Promise<StatusCode[]>;
+    write(nodesToWrite: WriteValueOptions[]): Promise<StatusCode[]>;
 
-    write(nodeToWrite: WriteValueLike): Promise<StatusCode>;
+    write(nodeToWrite: WriteValueOptions): Promise<StatusCode>;
 
+    /**
+     * @deprecated
+     */
     writeSingleNode(nodeToWrite: NodeIdLike, value: Variant): Promise<StatusCode>;
 
+    /**
+     * @deprecated
+     */
     writeSingleNode(nodeToWrite: NodeIdLike, value: Variant, callback: ResponseCallback<StatusCode>): void;
-
 }
 
 // raw subscription services
 export interface ClientSessionRawSubscriptionService {
-
     /**
      * @method createSubscription
      * @async
@@ -385,89 +360,54 @@ export interface ClientSessionRawSubscriptionService {
      *    const response = await session.createSubscription(options);
      *    ```
      */
-    createSubscription(
-        options: CreateSubscriptionRequestLike,
-        callback: ResponseCallback<CreateSubscriptionResponse>
-    ): void;
+    createSubscription(options: CreateSubscriptionRequestLike, callback: ResponseCallback<CreateSubscriptionResponse>): void;
 
-    createSubscription(
-        options: CreateSubscriptionRequestLike
-    ): Promise<CreateSubscriptionResponse>;
+    createSubscription(options: CreateSubscriptionRequestLike): Promise<CreateSubscriptionResponse>;
 
-    setMonitoringMode(
-        options: SetMonitoringModeRequestLike,
-        callback: ResponseCallback<SetMonitoringModeResponse>
-    ): void;
+    setMonitoringMode(options: SetMonitoringModeRequestLike, callback: ResponseCallback<SetMonitoringModeResponse>): void;
 
-    setMonitoringMode(
-        options: SetMonitoringModeRequestLike
-    ): Promise<SetMonitoringModeResponse>;
+    setMonitoringMode(options: SetMonitoringModeRequestLike): Promise<SetMonitoringModeResponse>;
 
-    createMonitoredItems(
-        options: CreateMonitoredItemsRequestLike,
-        callback: ResponseCallback<CreateMonitoredItemsResponse>
-    ): void;
+    createMonitoredItems(options: CreateMonitoredItemsRequestLike, callback: ResponseCallback<CreateMonitoredItemsResponse>): void;
 
-    createMonitoredItems(
-        options: CreateMonitoredItemsRequestLike
-    ): Promise<CreateMonitoredItemsResponse>;
+    createMonitoredItems(options: CreateMonitoredItemsRequestLike): Promise<CreateMonitoredItemsResponse>;
 
-    modifySubscription(
-        options: ModifySubscriptionRequestLike,
-        callback: ResponseCallback<ModifySubscriptionResponse>
-    ): void;
+    modifySubscription(options: ModifySubscriptionRequestLike, callback: ResponseCallback<ModifySubscriptionResponse>): void;
 
-    modifySubscription(
-        options: ModifySubscriptionRequestLike
-    ): Promise<ModifySubscriptionResponse>;
+    modifySubscription(options: ModifySubscriptionRequestLike): Promise<ModifySubscriptionResponse>;
 
     transferSubscriptions(
         options: TransferSubscriptionsRequestLike,
         callback?: ResponseCallback<TransferSubscriptionsResponse>
     ): void;
 
-    transferSubscriptions(
-        options: TransferSubscriptionsRequestLike
-    ): Promise<TransferSubscriptionsResponse>;
+    transferSubscriptions(options: TransferSubscriptionsRequestLike): Promise<TransferSubscriptionsResponse>;
 
-    deleteSubscriptions(
-        options: DeleteSubscriptionsRequestLike,
-        callback?: ResponseCallback<DeleteSubscriptionsResponse>
-    ): void;
+    deleteSubscriptions(options: DeleteSubscriptionsRequestLike, callback?: ResponseCallback<DeleteSubscriptionsResponse>): void;
 
-    deleteSubscriptions(
-        options: DeleteSubscriptionsRequestLike
-    ): Promise<DeleteSubscriptionsResponse>;
+    deleteSubscriptions(options: DeleteSubscriptionsRequestLike): Promise<DeleteSubscriptionsResponse>;
 
     /**
      *
      * @method modifyMonitoredItems
      * @async
      */
-    modifyMonitoredItems(
-        options: ModifyMonitoredItemsRequestLike,
-        callback?: ResponseCallback<ModifyMonitoredItemsResponse>
-    ): void;
+    modifyMonitoredItems(options: ModifyMonitoredItemsRequestLike, callback?: ResponseCallback<ModifyMonitoredItemsResponse>): void;
 
-    modifyMonitoredItems(
-        options: ModifyMonitoredItemsRequestLike)
-        : Promise<ModifyMonitoredItemsResponse>;
+    modifyMonitoredItems(options: ModifyMonitoredItemsRequestLike): Promise<ModifyMonitoredItemsResponse>;
 
-    getMonitoredItems(
-        subscriptionId: SubscriptionId
-    ): Promise<MonitoredItemData>;
+    getMonitoredItems(subscriptionId: SubscriptionId): Promise<MonitoredItemData>;
 
-    getMonitoredItems(
-        subscriptionId: SubscriptionId,
-        callback: ResponseCallback<MonitoredItemData>
-    ): void;
+    getMonitoredItems(subscriptionId: SubscriptionId, callback: ResponseCallback<MonitoredItemData>): void;
+
+    deleteMonitoredItems(request: DeleteMonitoredItemsRequestLike, callback: Callback<DeleteMonitoredItemsResponse>): void;
+
+    deleteMonitoredItems(request: DeleteMonitoredItemsRequestLike): Promise<DeleteMonitoredItemsResponse>;
 }
 
 // subscription service
 export interface ClientSessionSubscriptionService {
-    createSubscription2(
-        createSubscriptionRequest: CreateSubscriptionRequestLike
-    ): Promise<ClientSubscription>;
+    createSubscription2(createSubscriptionRequest: CreateSubscriptionRequestLike): Promise<ClientSubscription>;
 
     createSubscription2(
         createSubscriptionRequest: CreateSubscriptionRequestLike,
@@ -475,39 +415,103 @@ export interface ClientSessionSubscriptionService {
     ): void;
 }
 
+export interface HistoryReadValueIdOptions2 extends HistoryReadValueIdOptions {
+    nodeId: NodeIdLike; // nodeId is mandatory here
+}
+
 // history services
 export interface ClientSessionReadHistoryService {
-
     readHistoryValue(
-        nodes: ReadValueIdOptions[],
+        nodesToRead: NodeIdLike[] | HistoryReadValueIdOptions2[],
         start: DateTime,
         end: DateTime,
         callback: (err: Error | null, results?: HistoryReadResult[]) => void
     ): void;
 
     readHistoryValue(
-        nodes: ReadValueIdOptions[],
+        nodesToRead: NodeIdLike[] | HistoryReadValueIdOptions2[],
         start: DateTime,
         end: DateTime
     ): Promise<HistoryReadResult[]>;
 
     readHistoryValue(
-        node: ReadValueIdOptions,
+        nodeToRead: NodeIdLike | HistoryReadValueIdOptions2,
         start: DateTime,
         end: DateTime,
         callback: (err: Error | null, result?: HistoryReadResult) => void
     ): void;
 
     readHistoryValue(
-        nodes: ReadValueIdOptions,
+        nodeToRead: NodeIdLike | HistoryReadValueIdOptions2,
         start: DateTime,
         end: DateTime
     ): Promise<HistoryReadResult>;
 
+    /**
+     * @method readAggregateValue
+     * @async
+     *
+     * @example
+     *
+     * ```javascript
+     * //  es5
+     * session.readAggregateValue(
+     *   {nodeId: "ns=5;s=Simulation Examples.Functions.Sine1" },
+     *   new Date("2015-06-10T09:00:00.000Z"),
+     *   new Date("2015-06-10T09:01:00.000Z"),
+     *  AggregateFunction.Average, 3600000, (err,dataValues)  => {
+     *
+     * });
+     * ```
+     *
+     * ```javascript
+     * //  es6
+     * const dataValues = await session.readAggregateValue(
+     *   { nodeId: "ns=5;s=Simulation Examples.Functions.Sine1" },
+     *   new Date("2015-06-10T09:00:00.000Z"),
+     *   new Date("2015-06-10T09:01:00.000Z"),
+     *   AggregateFunction.Average, 3600000);
+     * ```
+     * @param nodes   the read value id
+     * @param startTime   the start time in UTC format
+     * @param endTime     the end time in UTC format
+     * @param aggregateFn
+     * @param processingInterval in milliseconds
+     * @param callback
+     */
+    readAggregateValue(
+        nodesToRead: HistoryReadValueIdOptions[],
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction[],
+        processingInterval: number,
+        callback: Callback<HistoryReadResult[]>
+    ): void;
+    readAggregateValue(
+        nodesToRead: HistoryReadValueIdOptions[],
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction[],
+        processingInterval: number
+    ): Promise<HistoryReadResult[]>;
+    readAggregateValue(
+        nodeToRead: HistoryReadValueIdOptions,
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction,
+        processingInterval: number,
+        callback: Callback<HistoryReadResult>
+    ): void;
+    readAggregateValue(
+        nodeToRead: HistoryReadValueIdOptions,
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction,
+        processingInterval: number
+    ): Promise<HistoryReadResult>;
 }
 
 export interface ClientSessionDataTypeService {
-
     /**
      * retrieve the built-in DataType of a Variable, from its DataType attribute.
      *
@@ -534,31 +538,23 @@ export interface ClientSessionDataTypeService {
     getBuiltInDataType(nodeId: NodeId): Promise<DataType>;
 
     getBuiltInDataType(nodeId: NodeId, callback: (err: Error | null, dataType?: DataType) => void): void;
-
 }
 
 export interface ClientSessionNamespaceService {
-
     getNamespaceIndex(namespaceUri: string): number;
 
     readNamespaceArray(): Promise<string[]>;
 
     readNamespaceArray(callback: (err: Error | null, namespaceArray?: string[]) => void): void;
-
 }
 
 export interface ClientSessionExtensionObjectService {
-
-    constructExtensionObject(
-        dataType: NodeId,
-        pojo: any
-    ): Promise<ExtensionObject>;
+    constructExtensionObject(dataType: NodeId, pojo: any): Promise<ExtensionObject>;
 
     extractNamespaceDataType(): Promise<ExtraDataTypeManager>;
 }
 
 export interface ClientSessionConditionService {
-
     disableCondition(): void;
 
     enableCondition(): void;
@@ -583,18 +579,9 @@ export interface ClientSessionConditionService {
      * branch), the BranchId and all Condition values of this branch will be reported/.
      *
      */
-    addCommentCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike,
-        callback: Callback<StatusCode>
-    ): void;
+    addCommentCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike, callback: Callback<StatusCode>): void;
 
-    addCommentCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike
-    ): Promise<StatusCode>;
+    addCommentCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike): Promise<StatusCode>;
 
     /**
      * helper to confirm a condition
@@ -616,18 +603,9 @@ export interface ClientSessionConditionService {
      * @param comment
      * @param callback
      */
-    confirmCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike,
-        callback: Callback<StatusCode>
-    ): void;
+    confirmCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike, callback: Callback<StatusCode>): void;
 
-    confirmCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike
-    ): Promise<StatusCode>;
+    confirmCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike): Promise<StatusCode>;
 
     /**
      * helper to acknowledge a condition
@@ -666,17 +644,9 @@ export interface ClientSessionConditionService {
      * @param comment
      * @param callback
      */
-    acknowledgeCondition(
-        conditionId: NodeId,
-        eventId: Buffer,
-        comment: LocalizedTextLike,
-        callback: Callback<StatusCode>): void;
+    acknowledgeCondition(conditionId: NodeId, eventId: Buffer, comment: LocalizedTextLike, callback: Callback<StatusCode>): void;
 
-    acknowledgeCondition(
-        conditionId: NodeId,
-        eventId: Buffer,
-        comment: LocalizedTextLike
-    ): Promise<StatusCode>;
+    acknowledgeCondition(conditionId: NodeId, eventId: Buffer, comment: LocalizedTextLike): Promise<StatusCode>;
 
     /**
      * @method findMethodId
@@ -685,45 +655,30 @@ export interface ClientSessionConditionService {
      * @param methodName  the method name
      * @param callback
      */
-    findMethodId(
-        nodeId: NodeIdLike,
-        methodName: string,
-        callback: ResponseCallback<NodeId>
-    ): void;
+    findMethodId(nodeId: NodeIdLike, methodName: string, callback: ResponseCallback<NodeId>): void;
 
-    findMethodId(
-        nodeId: NodeIdLike,
-        methodName: string
-    ): Promise<NodeId>;
-
+    findMethodId(nodeId: NodeIdLike, methodName: string): Promise<NodeId>;
 }
 
 // publish Server
 export interface ClientSessionPublishService {
-    publish(
-        options: PublishRequest,
-        callback: ResponseCallback<PublishResponse>
-    ): void;
-    republish(
-        options: RepublishRequest,
-        callback: ResponseCallback<RepublishResponse>): void;
+    publish(options: PublishRequest, callback: ResponseCallback<PublishResponse>): void;
+    republish(options: RepublishRequest, callback: ResponseCallback<RepublishResponse>): void;
 }
 
-export interface ClientSession extends
-    ClientSessionTranslateBrowsePathService,
-    ClientSessionQueryService,
-    ClientSessionBrowseService,
-    // ClientSessionRawSubscriptionService,
-    ClientSessionSubscriptionService,
-    ClientSessionCallService,
-    ClientSessionRegisterService,
-    ClientSessionReadService,
-    ClientSessionWriteService,
-    ClientSessionReadHistoryService,
-    ClientSessionConditionService,
-    ClientSessionExtensionObjectService,
-    ClientSessionNamespaceService,
-    ClientSessionDataTypeService,
-    IBasicSession {
-
-}
+export interface ClientSession
+    extends ClientSessionTranslateBrowsePathService,
+        ClientSessionQueryService,
+        ClientSessionBrowseService,
+        // ClientSessionRawSubscriptionService,
+        ClientSessionSubscriptionService,
+        ClientSessionCallService,
+        ClientSessionRegisterService,
+        ClientSessionReadService,
+        // ClientSessionWriteService,
+        ClientSessionReadHistoryService,
+        ClientSessionConditionService,
+        ClientSessionExtensionObjectService,
+        ClientSessionNamespaceService,
+        ClientSessionDataTypeService,
+        IBasicSession {}
