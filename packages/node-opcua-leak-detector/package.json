@@ -1,22 +1,18 @@
 {
     "name": "node-opcua-leak-detector",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -leak-detector",
+    "version": "2.186.7",
+    "type": "module",
+    "description": "pure nodejs OPCUA SDK - module leak-detector",
     "main": "index.js",
+    "types": "index.d.ts",
     "scripts": {
-        "lint": "tslint source/**/*.ts",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "test": "echo no test"
+        "lint": "biome check --no-errors-on-unmatched .",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "mocha test",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
-    "dependencies": {
-        "colors": "^1.4.0",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-debug": "^2.6.0-alpha.1",
-        "node-opcua-object-registry": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
-    },
     "repository": {
         "type": "git",
         "url": "git://github.com/node-opcua/node-opcua.git"
@@ -30,5 +26,22 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "e4d73afdfcccb3491423149d9b9785888f4ebb3c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "engines": {
+        "node": ">=22.13.0"
+    },
+    "files": [
+        "src",
+        "index.js",
+        "index.d.ts"
+    ],
+    "dependencies": {
+        "chalk": "6.0.1",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-object-registry": "2.186.7",
+        "wtfnode": "^0.10.1"
+    },
+    "devDependencies": {
+        "node-opcua-test-helpers": "2.184.0"
+    }
 }

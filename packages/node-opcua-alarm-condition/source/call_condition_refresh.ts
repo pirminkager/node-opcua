@@ -1,0 +1,43 @@
+import assert from "node-opcua-assert";
+import { DataType } from "node-opcua-basic-types";
+import { make_debugLog, make_warningLog } from "node-opcua-debug";
+import { resolveNodeId } from "node-opcua-nodeid";
+import type { CallMethodRequestLike, IBasicSessionAsync } from "node-opcua-pseudo-session";
+import { makeBrowsePath } from "node-opcua-service-translate-browse-path";
+import { type StatusCode, StatusCodes } from "node-opcua-status-code";
+import { CallMethodRequest } from "node-opcua-types";
+import { Variant } from "node-opcua-variant";
+
+const doDebug = false;
+const debugLog = make_debugLog("A&E");
+const warningLog = make_warningLog("A&E");
+
+export async function callConditionRefresh(session: IBasicSessionAsync, subscriptionId: number): Promise<StatusCode> {
+    assert(Number.isFinite(subscriptionId), "May be subscription is not yet initialized");
+    const conditionTypeNodeId = resolveNodeId("ConditionType");
+    let conditionRefreshId = resolveNodeId("ConditionType_ConditionRefresh");
+    // find conditionRefreshId
+    const browsePath = makeBrowsePath(conditionTypeNodeId, ".ConditionRefresh");
+    const translateResult = await session.translateBrowsePath(browsePath);
+
+    /* c8 ignore next */
+    if (translateResult.targets && translateResult.targets.length > 0) {
+        conditionRefreshId = translateResult.targets[0].targetId;
+    } else {
+        // cannot find conditionRefreshId
+        return StatusCodes.BadInternalError;
+    }
+    const methodToCall: CallMethodRequestLike = {
+        inputArguments: [new Variant({ dataType: DataType.UInt32, value: subscriptionId })],
+        methodId: conditionRefreshId,
+        objectId: conditionTypeNodeId
+    };
+
+    doDebug && debugLog("Calling method ", new CallMethodRequest(methodToCall).toString());
+    const callResult = await session.call(methodToCall);
+    /* c8 ignore next */
+    if (callResult.statusCode.isNotGood()) {
+        warningLog(new CallMethodRequest(methodToCall).toString());
+    }
+    return callResult.statusCode;
+}

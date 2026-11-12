@@ -1,9 +1,9 @@
-import * as should from "should";
-import * as t from "..";
+import should from "should";
+import * as t from "../dist/index.js";
 
 describe("Testing node-opcua-test", () => {
     it("AxisInformation", () => {
-        const a = new t.AxisInformation({});
+        const _a = new t.AxisInformation({});
     });
     it("AxisInformation", () => {
         const a = new t.ReferenceDescription({

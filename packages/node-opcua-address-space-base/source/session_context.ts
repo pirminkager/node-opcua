@@ -1,0 +1,229 @@
+import type { Certificate } from "node-opcua-crypto/web";
+import type { DataValue } from "node-opcua-data-value";
+import type { PreciseClock } from "node-opcua-date-time";
+import type { NodeId, NodeIdLike } from "node-opcua-nodeid";
+import type { StatusCode } from "node-opcua-status-code";
+import type { MessageSecurityMode, PermissionType, ReferenceDescription, RequestHeader, UserIdentityToken } from "node-opcua-types";
+import type { BaseNode } from "./base_node.js";
+import type { ContinuationPoint } from "./continuation_point.js";
+import type { UAObject } from "./ua_object.js";
+import type { UAObjectType } from "./ua_object_type.js";
+
+export function getContextMaxMessageSize(context: ISessionContext): number {
+    if (!context.session?.channel?.getTransportSettings) return 0;
+    const f = context.session?.channel?.getTransportSettings();
+    return f ? f.maxMessageSize : 0;
+}
+
+export interface ITransportSettings {
+    maxMessageSize: number;
+}
+export interface IChannelBase {
+    clientCertificate: Certificate | null;
+    /**
+     * True when the client certificate was admitted only by a relaxation of the
+     * Server's checks (e.g. NoConfiguration), not because the Server trusts it.
+     */
+    readonly clientCertificateTrustRelaxed?: boolean;
+    // clientNonce: Buffer | null;
+    securityMode: MessageSecurityMode;
+    securityPolicy: string;
+    getTransportSettings(): ITransportSettings;
+}
+
+export interface IContinuationPointInfo<T> {
+    values: T[] | null;
+    continuationPoint: ContinuationPoint | undefined;
+    statusCode: StatusCode;
+}
+export interface ContinuationData {
+    continuationPoint?: ContinuationPoint | null;
+    releaseContinuationPoints?: boolean;
+}
+export interface IContinuationPointManager {
+    //
+    registerHistoryReadRaw(
+        maxElements: number,
+        values: DataValue[],
+        continuationData: ContinuationData
+    ): IContinuationPointInfo<DataValue>;
+    getNextHistoryReadRaw(numValues: number, continuationData: ContinuationData): IContinuationPointInfo<DataValue>;
+    //
+    registerReferences(
+        maxElements: number,
+        values: ReferenceDescription[],
+        continuationData: ContinuationData
+    ): IContinuationPointInfo<ReferenceDescription>;
+    getNextReferences(numValues: number, continuationData: ContinuationData): IContinuationPointInfo<ReferenceDescription>;
+    dispose(): void;
+}
+
+/**
+ * What the address space needs to know about a Subscription when a Method takes a
+ * SubscriptionId / MonitoredItemId argument (ConditionRefresh, ConditionRefresh2).
+ */
+export interface ISubscriptionBase {
+    readonly id: number;
+    /** the MonitoredItem with that id in this Subscription, or `null` */
+    getMonitoredItem(monitoredItemId: number): object | null;
+}
+
+/**
+ * The Subscription a ConditionRefresh is running for, while it runs.
+ *
+ * OPC 10000-9 4.5: "To ensure a Client is always informed, the three special EventTypes
+ * (RefreshEndEventType, RefreshStartEventType and RefreshRequiredEventType) ignore the Event
+ * content filtering associated with a Subscription and will always be delivered to the Client."
+ * The retained Condition Events sent in between still have to "meet the Subscriptions content
+ * filter criteria" (5.5.7), so only the bracket bypasses the where clause.
+ *
+ * 5.5.7 also says which Subscription all of it is for: the bracket is queued "for every Notifier
+ * MonitoredItem in the Subscription" named by the SubscriptionId argument, and the Retained
+ * Conditions are the ones meeting that Subscription's content filter. 5.5.8 narrows both to the
+ * single MonitoredItem ConditionRefresh2 names.
+ *
+ * The address space raises all of it on the Server Object and knows nothing about Subscriptions -
+ * from there an Event bubbles to every event MonitoredItem of the whole Server. So it publishes
+ * the scope of the refresh in progress and the server side reads it back: a MonitoredItem outside
+ * the scope drops the refresh, one inside it applies the bypass.
+ */
+export interface ConditionRefreshScope {
+    /** the Subscription of the SubscriptionId argument */
+    subscription: ISubscriptionBase;
+    /** ConditionRefresh2 only: the single MonitoredItem of the MonitoredItemId argument */
+    monitoredItemId?: number;
+}
+
+/**
+ * The address space, seen from the server side, while a ConditionRefresh runs.
+ * `null` at every other moment: the refresh raises its bracket synchronously.
+ */
+export interface IConditionRefreshScopeHolder {
+    readonly _condition_refresh_scope: ConditionRefreshScope | null;
+}
+
+/** a task that the server runs once when the Session closes, see {@link ISessionBase.registerSessionShutdownTask} */
+export type SessionShutdownTask = () => void | Promise<void>;
+
+export interface ISessionBase {
+    userIdentityToken?: UserIdentityToken;
+    channel?: IChannelBase;
+    getSessionId(): NodeId; // session NodeID
+    continuationPointManager: IContinuationPointManager;
+    /**
+     * The localeIds of the Session's last successful ActivateSession, most preferred first.
+     * OPC 10000-4 v1.05.07 §5.7.3: a later ActivateSession with a null/empty localeIds keeps
+     * this list unchanged. Empty (or absent) until the Session has been activated once.
+     */
+    localeIds?: readonly string[];
+    /** The URL of the Endpoint the Session was created on, if known. */
+    getEndpointUrl?(): string | undefined;
+    /**
+     * The Subscription with that id **owned by this Session**, or `null`.
+     *
+     * A SubscriptionId is only meaningful inside the Session that created it (Part 4), so a
+     * Subscription of another Session is `null` here as much as one that never existed.
+     * Optional: an in-process caller (PseudoSession, tests) has no Subscriptions to check
+     * against, and a Method validating its SubscriptionId argument then lets it through.
+     */
+    getSubscription?(subscriptionId: number): ISubscriptionBase | null;
+    /**
+     * Registers a task that runs once when the Session closes, for whatever reason (CloseSession,
+     * timeout, server shutdown). Use it to release a resource that the Session holds.
+     * A task that fails does not stop the other tasks. A task that returns a Promise delays
+     * the CloseSession response and the server shutdown until it settles, so it must settle.
+     * A task registered after the Session closed runs immediately.
+     * Optional: an in-process caller (PseudoSession, tests) has no Session lifetime to follow.
+     */
+    registerSessionShutdownTask?(task: SessionShutdownTask): void;
+}
+export interface ContinuationPointData {
+    dataValues: DataValue[];
+}
+export interface ISessionContext {
+    /** The underlying OPC UA session, if available. */
+    readonly session?: ISessionBase;
+
+    /** Returns the user name of the current user. */
+    getUserName(): string;
+
+    /** Returns the NodeIds of all roles assigned to the current user. */
+    getCurrentUserRoles(): NodeId[];
+
+    /**
+     * The Session's preferred locales, most preferred first (OPC 10000-4 v1.05.07 §5.7.3
+     * ActivateSession localeIds, §5.4 Locale Negotiation). Empty when there is no Session,
+     * or the Session has not been activated with a non-empty localeIds yet.
+     */
+    getPreferredLocales(): string[];
+
+    /** Check whether the current user has the given permission on a node. */
+    checkPermission(node: BaseNode, action: PermissionType): boolean;
+
+    /** Returns `true` if browsing the given node is restricted for the current user. */
+    isBrowseAccessRestricted(node: BaseNode): boolean;
+
+    /** Returns `true` if the current user has the given role. */
+    currentUserHasRole(role: NodeIdLike): boolean;
+
+    /** Returns `true` if access to the node is restricted by security settings. */
+    isAccessRestricted(node: BaseNode): boolean;
+
+    /** The object on which the current operation is being performed. */
+    object?: UAObject | UAObjectType;
+
+    /** Server timestamp at the time the request was received. */
+    currentTime?: PreciseClock;
+
+    /**
+     * The client's application-instance certificate,
+     * or `null` if no secure channel is available.
+     */
+    readonly clientCertificate: Certificate | null;
+
+    /**
+     * The application URI extracted from the client
+     * certificate's SubjectAltName, or `null` if
+     * unavailable.
+     */
+    readonly clientApplicationUri: string | null;
+
+    /** The URL of the Endpoint the Session was created on, or `null` if unknown. */
+    readonly endpointUrl: string | null;
+
+    /**
+     * The RequestHeader of the request currently being served through this context, when one is
+     * available. A context built for one Call service invocation (see ServerSession's
+     * per-request context, opcua_server.ts _on_CallRequest) carries the RequestHeader of that
+     * CallRequest, so a bound Method handler can read `context.requestHeader?.auditEntryId` -
+     * OPC 10000-4 v1.05.07 §7.32 RequestHeader - and copy it into ClientAuditEntryId when it
+     * raises an AuditEventType - OPC 10000-5 v1.05.06 §6.4.3. `undefined` for a context with no
+     * request behind it, e.g. a Session's own long-lived sessionContext, or most PseudoSession
+     * calls.
+     */
+    readonly requestHeader?: RequestHeader;
+
+    /**
+     * Convenience accessor for `requestHeader?.auditEntryId`; `undefined` when either is absent
+     * or the id is empty.
+     */
+    getAuditEntryId(): string | undefined;
+
+    /**
+     * Runs `action` with the user's Roles and the namespace defaults of permissions and access
+     * restrictions resolved once, rather than once per node: a Read of a thousand nodes asks
+     * the same questions a thousand times. What is resolved is forgotten when `action` returns,
+     * so a change of Roles or of NamespaceMetadata applies from the next request on.
+     */
+    withPermissionCache?<T>(action: () => T): T;
+
+    /**
+     * Returns a JSON representation of the context
+     */
+    toJSON(): Record<string, string | null>;
+
+    /**
+     * Returns a string representation of the context
+     */
+    toString(): string;
+}

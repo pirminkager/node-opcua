@@ -1,41 +1,40 @@
-"use strict";
-import * as async from "async";
-import * as should from "should";
-
-import { Range } from "node-opcua-data-access";
-import { standardUnits } from "node-opcua-data-access";
-import { BrowseDirection } from "node-opcua-data-model";
+import { Range, standardUnits } from "node-opcua-data-access";
+import { BrowseDirection, makeAccessLevelFlag } from "node-opcua-data-model";
 import { DataValue } from "node-opcua-data-value";
+import { NumericRange } from "node-opcua-numeric-range";
 import { BrowseDescription } from "node-opcua-service-browse";
 import { StatusCodes } from "node-opcua-status-code";
-import { Variant } from "node-opcua-variant";
-import { DataType } from "node-opcua-variant";
+import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
+import should from "should";
 
-import { AddressSpace, Namespace, SessionContext } from "../..";
+import { type AddressSpace, type Namespace, SessionContext } from "../../dist/api/index.js";
 
-export function subtest_analog_item_type(maintest: any) {
+interface MainTest {
+    addressSpace: AddressSpace;
+}
 
+export function subtest_analog_item_type(maintest: MainTest): void {
     describe("AnalogDataItem", () => {
-
         let addressSpace: AddressSpace;
         let namespace: Namespace;
         before(() => {
             addressSpace = maintest.addressSpace;
             namespace = addressSpace.getOwnNamespace();
-            should(addressSpace).be.instanceof(AddressSpace);
+            // AddressSpace is published as an interface and a factory, with no constructor to
+            // check against, so this asserts that there is one rather than which class it is
+            should.exist(addressSpace);
         });
 
         const context = SessionContext.defaultContext;
 
         it("should add an analog data item in the addresss_space", async () => {
-
-            const objectsFolder = addressSpace.findNode("ObjectsFolder")!;
+            const objectsFolder = addressSpace.findNode("ObjectsFolder");
+            if (!objectsFolder) throw new Error("Cannot find ObjectsFolder");
             objectsFolder.browseName.toString().should.eql("Objects");
 
             let fakeValue = 1;
 
             const analogItem = namespace.addAnalogDataItem({
-
                 organizedBy: objectsFolder,
 
                 browseName: "TemperatureSensor",
@@ -48,6 +47,8 @@ export function subtest_analog_item_type(maintest: any) {
                 instrumentRange: { low: -100, high: +200 },
 
                 dataType: "Double",
+
+                minimumSamplingInterval: 100,
                 value: {
                     get: () => {
                         return new Variant({
@@ -56,37 +57,41 @@ export function subtest_analog_item_type(maintest: any) {
                         });
                     }
                 }
-
             });
+
+            analogItem.accessLevel.should.eql(makeAccessLevelFlag("CurrentRead | CurrentWrite"));
 
             // xx console.log(JSON.stringify(analogItem,null," "));
             // analogItem.dataType.should.eql(addressSpace.findVariableType("AnalogItemType").nodeId);
 
-            analogItem.definition!.browseName.toString().should.eql("Definition");
-            analogItem.valuePrecision!.browseName.toString().should.eql("ValuePrecision");
+            should(analogItem.definition?.browseName.toString()).eql("Definition");
+            should(analogItem.valuePrecision?.browseName.toString()).eql("ValuePrecision");
             analogItem.euRange.browseName.toString().should.eql("EURange");
-            analogItem.instrumentRange!.browseName.toString().should.eql("InstrumentRange");
-            analogItem.engineeringUnits.browseName.toString().should.eql("EngineeringUnits");
+            should(analogItem.instrumentRange?.browseName.toString()).eql("InstrumentRange");
+            should(analogItem.engineeringUnits?.browseName.toString()).eql("EngineeringUnits");
 
+            // xx console.log("xxxx = analogItem.euRange.readValue().value.value", analogItem.euRange.readValue().toString());
             analogItem.euRange.readValue().value.value.low.should.eql(100);
             analogItem.euRange.readValue().value.value.high.should.eql(200);
 
-            analogItem.instrumentRange!.readValue().value.value.low.should.eql(-100);
-            analogItem.instrumentRange!.readValue().value.value.high.should.eql(200);
+            should(analogItem.instrumentRange?.readValue().value.value.low).eql(-100);
+            should(analogItem.instrumentRange?.readValue().value.value.high).eql(200);
 
             // browsing variable
             const browseDescription = new BrowseDescription({
                 browseDirection: BrowseDirection.Forward,
                 nodeClassMask: 0, // 0 = all nodes
                 referenceTypeId: 0,
-                resultMask: 0x3F
+                resultMask: 0x3f
             });
-            // xx var browseResult = engine.browseSingleNode(analogItem.nodeId, browseDescription);
             const references = analogItem.browseNode(browseDescription);
 
             references.length.should.eql(6);
 
-            const dataValue1 = await analogItem.instrumentRange!.readValueAsync(context);
+            const dataValue1 = await analogItem.instrumentRange?.readValueAsync(context);
+            if (!dataValue1) {
+                throw new Error("InstrumentRange should be defined");
+            }
             dataValue1.statusCode.should.eql(StatusCodes.Good);
             dataValue1.value.dataType.should.eql(DataType.ExtensionObject);
             dataValue1.value.value.should.be.instanceOf(Range);
@@ -96,18 +101,17 @@ export function subtest_analog_item_type(maintest: any) {
             const dataValue2 = await analogItem.readValueAsync(context);
             dataValue2.statusCode.should.eql(StatusCodes.Good);
             dataValue2.value.dataType.should.eql(DataType.Double);
-            dataValue2.value.value.should.eql(fakeValue);
+            should(dataValue2.value.value).eql(fakeValue);
 
             fakeValue = 2.0;
 
             const dataValue3 = await analogItem.readValueAsync(context);
             dataValue3.statusCode.should.eql(StatusCodes.Good);
             dataValue3.value.dataType.should.eql(DataType.Double);
-            dataValue3.value.value.should.eql(fakeValue);
+            should(dataValue3.value.value).eql(fakeValue);
         });
 
-        it("Writing a value exceeding InstrumentRange shall return BadOutOfRange", async () => {
-
+        it("Writing a value exceeding InstrumentRange shall return BadOutOfRange and refuse to set the dataValue", async () => {
             const objectsFolder = addressSpace.rootFolder.objects;
 
             const analogItem = namespace.addAnalogDataItem({
@@ -119,20 +123,52 @@ export function subtest_analog_item_type(maintest: any) {
                 instrumentRange: { low: -100, high: 200 },
                 organizedBy: objectsFolder,
                 value: new Variant({ dataType: DataType.Double, value: 10.0 }),
-                valuePrecision: 0.5,
+                valuePrecision: 0.5
             });
 
             const dataValue = new DataValue({
-                value: new Variant({ dataType: DataType.Double, value: -1000.0 })// out of range
+                value: new Variant({ dataType: DataType.Double, value: -1000.0 }) // out of range
             });
 
             const statusCode = await analogItem.writeValue(context, dataValue);
             statusCode.should.eql(StatusCodes.BadOutOfRange);
 
+            const dataValue2 = await analogItem.readValueAsync(context);
+            dataValue2.statusCode.should.eql(StatusCodes.Good);
+            dataValue2.value.dataType.should.eql(DataType.Double);
+            should(dataValue2.value.value).eql(10.0);
+        });
+
+        it("Writing a value exceeding InstrumentRange shall return Good and adjust the StatusCode to BadOutOfRange if record", async () => {
+            const objectsFolder = addressSpace.rootFolder.objects;
+
+            const analogItem = namespace.addAnalogDataItem({
+                browseName: "TemperatureSensor",
+                dataType: "Double",
+                definition: "(tempA -25) + tempB",
+                engineeringUnits: standardUnits.degree_celsius,
+                engineeringUnitsRange: { low: -2000, high: 2000 },
+                instrumentRange: { low: -100, high: 200 },
+                organizedBy: objectsFolder,
+                value: new Variant({ dataType: DataType.Double, value: 10.0 }),
+                valuePrecision: 0.5
+            });
+            analogItem.acceptValueOutOfRange = true;
+
+            const dataValue = new DataValue({
+                value: new Variant({ dataType: DataType.Double, value: -1000.0 }) // out of range
+            });
+
+            const statusCode = await analogItem.writeValue(context, dataValue);
+            statusCode.should.eql(StatusCodes.Good);
+
+            const dataValue2 = await analogItem.readValueAsync(context);
+            dataValue2.statusCode.should.eql(StatusCodes.BadOutOfRange);
+            dataValue2.value.dataType.should.eql(DataType.Double);
+            should(dataValue2.value.value).eql(-1000.0);
         });
 
         it("Writing a value within InstrumentRange shall return Good", async () => {
-
             const objectsFolder = addressSpace.findNode("ObjectsFolder")!;
 
             const analogItem = namespace.addAnalogDataItem({
@@ -144,16 +180,279 @@ export function subtest_analog_item_type(maintest: any) {
                 instrumentRange: { low: -100, high: 200 },
                 organizedBy: objectsFolder,
                 value: new Variant({ dataType: DataType.Double, value: 10.0 }),
-                valuePrecision: 0.5,
+                valuePrecision: 0.5
             });
 
             const dataValue = new DataValue({
-                value: new Variant({ dataType: DataType.Double, value: 150 })// in range
+                value: new Variant({ dataType: DataType.Double, value: 150 }) // in range
             });
 
             const statusCode = await analogItem.writeValue(context, dataValue);
             statusCode.should.eql(StatusCodes.Good);
+        });
 
+        it("should honor a typeDefinition that is a strict subtype of AnalogItemType and materialize its own mandatory members", () => {
+            const analogItemType = addressSpace.findVariableType("AnalogItemType");
+            if (!analogItemType) throw new Error("Cannot find AnalogItemType");
+
+            // simulates a companion-specification VariableType derived from AnalogItemType,
+            // with its own mandatory member (e.g. PADIM's ActualVolumeFlowRateVariableType / LowFlowCutOff)
+            const myAnalogSubtype = namespace.addVariableType({
+                browseName: "MyAnalogSubtype",
+                subtypeOf: analogItemType
+            });
+            namespace.addVariable({
+                browseName: "LowFlowCutOff",
+                componentOf: myAnalogSubtype,
+                dataType: "Double",
+                modellingRule: "Mandatory"
+            });
+
+            const objectsFolder = addressSpace.rootFolder.objects;
+
+            const analogItem = namespace.addAnalogDataItem({
+                browseName: "MyAnalogSubtypeInstance",
+                dataType: "Double",
+                engineeringUnits: standardUnits.degree_celsius,
+                engineeringUnitsRange: { low: 0, high: 100 },
+                instrumentRange: { low: 0, high: 100 },
+                organizedBy: objectsFolder,
+                typeDefinition: myAnalogSubtype,
+                value: new Variant({ dataType: DataType.Double, value: 10.0 })
+            });
+
+            // the HasTypeDefinition reference must point to the requested subtype, not AnalogItemType
+            analogItem.typeDefinitionObj.nodeId.toString().should.eql(myAnalogSubtype.nodeId.toString());
+
+            // the subtype's own mandatory member must have been instantiated
+            const lowFlowCutOff = analogItem.getComponentByName("LowFlowCutOff");
+            should.exist(lowFlowCutOff);
+
+            // and the usual AnalogItemType members must still be there, with a single instance each
+            analogItem.euRange.readValue().value.value.low.should.eql(0);
+            analogItem.euRange.readValue().value.value.high.should.eql(100);
+            should(analogItem.instrumentRange?.readValue().value.value.low).eql(0);
+            should(analogItem.engineeringUnits?.readValue().value.value.displayName.text).eql(
+                standardUnits.degree_celsius.displayName?.text
+            );
+
+            const browseDescription = new BrowseDescription({
+                browseDirection: BrowseDirection.Forward,
+                nodeClassMask: 0,
+                referenceTypeId: 0,
+                resultMask: 0x3f
+            });
+            const references = analogItem.browseNode(browseDescription);
+            references.filter((r) => r.browseName.name === "EURange").length.should.eql(1);
+            references.filter((r) => r.browseName.name === "InstrumentRange").length.should.eql(1);
+            references.filter((r) => r.browseName.name === "EngineeringUnits").length.should.eql(1);
+        });
+
+        it("should accept a typeDefinition passed as a NodeId, resolving it like the VariableType instance form", () => {
+            const analogItemType = addressSpace.findVariableType("AnalogItemType")!;
+            const myAnalogSubtype2 = namespace.addVariableType({
+                browseName: "MyAnalogSubtype2",
+                subtypeOf: analogItemType
+            });
+
+            const objectsFolder = addressSpace.rootFolder.objects;
+
+            const analogItem = namespace.addAnalogDataItem({
+                browseName: "MyAnalogSubtype2Instance",
+                dataType: "Double",
+                engineeringUnitsRange: { low: 0, high: 100 },
+                organizedBy: objectsFolder,
+                typeDefinition: myAnalogSubtype2.nodeId,
+                value: new Variant({ dataType: DataType.Double, value: 10.0 })
+            });
+
+            analogItem.typeDefinitionObj.nodeId.toString().should.eql(myAnalogSubtype2.nodeId.toString());
+        });
+
+        it("should accept a typeDefinition passed as a browseName string (own-namespace form)", () => {
+            const analogItemType = addressSpace.findVariableType("AnalogItemType")!;
+            const myAnalogSubtype2b = namespace.addVariableType({
+                browseName: "MyAnalogSubtype2b",
+                subtypeOf: analogItemType
+            });
+
+            const objectsFolder = addressSpace.rootFolder.objects;
+
+            const analogItem = namespace.addAnalogDataItem({
+                browseName: "MyAnalogSubtype2bInstance",
+                dataType: "Double",
+                engineeringUnitsRange: { low: 0, high: 100 },
+                organizedBy: objectsFolder,
+                typeDefinition: `${namespace.index}:MyAnalogSubtype2b`,
+                value: new Variant({ dataType: DataType.Double, value: 10.0 })
+            });
+
+            analogItem.typeDefinitionObj.nodeId.toString().should.eql(myAnalogSubtype2b.nodeId.toString());
+        });
+
+        it("should throw when typeDefinition is not a subtype of AnalogItemType", () => {
+            const unrelatedType = namespace.addVariableType({
+                browseName: "UnrelatedVariableType",
+                subtypeOf: "BaseDataVariableType"
+            });
+
+            const objectsFolder = addressSpace.rootFolder.objects;
+
+            should(() =>
+                namespace.addAnalogDataItem({
+                    browseName: "ShouldFail",
+                    dataType: "Double",
+                    engineeringUnitsRange: { low: 0, high: 100 },
+                    organizedBy: objectsFolder,
+                    typeDefinition: unrelatedType,
+                    value: new Variant({ dataType: DataType.Double, value: 10.0 })
+                })
+            ).throw(/shall be a subtype of AnalogItemType/);
+        });
+
+        it("should instantiate only the mandatory members when a subtype is used without instrumentRange/engineeringUnits options", () => {
+            const analogItemType = addressSpace.findVariableType("AnalogItemType")!;
+            const myAnalogSubtype3 = namespace.addVariableType({
+                browseName: "MyAnalogSubtype3",
+                subtypeOf: analogItemType
+            });
+            namespace.addVariable({
+                browseName: "LowFlowCutOff",
+                componentOf: myAnalogSubtype3,
+                dataType: "Double",
+                modellingRule: "Mandatory"
+            });
+
+            const objectsFolder = addressSpace.rootFolder.objects;
+
+            const analogItem = namespace.addAnalogDataItem({
+                browseName: "MyAnalogSubtype3Instance",
+                dataType: "Double",
+                engineeringUnitsRange: { low: 0, high: 100 },
+                organizedBy: objectsFolder,
+                typeDefinition: myAnalogSubtype3,
+                value: new Variant({ dataType: DataType.Double, value: 10.0 })
+            });
+
+            analogItem.typeDefinitionObj.nodeId.toString().should.eql(myAnalogSubtype3.nodeId.toString());
+            should.exist(analogItem.getComponentByName("LowFlowCutOff"));
+
+            analogItem.euRange.readValue().value.value.low.should.eql(0);
+            should.not.exist(analogItem.instrumentRange);
+            should.not.exist(analogItem.engineeringUnits);
+
+            const browseDescription = new BrowseDescription({
+                browseDirection: BrowseDirection.Forward,
+                nodeClassMask: 0,
+                referenceTypeId: 0,
+                resultMask: 0x3f
+            });
+            const references = analogItem.browseNode(browseDescription);
+            references.filter((r) => r.browseName.name === "EURange").length.should.eql(1);
+        });
+
+        describe("Writing a single element of an AnalogItemType array with IndexRange (FEAT-51)", () => {
+            // Reproduces the CTT's Data Access PercentDeadband 009/010: GetEURangeWriteValues
+            // builds a one-element array value that is inside the node's EURange and writes it
+            // with an IndexRange designating a single untouched element. The other elements are
+            // seeded at 0, which is itself outside a 10..250 EURange (as the CTT/Static/DA Profile
+            // arrays are) - those untouched elements must not make the write fail.
+            function makeUInt16ArrayItem() {
+                const objectsFolder = addressSpace.rootFolder.objects;
+                return namespace.addAnalogDataItem({
+                    browseName: "UInt16ArrayAnalog" + Date.now() + Math.random(),
+                    dataType: "UInt16",
+                    definition: "",
+                    engineeringUnits: standardUnits.degree_celsius,
+                    engineeringUnitsRange: { low: 10, high: 250 },
+                    instrumentRange: { low: 10, high: 250 },
+                    organizedBy: objectsFolder,
+                    valueRank: 1,
+                    arrayDimensions: [5],
+                    // untouched elements are seeded outside the EURange, as node-opcua-address-space-for-conformance-testing does
+                    value: new Variant({ dataType: DataType.UInt16, arrayType: VariantArrayType.Array, value: [0, 0, 0, 0, 0] }),
+                    valuePrecision: 0.5
+                });
+            }
+
+            it("writing one element in-range via IndexRange shall return Good, even though other elements are out of range", async () => {
+                const analogItem = makeUInt16ArrayItem();
+
+                const dataValue = new DataValue({
+                    value: new Variant({ dataType: DataType.UInt16, arrayType: VariantArrayType.Array, value: [15] })
+                });
+
+                const statusCode = await analogItem.writeValue(context, dataValue, NumericRange.coerce("2"));
+                statusCode.should.eql(StatusCodes.Good);
+
+                const dataValueAfter = await analogItem.readValueAsync(context);
+                dataValueAfter.statusCode.should.eql(StatusCodes.Good);
+                should(Array.from(dataValueAfter.value.value as ArrayLike<number>)).eql([0, 0, 15, 0, 0]);
+            });
+
+            it("writing one element out-of-range via IndexRange shall return BadOutOfRange", async () => {
+                const analogItem = makeUInt16ArrayItem();
+
+                const dataValue = new DataValue({
+                    value: new Variant({ dataType: DataType.UInt16, arrayType: VariantArrayType.Array, value: [9000] })
+                });
+
+                const statusCode = await analogItem.writeValue(context, dataValue, NumericRange.coerce("2"));
+                statusCode.should.eql(StatusCodes.BadOutOfRange);
+            });
+
+            it("writing multiple elements via IndexRange with one element out of range shall return BadOutOfRange", async () => {
+                // this is the latent bug: validate_value_range used to compare the write's
+                // array value against the range with plain `<`/`>`, which coerces a
+                // multi-element array through Array.prototype.toString into a comma-joined
+                // string that parses to NaN - every such comparison was silently false, so a
+                // genuinely out-of-range multi-element write was wrongly accepted as Good.
+                const analogItem = makeUInt16ArrayItem();
+                const dataValue = new DataValue({
+                    value: new Variant({ dataType: DataType.UInt16, arrayType: VariantArrayType.Array, value: [15, 9000] })
+                });
+                const statusCode = await analogItem.writeValue(context, dataValue, NumericRange.coerce("1:2"));
+                statusCode.should.eql(StatusCodes.BadOutOfRange);
+            });
+
+            it("writing multiple elements via IndexRange, all in range, shall return Good", async () => {
+                const analogItem = makeUInt16ArrayItem();
+                const dataValue = new DataValue({
+                    value: new Variant({ dataType: DataType.UInt16, arrayType: VariantArrayType.Array, value: [15, 20] })
+                });
+                const statusCode = await analogItem.writeValue(context, dataValue, NumericRange.coerce("1:2"));
+                statusCode.should.eql(StatusCodes.Good);
+            });
+
+            it("writing the whole array (scalar write, no IndexRange) with in-range values shall return Good", async () => {
+                const analogItem = makeUInt16ArrayItem();
+
+                const dataValue = new DataValue({
+                    value: new Variant({
+                        dataType: DataType.UInt16,
+                        arrayType: VariantArrayType.Array,
+                        value: [10, 10, 10, 10, 10]
+                    })
+                });
+
+                const statusCode = await analogItem.writeValue(context, dataValue);
+                statusCode.should.eql(StatusCodes.Good);
+            });
+
+            it("writing the whole array (scalar write, no IndexRange) with an out-of-range value shall return BadOutOfRange", async () => {
+                const analogItem = makeUInt16ArrayItem();
+
+                const dataValue = new DataValue({
+                    value: new Variant({
+                        dataType: DataType.UInt16,
+                        arrayType: VariantArrayType.Array,
+                        value: [10, 10, 9000, 10, 10]
+                    })
+                });
+
+                const statusCode = await analogItem.writeValue(context, dataValue);
+                statusCode.should.eql(StatusCodes.BadOutOfRange);
+            });
         });
     });
 }

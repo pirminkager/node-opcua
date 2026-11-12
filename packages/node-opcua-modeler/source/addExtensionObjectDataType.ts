@@ -1,51 +1,29 @@
 import {
-    AddressSpace,
-    Namespace,
+    type Namespace as INamespace,
     PseudoSession,
-    Reference,
-    UADataType,
-    UAObject,
-    UAVariable,
-    UAVariableT,
-    UAVariableType,
-    dumpToBSD,
+    type UADataType,
+    type UAObject,
+    type UAVariableType
 } from "node-opcua-address-space";
 import assert from "node-opcua-assert";
 import {
     convertDataTypeDefinitionToStructureTypeSchema,
-    ExtraDataTypeManager,
+    type ExtraDataTypeManager
 } from "node-opcua-client-dynamic-extension-object";
-import {
-    coerceQualifiedName,
-    LocalizedTextLike,
-    NodeClass,
-    QualifiedNameLike,
-} from "node-opcua-data-model";
-import {
-    ConstructorFuncWithSchema
-} from "node-opcua-factory";
-import {
-    NodeId, resolveNodeId
-} from "node-opcua-nodeid";
-import {
-    createDynamicObjectConstructor
-} from "node-opcua-schemas";
-import {
-    StructureDefinition,
-    StructureDefinitionOptions
-} from "node-opcua-types";
-import { DataType, Variant } from "node-opcua-variant";
+import { coerceQualifiedName, type LocalizedTextLike, type QualifiedNameLike } from "node-opcua-data-model";
+import { NodeId, resolveNodeId } from "node-opcua-nodeid";
+import { createDynamicObjectConstructor } from "node-opcua-schemas";
+import { StructureDefinition, type StructureDefinitionOptions } from "node-opcua-types";
 
 /**
- * create the deprecated DataTypeDictionnary node that was
+ * create the deprecated DataTypeDictionary node that was
  * used up to version 1.03
  */
-export function getOrCreateDataTypeSystem(namespace: Namespace): UAObject {
-
+export function getOrCreateDataTypeSystem(namespace: INamespace): UAObject {
     const addressSpace = namespace.addressSpace;
 
     const opcBinaryTypeSystem = addressSpace.findNode("OPCBinarySchema_TypeSystem") as UAObject;
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!opcBinaryTypeSystem) {
         throw new Error("Cannot find OPCBinarySchema_TypeSystem");
     }
@@ -54,222 +32,164 @@ export function getOrCreateDataTypeSystem(namespace: Namespace): UAObject {
 
     return opcBinaryTypeSystem;
 }
-
-export interface UADataTypeDictionary extends UAVariable {
-    deprecated: UAVariableT<boolean, DataType.Boolean>;
-    _namespaceUri: UAVariableT<string, DataType.Boolean>; // Collides !!!
-    dataTypeVersion: UAVariableT<string, DataType.Boolean>;
-}
-
-export function getDataTypeDictionary(namespace: Namespace): UADataTypeDictionary {
-
-    const addressSpace = namespace.addressSpace;
-
-    const opcBinaryTypeSystem = getOrCreateDataTypeSystem(namespace);
-    assert(opcBinaryTypeSystem.nodeId.toString() === "ns=0;i=93");
-
-    const name = namespace.namespaceUri.replace(/.*:/, "");
-
-    const node: UAVariable = opcBinaryTypeSystem.getComponentByName(name) as UAVariable;
-    if (node) {
-        assert(node.nodeClass === NodeClass.Variable);
-        // already exits ....
-        return node as UADataTypeDictionary;
-    }
-
-    const dataTypeDictionaryType = addressSpace.findVariableType("DataTypeDictionaryType");
-    /* istanbul ignore next */
-    if (!dataTypeDictionaryType) {
-        throw new Error("Cannot find DataTypeDictionaryType");
-    }
-    const dataTypeDictionary = dataTypeDictionaryType.instantiate({
-        browseName: name!,
-        description: `Collects the data type descriptions of ${namespace.namespaceUri}`,
-
-        componentOf: opcBinaryTypeSystem,
-
-        optionals: [
-            "Deprecated",
-            "DataTypeVersion",
-            "NamespaceUri"
-        ]
-    }) as UADataTypeDictionary;
-
-    dataTypeDictionary.bindVariable({
-        get: () => {
-            const bsd = dumpToBSD(namespace);
-            return new Variant({
-                dataType: DataType.ByteString,
-                value: Buffer.from(bsd, "utf-8")
-            })
-        }
-    })
-
-    const namespaceUriProp = dataTypeDictionary.getPropertyByName("NamespaceUri");
-    if (namespaceUriProp) {
-        namespaceUriProp.setValueFromSource({ dataType: DataType.String, value: namespace.namespaceUri });
-    }
-    const deprecatedProp = dataTypeDictionary.getPropertyByName("Deprecated");
-    if (deprecatedProp) {
-        deprecatedProp.setValueFromSource({ dataType: DataType.Boolean, value: true });
-    }
-    return dataTypeDictionary;
-}
-
-export function addDataTypeDescription(namespace: Namespace, dataType: UADataType) {
-
-    const addressSpace = namespace.addressSpace;
-
-    const dataTypeDictionnary = getDataTypeDictionary(namespace);
-
-    const dataTypeDescriptionType = addressSpace.findVariableType("DataTypeDescriptionType");
-    if (!dataTypeDescriptionType) {
-        throw new Error("Cannot find DataTypeDescriptionType");
-    }
-
-    const dataTypeDescription = dataTypeDescriptionType.instantiate({
-        browseName: dataType.browseName.name!,
-        componentOf: dataTypeDictionnary,
-    });
-    dataTypeDescription.setValueFromSource({
-        dataType: DataType.String,
-        value: dataType.browseName.name!
-    });
-
-    return dataTypeDescription;
-
-}
 export interface ExtensionObjectDefinition {
-
     browseName: QualifiedNameLike;
     description: LocalizedTextLike;
     isAbstract: boolean;
 
     structureDefinition: StructureDefinitionOptions;
     binaryEncoding?: NodeId;
-    xmlEncoding?: NodeId;
-    jsonEncoding?: NodeId;
-
     subtypeOf?: UADataType;
 }
 
-export async function addExtensionObjectDataType(
-    namespace: Namespace,
-    options: ExtensionObjectDefinition
-): Promise<UADataType> {
-
+export async function addExtensionObjectDataType(namespace: INamespace, options: ExtensionObjectDefinition): Promise<UADataType> {
     const addressSpace = namespace.addressSpace;
 
     // encodings
     const dataTypeEncodingType = addressSpace.findObjectType("DataTypeEncodingType");
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!dataTypeEncodingType) {
         throw new Error("Cannot find DataTypeEncodingType");
     }
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!options.browseName.toString().match(/DataType$/)) {
-        throw new Error("DataType name must end up with DataType ! " + options.browseName.toString());
+        throw new Error(`DataType name must end up with DataType ! ${options.browseName.toString()}`);
     }
 
     const baseSuperType = "Structure";
-    const subtypeOf = addressSpace.findDataType(options.subtypeOf ? options.subtypeOf : baseSuperType)!;
-
+    const subtypeOf = addressSpace.findDataType(options.subtypeOf ? options.subtypeOf : baseSuperType);
+    if (!subtypeOf) {
+        throw new Error("Cannot find  base DataType ");
+    }
     const structureDefinition = options.structureDefinition;
+    structureDefinition.baseDataType = resolveNodeId(structureDefinition.baseDataType || "Structure");
+
+    // Resolve string/enum dataType names (e.g. "Double", DataType.Float)
+    // to proper NodeIds before constructing StructureDefinition, because
+    // the StructureField constructor calls coerceNodeId() which cannot
+    // handle plain DataType names like "Double".
+    if (structureDefinition.fields) {
+        for (const field of structureDefinition.fields) {
+            if (field.dataType !== undefined && field.dataType !== null && !(field.dataType instanceof NodeId)) {
+                const dt = addressSpace.findDataType(field.dataType as string | number);
+                if (dt) {
+                    field.dataType = dt.nodeId;
+                } else if (typeof field.dataType === "string" || typeof field.dataType === "number") {
+                    field.dataType = resolveNodeId(field.dataType);
+                }
+            }
+        }
+    }
+
+    const isAbstract = options.isAbstract || false;
 
     const dataType = namespace.createDataType({
         browseName: options.browseName,
         description: options.description,
-        isAbstract: options.isAbstract,
-        subtypeOf,
+        isAbstract,
+        subtypeOf
     });
 
     const defaultBinary = dataTypeEncodingType.instantiate({
         browseName: coerceQualifiedName("0:Default Binary"),
-        encodingOf: dataType,
-        // nodeId: defaultBinaryEncodingNode,
-    })!;
+        encodingOf: dataType
+    });
+    assert(defaultBinary);
     assert(defaultBinary.browseName.toString() === "Default Binary");
 
-    (dataType as any).$definition = new StructureDefinition(structureDefinition);
-
-    const dataTypeDescription = addDataTypeDescription(namespace, dataType);
-    defaultBinary.addReference({
-        isForward: true,
-        nodeId: dataTypeDescription,
-        referenceType: "HasDescription",
+    const defaultXml = dataTypeEncodingType.instantiate({
+        browseName: coerceQualifiedName("0:Default XML"),
+        encodingOf: dataType
     });
-    const v = dataType.getEncodingNode("Default Binary")!;
-    assert(v?.browseName.toString() === "Default Binary");
+    assert(defaultXml);
+    assert(defaultXml.browseName.toString() === "Default XML");
+
+    (dataType as unknown as { $fullDefinition?: StructureDefinition }).$fullDefinition = new StructureDefinition(
+        structureDefinition
+    );
+
+    const d = dataType.getStructureDefinition();
+    assert(!NodeId.sameNodeId(d.baseDataType, NodeId.nullNodeId));
 
     /// --------------- Create constructor
-    const dataTypeManager = (addressSpace as any).$$extraDataTypeManager as ExtraDataTypeManager;
+    const dataTypeManager = (addressSpace as unknown as { $$extraDataTypeManager: ExtraDataTypeManager }).$$extraDataTypeManager;
     const dataTypeFactory = dataTypeManager.getDataTypeFactory(namespace.index);
     const session = new PseudoSession(addressSpace);
 
-    const className = dataType.browseName.name!;
-    const cache: any = {};
+    const className = dataType.browseName.name ?? "";
+    const cache: Record<string, unknown> = {};
     const schema = await convertDataTypeDefinitionToStructureTypeSchema(
-        session, dataType.nodeId, className, (dataType as any).$definition, dataTypeFactory, cache);
-    const Constructor = createDynamicObjectConstructor(schema, dataTypeFactory) as ConstructorFuncWithSchema;
-
-    // dataTypeFactory.registerClassDefinition
-    //        _dataType._extensionObjectConstructor = dataTypeManager.getExtensionObjectConstructorFromDataType(_dataType.nodeId);
-    // addressSpace.getExtensionObjectConstructor();
+        session,
+        dataType.nodeId,
+        className,
+        dataType.getStructureDefinition(),
+        null,
+        dataTypeManager,
+        isAbstract,
+        cache
+    );
+    createDynamicObjectConstructor(schema, dataTypeFactory);
     return dataType;
 }
 
-export function addVariableTypeForDataType(
-    namespace: Namespace,
-    dataType: UADataType
-): UAVariableType {
-
+export function addVariableTypeForDataType(namespace: INamespace, dataType: UADataType): UAVariableType {
     const addressSpace = namespace.addressSpace;
 
     // get Definition
-    const definition = (dataType as any).$definition as StructureDefinition;
+    const definition = dataType.getStructureDefinition();
+    // c8 ignore next
     if (!definition || !(definition instanceof StructureDefinition)) {
         throw new Error("dataType is not a structure");
     }
 
-    const variableTypeName = dataType.browseName.name?.replace("DataType", "Type")!;
+    const variableTypeName = dataType.browseName.name?.replace("DataType", "Type");
     const variableType = namespace.addVariableType({
-        browseName: variableTypeName,
-        dataType: dataType.nodeId,
+        browseName: variableTypeName || "",
+        dataType: dataType.nodeId
     });
 
-    const structure = addressSpace.findDataType("Structure")!;
+    const structure = addressSpace.findDataType("Structure");
+    /* c8 ignore next */
+    if (!structure) {
+        throw new Error("Cannot find Structure");
+    }
     for (const field of definition.fields || []) {
-
         let typeDefinition: UAVariableType | string = "BaseVariableType";
         const fType = addressSpace.findDataType(field.dataType);
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (!fType) {
-            throw new Error("Cannot find dataType" + field.dataType.toString());
+            throw new Error(`Cannot find dataType${field.dataType.toString()}`);
         }
-        if (fType.isSupertypeOf(structure)) {
-            const name = fType.browseName.name!.replace("DataType", "Type");
-            typeDefinition = addressSpace.findVariableType(name, field.dataType.namespace)!;
-            const comp = typeDefinition.instantiate({
-                browseName: field.name!,
+        if (fType.isSubtypeOf(structure)) {
+            const name = fType.browseName.name?.replace("DataType", "Type");
+            /* c8 ignore next */
+            if (!name) {
+                throw new Error(`Cannot find name for dataType${field.dataType.toString()}`);
+            }
+            typeDefinition = addressSpace.findVariableType(name, field.dataType.namespace) as UAVariableType;
+            /* c8 ignore next */
+            if (!typeDefinition) {
+                throw new Error(`Cannot find typeDefinition for dataType${field.dataType.toString()}`);
+            }
+            typeDefinition.instantiate({
+                browseName: field.name || "",
                 componentOf: variableType,
                 dataType: field.dataType,
                 description: field.description,
                 modellingRule: "Mandatory",
-                valueRank: field.valueRank === undefined ? -1 : field.valueRank,
+                valueRank: field.valueRank === undefined ? -1 : field.valueRank
             });
-
         } else {
-            const comp = namespace.addVariable({
-                browseName: field.name!,
+            namespace.addVariable({
+                browseName: field.name || "",
                 componentOf: variableType,
                 dataType: field.dataType,
                 description: field.description,
                 modellingRule: "Mandatory",
                 typeDefinition,
-                valueRank: field.valueRank === undefined ? -1 : field.valueRank,
+                valueRank: field.valueRank === undefined ? -1 : field.valueRank
             });
-
         }
     }
     return variableType;

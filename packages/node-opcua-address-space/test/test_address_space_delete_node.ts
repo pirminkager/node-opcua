@@ -1,15 +1,19 @@
+import { EventNotifierFlags } from "node-opcua-address-space-base";
+import { nodesets } from "node-opcua-nodesets";
+import { DataType } from "node-opcua-variant";
+import should from "should";
+
 import {
     AddressSpace,
-    getMiniAddressSpace,
-    Namespace,
-    UAObject,
-    UAObjectType,
-    UADiscreteAlarm,
-    generateAddressSpace,
     ensureDatatypeExtracted,
-} from "..";
-import { DataType } from "node-opcua-variant";
-import { nodesets } from "node-opcua-nodesets";
+    type Namespace,
+    type UADiscreteAlarm,
+    type UAObject,
+    type UAObjectType,
+    type UAVariable
+} from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
 
 describe("AddressSpace#delete", () => {
     let addressSpace: AddressSpace;
@@ -25,8 +29,7 @@ describe("AddressSpace#delete", () => {
         addressSpace.dispose();
     });
 
-    it("DX1 sshould delete node ", () => {
-
+    it("DX1 should delete node ", () => {
         // given a parent node having a direct reference to it's child node
         const parentNode = namespace.addObject({
             browseName: "ParentNode",
@@ -40,7 +43,7 @@ describe("AddressSpace#delete", () => {
         parentNode.addReference({
             isForward: true,
             nodeId: childNode.nodeId,
-            referenceType: "HasComponent",
+            referenceType: "HasComponent"
         });
 
         parentNode.getComponents().length.should.eql(1);
@@ -49,10 +52,8 @@ describe("AddressSpace#delete", () => {
 
         // then the parent should not have it as a child
         parentNode.getComponents().length.should.eql(0);
-
     });
     it("DX2 should delete node ", () => {
-
         // given a child node having a reverse reference to it's parent node
         const parentNode = namespace.addObject({
             browseName: "ParentNode",
@@ -66,7 +67,7 @@ describe("AddressSpace#delete", () => {
         childNode.addReference({
             isForward: false,
             nodeId: parentNode.nodeId,
-            referenceType: "HasComponent",
+            referenceType: "HasComponent"
         });
 
         parentNode.getComponents().length.should.eql(1);
@@ -75,36 +76,109 @@ describe("AddressSpace#delete", () => {
 
         // then the parent should not have it as a child
         parentNode.getComponents().length.should.eql(0);
+    });
 
+    it("DX3 when a node is deleted, it should not be exposed by the parent anymore", () => {
+        const parentNode = namespace.addObject({
+            browseName: "ParentNode",
+            organizedBy: addressSpace.rootFolder.objects
+        });
+
+        const childNode = namespace.addObject({
+            browseName: "ChildNode"
+        });
+
+        parentNode.getComponents().length.should.eql(0);
+
+        parentNode.addReference({
+            isForward: true,
+            nodeId: childNode.nodeId,
+            referenceType: "HasComponent"
+        });
+
+        parentNode.getComponents().length.should.eql(1);
+
+        addressSpace.deleteNode(childNode);
+
+        parentNode.getComponents().length.should.eql(0);
+    });
+    it("DX4 when a node is deleted, it should not be exposed by the parent anymore (as a javascript property)", () => {
+        const parentNode = namespace.addObject({
+            browseName: "ParentNode",
+            organizedBy: addressSpace.rootFolder.objects
+        }) as UAObject & { childNode?: UAObject };
+
+        const childNode = namespace.addObject({
+            browseName: "ChildNode",
+            componentOf: parentNode
+        });
+
+        parentNode.getComponents().length.should.eql(1);
+        should(parentNode.getChildByName("ChildNode")).eql(childNode);
+        should(parentNode.childNode).eql(childNode);
+
+        addressSpace.deleteNode(childNode);
+
+        parentNode.getComponents().length.should.eql(0);
+        should.not.exist(parentNode.getChildByName("ChildNode"));
+        should.not.exist(parentNode.childNode);
+    });
+    it("DX5 when a node is deleted, then recreated, it should  be exposed again by the parent (as a javascript property)", () => {
+        const parentNode = namespace.addObject({
+            browseName: "ParentNode",
+            organizedBy: addressSpace.rootFolder.objects
+        }) as UAObject & { childNode?: UAObject };
+
+        const childNode = namespace.addObject({
+            browseName: "ChildNode",
+            componentOf: parentNode
+        });
+
+        parentNode.getComponents().length.should.eql(1);
+        should(parentNode.getChildByName("ChildNode")).eql(childNode);
+        should(parentNode.childNode).eql(childNode);
+
+        addressSpace.deleteNode(childNode);
+
+        parentNode.getComponents().length.should.eql(0);
+        should.not.exist(parentNode.getChildByName("ChildNode"));
+        should.not.exist(parentNode.childNode);
+
+        const childNodeAgain = namespace.addObject({
+            browseName: "ChildNode",
+            componentOf: parentNode
+        });
+
+        parentNode.getComponents().length.should.eql(1);
+        should(parentNode.getChildByName("ChildNode")).eql(childNodeAgain);
+        should(parentNode.childNode).eql(childNodeAgain);
     });
 });
 
-describe("AddressSpace#deleteNode", () => {
-
+describe("AddressSpace#deleteNode-b", () => {
     let addressSpace: AddressSpace;
     let namespace: Namespace;
 
-    function _createXXXXAlarm(
-        deviceNode: UAObject,
-        alarmType: UAObjectType,
-        browseName: string
-    ): UADiscreteAlarm {
-
-        const deviceHealthNode = (deviceNode as any).deviceHealth;
+    function _createXXXXAlarm(deviceNode: UAObject, alarmType: UAObjectType, browseName: string): UADiscreteAlarm {
+        const deviceNodeWithHealth = deviceNode as unknown as UAObject & {
+            deviceHealth?: UAVariable;
+            deviceHealthAlarms?: UAObject;
+        };
+        const deviceHealthNode = deviceNodeWithHealth.deviceHealth;
         if (!deviceHealthNode) {
             throw new Error("DeviceHealth must exist");
         }
-        const deviceHealthAlarms = (deviceNode as any).deviceHealthAlarms;
+        const deviceHealthAlarms = deviceNodeWithHealth.deviceHealthAlarms;
         if (!deviceHealthAlarms) {
             throw new Error("deviceHealthAlarms must exist");
         }
 
-        (alarmType as any).isAbstract = false;
+        (alarmType as unknown as { isAbstract: boolean }).isAbstract = false;
 
         if (alarmType.isAbstract) {
-            throw new Error("Alarm Type cannot be abstract " + alarmType.browseName.toString());
+            throw new Error(`Alarm Type cannot be abstract ${alarmType.browseName.toString()}`);
         }
-        (deviceNode as any).eventNotifier = 1;
+        deviceNode.setEventNotifier(EventNotifierFlags.SubscribeToEvents);
 
         const options = {
             browseName,
@@ -112,15 +186,9 @@ describe("AddressSpace#deleteNode", () => {
             conditionSource: deviceNode,
             inputNode: deviceHealthNode,
             // normalState: normalStateNode,
-            optionals: [
-                "ConfirmedState",
-                "Confirm"
-            ]
+            optionals: ["ConfirmedState", "Confirm"]
         };
-        const alarmNode = namespace.instantiateAlarmCondition(
-            alarmType,
-            options,
-            null);
+        const alarmNode = namespace.instantiateAlarmCondition(alarmType, options, undefined);
 
         alarmNode.conditionName.setValueFromSource({
             dataType: DataType.String,
@@ -128,14 +196,13 @@ describe("AddressSpace#deleteNode", () => {
         });
 
         // install inputNode Node monitoring for change
-        alarmNode._installInputNodeMonitoring(options.inputNode);
+        alarmNode.installInputNodeMonitoring(options.inputNode);
         alarmNode.activeState.setValue(false);
 
         return alarmNode;
     }
 
     function createDeviceNodeWithAlarm(nodeId: string) {
-
         const nsDI = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/DI/");
         if (nsDI < 0) {
             throw new Error("Cannot find DI namespace!");
@@ -146,17 +213,17 @@ describe("AddressSpace#deleteNode", () => {
             browseName: "A",
             eventSourceOf: addressSpace.rootFolder.objects.server,
             nodeId,
-            organizedBy: addressSpace.rootFolder.objects,
+            organizedBy: addressSpace.rootFolder.objects
         });
-        const deviceHealth = namespace.addVariable({
+        const _deviceHealth = namespace.addVariable({
             browseName: "DeviceHealth",
             componentOf: deviceNode,
-            dataType: "Int32",
+            dataType: "Int32"
         });
-        const deviceHealthAlarms = namespace.addObject({
+        const _deviceHealthAlarms = namespace.addObject({
             browseName: "DeviceHealthAlarms",
-            componentOf: deviceNode,
-        })
+            componentOf: deviceNode
+        });
         _createXXXXAlarm(deviceNode, checkFunctionAlarmType, "CheckFunctionAlarm");
 
         return deviceNode;
@@ -164,13 +231,9 @@ describe("AddressSpace#deleteNode", () => {
 
     before(async () => {
         addressSpace = AddressSpace.create();
-        const namespace0 = addressSpace.getDefaultNamespace();
+        const _namespace0 = addressSpace.getDefaultNamespace();
 
-        await generateAddressSpace(addressSpace, [
-            nodesets.standard,
-            nodesets.di,
-            nodesets.autoId,
-        ]);
+        await generateAddressSpace(addressSpace, [nodesets.standard, nodesets.di, nodesets.autoId]);
         await ensureDatatypeExtracted(addressSpace);
         namespace = addressSpace.getOwnNamespace();
     });
@@ -179,12 +242,11 @@ describe("AddressSpace#deleteNode", () => {
         addressSpace.dispose();
     });
 
-    it("YUYU mshould create an alarm and delete it", () => {
-
+    it("YUYU should create an alarm and delete it", () => {
         const deviceNode = createDeviceNodeWithAlarm("s=Test");
         addressSpace.deleteNode(deviceNode);
+
         const deviceNodeAgain = createDeviceNodeWithAlarm("s=Test");
         addressSpace.deleteNode(deviceNodeAgain);
     });
-
 });

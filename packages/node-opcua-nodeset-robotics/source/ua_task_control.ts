@@ -1,0 +1,60 @@
+import type { UAObject, UAProperty } from "node-opcua-address-space-base";
+import type { UAString } from "node-opcua-basic-types";
+import type { LocalizedText } from "node-opcua-data-model";
+import type { UAComponent, UAComponent_Base } from "node-opcua-nodeset-di/dist/ua_component.js";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { UAFolder } from "node-opcua-nodeset-ua/dist/ua_folder.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { EnumExecutionMode } from "./enum_execution_mode.js";
+import type { UATaskControlOperation } from "./ua_task_control_operation.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UATaskControl_parameterSet extends UAObject { // Object
+      /**
+       * executionMode
+       * Execution mode of the task control (continuous or
+       * step-wise).
+       */
+      executionMode?: UABaseDataVariable<EnumExecutionMode, DataType.Int32>;
+      /**
+       * taskProgramLoaded
+       * The TaskProgramLoaded variable is TRUE if a task
+       * program is loaded in the task control, FALSE
+       * otherwise.
+       */
+      taskProgramLoaded: UABaseDataVariable<boolean, DataType.Boolean>;
+      /**
+       * taskProgramName
+       * A customer given identifier for the task program.
+       */
+      taskProgramName: UABaseDataVariable<UAString, DataType.String>;
+}
+/**
+ * Represents a specific task control active on the
+ * controller.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Robotics/                       |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |TaskControlType i=1011                                      |
+ * |isAbstract      |false                                                       |
+ */
+export interface UATaskControl_Base extends UAComponent_Base {
+    /**
+     * componentName
+     * A user writable name provided by the vendor,
+     * integrator or user of the device.
+     */
+    componentName: UAProperty<LocalizedText, DataType.LocalizedText>;
+    /**
+     * parameterSet
+     * Flat list of Parameters
+     */
+    parameterSet: UATaskControl_parameterSet;
+    taskControlOperation?: UATaskControlOperation;
+    taskModules?: UAFolder;
+}
+export interface UATaskControl extends Omit<UAComponent, "componentName"|"parameterSet">, UATaskControl_Base {}

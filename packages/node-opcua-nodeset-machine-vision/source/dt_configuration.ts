@@ -1,0 +1,26 @@
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { DTStructure } from "node-opcua-nodeset-ua/dist/dt_structure.js";
+
+import type { DTConfigurationId } from "./dt_configuration_id.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |           |                                                            |
+ * |-----------|------------------------------------------------------------|
+ * | namespace |http://opcfoundation.org/UA/MachineVision                   |
+ * | nodeClass |DataType                                                    |
+ * | name      |ConfigurationDataType                                       |
+ * | isAbstract|false                                                       |
+ */
+export interface DTConfiguration extends DTStructure {
+  /** Indicates that actual content of the configuration may be transferred through temporary file transfer method.*/
+  hasTransferableDataOnFile?: boolean; // Boolean ns=0;i=1
+  /** Identification of the configuration used by the environment. This argument must not be empty.*/
+  externalId?: DTConfigurationId; // ExtensionObject ns=4;i=3008
+  /** System-wide unique ID for identifying a configuration. This ID is assigned by the vision system.*/
+  internalId: DTConfigurationId; // ExtensionObject ns=4;i=3008
+  /** The time and date when this configuration was last modified.*/
+  lastModified: Date; // DateTime ns=0;i=294
+}
+export interface UDTConfiguration extends ExtensionObject, DTConfiguration {};

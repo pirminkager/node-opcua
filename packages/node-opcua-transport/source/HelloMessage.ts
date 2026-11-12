@@ -1,46 +1,45 @@
 /**
  * @module node-opcua-transport
  */
-import {
-    decodeUAString, decodeUInt32, encodeUAString,
-    encodeUInt32, UAString, UInt32
-} from "node-opcua-basic-types";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
+import { decodeUAString, decodeUInt32, encodeUAString, encodeUInt32, type UAString, type UInt32 } from "node-opcua-basic-types";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
 import {
     BaseUAObject,
-    buildStructuredType, check_options_correctness_against_schema,
+    buildStructuredType,
+    check_options_correctness_against_schema,
     initialize_field,
-    parameters, StructuredTypeSchema
+    parameters
 } from "node-opcua-factory";
+import type { IHelloAckLimits } from "./i_hello_ack_limits.js";
 
-const schemaHelloMessage: StructuredTypeSchema = buildStructuredType({
+const schemaHelloMessage = buildStructuredType({
     name: "HelloMessage",
 
     baseType: "BaseUAObject",
 
     fields: [
         {
-            name: "protocolVersion",
+            name: "ProtocolVersion",
 
             fieldType: "UInt32",
 
             documentation: "The latest version of the OPC UA TCP protocol supported by the Client"
         },
         {
-            name: "receiveBufferSize",
+            name: "ReceiveBufferSize",
 
             fieldType: "UInt32",
 
             documentation: "The largest message that the sender can receive."
         },
         {
-            name: "sendBufferSize",
+            name: "SendBufferSize",
 
             fieldType: "UInt32",
 
             documentation: "The largest message that the sender will send."
         },
-        { name: "maxMessageSize", fieldType: "UInt32", documentation: "The maximum size for any response message." },
+        { name: "MaxMessageSize", fieldType: "UInt32", documentation: "The maximum size for any response message." },
         {
             name: "maxChunkCount",
 
@@ -49,9 +48,9 @@ const schemaHelloMessage: StructuredTypeSchema = buildStructuredType({
             documentation: "The maximum number of chunks in any response message"
         },
         {
-            name: "endpointUrl",
+            name: "EndpointUrl",
 
-            fieldType: "UAString",
+            fieldType: "String",
 
             documentation: "The URL of the Endpoint which the Client wished to connect to."
         }
@@ -67,8 +66,7 @@ export interface HelloMessageOptions {
     endpointUrl?: UAString;
 }
 
-export class HelloMessage extends BaseUAObject {
-
+export class HelloMessage extends BaseUAObject implements IHelloAckLimits {
     public static possibleFields: string[] = [
         "protocolVersion",
         "receiveBufferSize",
@@ -88,7 +86,7 @@ export class HelloMessage extends BaseUAObject {
         options = options || {};
         super();
         const schema = schemaHelloMessage;
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (parameters.debugSchemaHelper) {
             check_options_correctness_against_schema(this, schema, options);
         }
@@ -119,5 +117,15 @@ export class HelloMessage extends BaseUAObject {
         this.maxMessageSize = decodeUInt32(stream);
         this.maxChunkCount = decodeUInt32(stream);
         this.endpointUrl = decodeUAString(stream);
+    }
+    public toString(): string {
+        let str = "";
+        str += `protocolVersion   = ${this.protocolVersion}\n`;
+        str += `receiveBufferSize = ${this.receiveBufferSize}\n`;
+        str += `sendBufferSize    = ${this.sendBufferSize}\n`;
+        str += `maxMessageSize    = ${this.maxMessageSize}\n`;
+        str += `maxChunkCount     = ${this.maxChunkCount}\n`;
+        str += `endpointUrl       = ${this.endpointUrl}\n`;
+        return str;
     }
 }

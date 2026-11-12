@@ -1,0 +1,13 @@
+import type { UAProcessConditionClass, UAProcessConditionClass_Base } from "node-opcua-nodeset-ua/dist/ua_process_condition_class.js";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/MetalForming/                   |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |FormingProcessConditionClassType i=1023                     |
+ * |isAbstract      |true                                                        |
+ */
+export type UAFormingProcessConditionClass_Base = UAProcessConditionClass_Base;
+export interface UAFormingProcessConditionClass extends UAProcessConditionClass, UAFormingProcessConditionClass_Base {}

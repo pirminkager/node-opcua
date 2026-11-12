@@ -1,26 +1,19 @@
-// tslint:disable:max-line-length
 import { assert } from "node-opcua-assert";
-import { DataTypeIds } from "node-opcua-constants";
-import { BrowseDirection } from "node-opcua-data-model";
-import { AttributeIds } from "node-opcua-data-model";
-import { NodeId } from "node-opcua-nodeid";
-import { makeNodeId } from "node-opcua-nodeid";
-import { resolveNodeId } from "node-opcua-nodeid";
+import { DataTypeIds, ReferenceTypeIds } from "node-opcua-constants";
+import { AttributeIds, BrowseDirection } from "node-opcua-data-model";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { makeNodeId, NodeId, resolveNodeId } from "node-opcua-nodeid";
 import { DataType } from "node-opcua-variant";
-import * as should from "should";
-
-import { AddressSpace, Namespace, SessionContext, UAReference } from "..";
-import { getMiniAddressSpace } from "..";
+import should from "should";
+import type { AddressSpace, Namespace, UAReference } from "../dist/api/index.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
 
 function findReference(references: UAReference[], nodeId: NodeId): UAReference[] {
     assert(nodeId instanceof NodeId);
     return references.filter((r: UAReference) => r.nodeId.toString() === nodeId.toString());
 }
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("testing address space", () => {
-
     let addressSpace: AddressSpace;
     let namespace: Namespace;
     before(async () => {
@@ -34,55 +27,48 @@ describe("testing address space", () => {
     });
 
     it("BaseNode#findReferencesEx - should find HierarchicalReferences", () => {
-
         const object = namespace.addObject({
             browseName: "ChildObject",
-            organizedBy: "RootFolder",
+            organizedBy: "RootFolder"
         });
 
-        object.findReferencesEx("HierarchicalReferences", BrowseDirection.Inverse).length
-            .should.eql(1, "Object must be child of one parent");
+        object
+            .findReferencesEx("HierarchicalReferences", BrowseDirection.Inverse)
+            .length.should.eql(1, "Object must be child of one parent");
 
-        object.findReferencesEx("HierarchicalReferences", BrowseDirection.Forward).length
-            .should.eql(0, "Object must not have children yet");
+        object
+            .findReferencesEx("HierarchicalReferences", BrowseDirection.Forward)
+            .length.should.eql(0, "Object must not have children yet");
 
-        const comp1 = namespace.addVariable({
+        const _comp1 = namespace.addVariable({
             browseName: "Component1",
             componentOf: object,
             dataType: "String"
         });
-        object.findReferencesEx("HierarchicalReferences", BrowseDirection.Forward).length
-            .should.eql(1, "Object must now have one child");
+        object
+            .findReferencesEx("HierarchicalReferences", BrowseDirection.Forward)
+            .length.should.eql(1, "Object must now have one child");
 
-        object.findReferencesEx("HasChild", BrowseDirection.Forward).length
-            .should.eql(1, "Object must now have one child");
+        object.findReferencesEx("HasChild", BrowseDirection.Forward).length.should.eql(1, "Object must now have one child");
         // xx object.findReferencesEx("ChildOf",true).length.should.eql(1,"Object must now have one child");
 
-        object.findReferencesEx("Aggregates", BrowseDirection.Forward).length
-            .should.eql(1, "Object must now have one child");
+        object.findReferencesEx("Aggregates", BrowseDirection.Forward).length.should.eql(1, "Object must now have one child");
 
-        object.findReferencesEx("HasComponent", BrowseDirection.Forward).length
-            .should.eql(1, "Object must now have one child");
+        object.findReferencesEx("HasComponent", BrowseDirection.Forward).length.should.eql(1, "Object must now have one child");
 
-        object.findReferencesEx("HasProperty", BrowseDirection.Forward).length
-            .should.eql(0, "Object must now have one child");
+        object.findReferencesEx("HasProperty", BrowseDirection.Forward).length.should.eql(0, "Object must now have one child");
 
-        object.findReferencesEx("Organizes", BrowseDirection.Forward).length
-            .should.eql(0, "Object must now have one child");
-
+        object.findReferencesEx("Organizes", BrowseDirection.Forward).length.should.eql(0, "Object must now have one child");
     });
 
     it("AddressSpace#deleteNode - should remove an object from the address space", () => {
-
-        const options = {
+        const object = namespace.addObject({
             browseName: "SomeObject",
-            organizedBy: "ObjectsFolder",
-        };
-
-        const object = namespace.addObject(options);
+            organizedBy: "ObjectsFolder"
+        });
 
         // object shall be found with a global nodeId search
-        addressSpace.findNode(object.nodeId)!.should.eql(object);
+        should(addressSpace.findNode(object.nodeId)).eql(object);
 
         const rootFolder = addressSpace.rootFolder;
         // object shall be found in parent folder
@@ -90,7 +76,7 @@ describe("testing address space", () => {
         findReference(references, object.nodeId).length.should.eql(1);
 
         // root folder should organize the object
-        rootFolder.objects.getFolderElementByName("SomeObject")!.browseName.toString().should.eql("1:SomeObject");
+        should(rootFolder.objects.getFolderElementByName("SomeObject")?.browseName.toString()).eql("1:SomeObject");
 
         // ------------------------------------- NOW DELETE THE OBJECT
         addressSpace.deleteNode(object.nodeId);
@@ -104,21 +90,19 @@ describe("testing address space", () => {
         findReference(references, object.nodeId).length.should.eql(0);
 
         should(rootFolder.getFolderElementByName("SomeObject")).eql(null);
-
     });
 
     it("AddressSpace#deleteNode - should remove an object and its children from the address space", () => {
-
         const options = {
             browseName: "SomeObject",
-            organizedBy: "ObjectsFolder",
+            organizedBy: "ObjectsFolder"
         };
         const object = namespace.addObject(options);
         const innerVar = namespace.addVariable({ componentOf: object, browseName: "Hello", dataType: "String" });
 
         // objects shall  be found with a global nodeId search
-        addressSpace.findNode(object.nodeId)!.should.eql(object);
-        addressSpace.findNode(innerVar.nodeId)!.should.eql(innerVar);
+        should(addressSpace.findNode(object.nodeId)).eql(object);
+        should(addressSpace.findNode(innerVar.nodeId)).eql(innerVar);
 
         let references = object.findReferences("HasComponent", true);
         findReference(references, innerVar.nodeId).length.should.eql(1);
@@ -137,17 +121,15 @@ describe("testing address space", () => {
 
         references = rootFolder.findReferences("Organizes", true);
         findReference(references, object.nodeId).length.should.eql(0);
-
     });
 
     it("AddressSpace#deleteNode - should remove a component of a existing object", () => {
-
         // give an object
         const object = namespace.addObject({ organizedBy: "ObjectsFolder", browseName: "MyObject1" });
 
         // let's construct some properties and some components gradually, and verify that the caches
         // work as expected.
-        const comp1 = namespace.addVariable({ componentOf: object, browseName: "Component1", dataType: "String" });
+        const _comp1 = namespace.addVariable({ componentOf: object, browseName: "Component1", dataType: "String" });
         const prop1 = namespace.addVariable({ propertyOf: object, browseName: "Property1", dataType: "String" });
 
         object.getComponents().length.should.eql(1);
@@ -156,11 +138,11 @@ describe("testing address space", () => {
         object.getProperties().length.should.eql(1);
         object.getProperties()[0].browseName.toString().should.eql("1:Property1");
 
-        object.getChildByName("Component1")!.browseName.toString().should.eql("1:Component1");
-        object.getChildByName("Property1")!.browseName.toString().should.eql("1:Property1");
+        should(object.getChildByName("Component1")?.browseName.toString()).eql("1:Component1");
+        should(object.getChildByName("Property1")?.browseName.toString()).eql("1:Property1");
         should(object.getChildByName("Component2")).eql(null);
 
-        const comp2 = namespace.addVariable({ componentOf: object, browseName: "Component2", dataType: "String" });
+        const _comp2 = namespace.addVariable({ componentOf: object, browseName: "Component2", dataType: "String" });
         const prop2 = namespace.addVariable({ propertyOf: object, browseName: "Property2", dataType: "String" });
 
         object.getComponents().length.should.eql(2);
@@ -171,41 +153,72 @@ describe("testing address space", () => {
         object.getProperties()[0].browseName.toString().should.eql("1:Property1");
         object.getProperties()[1].browseName.toString().should.eql("1:Property2");
 
-        object.getChildByName("Component1")!.browseName.toString().should.eql("1:Component1");
-        object.getChildByName("Property1")!.browseName.toString().should.eql("1:Property1");
-        object.getChildByName("Component2")!.browseName.toString().should.eql("1:Component2");
-        object.getChildByName("Property2")!.browseName.toString().should.eql("1:Property2");
+        should(object.getChildByName("Component1")?.browseName.toString()).eql("1:Component1");
+        should(object.getChildByName("Property1")?.browseName.toString()).eql("1:Property1");
+        should(object.getChildByName("Component2")?.browseName.toString()).eql("1:Component2");
+        should(object.getChildByName("Property2")?.browseName.toString()).eql("1:Property2");
 
         // now lets remove Prop1
         addressSpace.deleteNode(prop1.nodeId);
         object.getProperties().length.should.eql(1);
         object.getProperties()[0].browseName.toString().should.eql("1:Property2");
 
-        object.getChildByName("Component1")!.browseName.toString().should.eql("1:Component1");
+        should(object.getChildByName("Component1")?.browseName.toString()).eql("1:Component1");
         should(object.getChildByName("Property1")).eql(null);
-        object.getChildByName("Component2")!.browseName.toString().should.eql("1:Component2");
-        object.getChildByName("Property2")!.browseName.toString().should.eql("1:Property2");
+        should(object.getChildByName("Component2")?.browseName.toString()).eql("1:Component2");
+        should(object.getChildByName("Property2")?.browseName.toString()).eql("1:Property2");
 
         addressSpace.deleteNode(prop2.nodeId);
         object.getProperties().length.should.eql(0);
 
-        object.getChildByName("Component1")!.browseName.toString().should.eql("1:Component1");
+        should(object.getChildByName("Component1")?.browseName.toString()).eql("1:Component1");
         should(object.getChildByName("Property1")).eql(null);
-        object.getChildByName("Component2")!.browseName.toString().should.eql("1:Component2");
+        should(object.getChildByName("Component2")?.browseName.toString()).eql("1:Component2");
         should(object.getChildByName("Property2")).eql(null);
+    });
 
+    it("AddressSpace#deleteNode - should remove a component with HasOrderedComponent -reverse", () => {
+        const object = namespace.addObject({ browseName: "MyObject1" });
+
+        const component = namespace.addObject({ browseName: "MyComponent" });
+
+        // component <- HasOrderedCOmpoentn -- object
+        component.addReference({
+            nodeId: object,
+            referenceType: resolveNodeId(ReferenceTypeIds.HasOrderedComponent),
+            isForward: false
+        });
+
+        should.exist(object.getChildByName("MyComponent"));
+        should(object.getComponentByName("MyComponent")?.browseName.toString()).eql("1:MyComponent");
+
+        addressSpace.deleteNode(component);
+        should.not.exist(object.getChildByName("MyComponent"));
+    });
+    it("AddressSpace#deleteNode - should remove a component with HasOrderedComponent", () => {
+        const object = namespace.addObject({ browseName: "MyObject1" });
+
+        // object - HasOrderedCOmpoentn -> component
+        const component = namespace.addObject({ browseName: "MyComponent" });
+        object.addReference({
+            nodeId: component,
+            referenceType: resolveNodeId(ReferenceTypeIds.HasOrderedComponent),
+            isForward: true
+        });
+        should.exist(object.getChildByName("MyComponent"));
+        should(object.getComponentByName("MyComponent")?.browseName.toString()).eql("1:MyComponent");
+
+        addressSpace.deleteNode(component);
+        should.not.exist(object.getChildByName("MyComponent"));
     });
 
     it("AddressSpace#findCorrespondingBasicDataType i=13 => DataType.String", () => {
-
         const dataType = addressSpace.findDataType(resolveNodeId("i=12"))!;
         dataType.browseName.toString().should.eql("String");
         addressSpace.findCorrespondingBasicDataType(dataType).should.eql(DataType.String);
-
     });
 
     it("AddressSpace#findCorrespondingBasicDataType i=338 => BuildInfo => DataType.ExtensionObject", () => {
-
         const dataType = addressSpace.findDataType(makeNodeId(DataTypeIds.BuildInfo))!; // ServerStatus
         dataType.browseName.toString().should.eql("BuildInfo");
         addressSpace.findCorrespondingBasicDataType(dataType).should.eql(DataType.ExtensionObject);
@@ -221,61 +234,51 @@ describe("testing address space", () => {
         addressSpace.findCorrespondingBasicDataType(makeNodeId(DataTypeIds.BuildInfo)).should.eql(DataType.ExtensionObject);
     });
 
-    it("AddressSpace#findCorrespondingBasicDataType i=852 (Enumeration ServerState) => UInt32", () => {
+    it("AddressSpace#findCorrespondingBasicDataType i=852 (Enumeration ServerState) => Int32", () => {
         addressSpace.findCorrespondingBasicDataType(makeNodeId(DataTypeIds.ServerState)).should.eql(DataType.Int32);
     });
 
     it(" AddressSpace#findCorrespondingBasicDataType  i=13 => DataType.String", () => {
-
         const dataType = addressSpace.findDataType(resolveNodeId("i=12"))!;
         dataType.browseName.toString().should.eql("String");
         addressSpace.findCorrespondingBasicDataType(dataType).should.eql(DataType.String);
-
     });
 
     it("AddressSpace#findCorrespondingBasicDataType i=338 => BuildInfo => DataType.ExtensionObject", () => {
-
         const dataType = addressSpace.findDataType(makeNodeId(DataTypeIds.BuildInfo))!; // ServerStatus
         dataType.browseName.toString().should.eql("BuildInfo");
         addressSpace.findCorrespondingBasicDataType(dataType).should.eql(DataType.ExtensionObject);
     });
 
     it("AddressSpace#findCorrespondingBasicDataType variation 1 - Alias", () => {
-        addressSpace.findCorrespondingBasicDataType("Int32")!.should.eql(DataType.Int32);
+        should(addressSpace.findCorrespondingBasicDataType("Int32")).eql(DataType.Int32);
     });
     it("AddressSpace#findCorrespondingBasicDataType variation 2 - nodeId as String", () => {
-        addressSpace.findCorrespondingBasicDataType("i=13")!.should.eql(DataType.DateTime);
+        should(addressSpace.findCorrespondingBasicDataType("i=13")).eql(DataType.DateTime);
     });
     it("AddressSpace#findCorrespondingBasicDataType variation 3 - nodeId as NodeId", () => {
         addressSpace.findCorrespondingBasicDataType(makeNodeId(DataTypeIds.BuildInfo)).should.eql(DataType.ExtensionObject);
     });
 
     it("AddressSpace#addObject : should verify that Only Organizes References are used to relate Objects to the 'Objects' standard Object.", () => {
-
         //  (version 1.03) part 5 : $8.2.4
         //   Only Organizes References are used to relate Objects to the 'Objects' standard Object.
         should(function add_an_object_to_the_objects_folder_using_a_component_relation_instead_of_organizedBy() {
-
             namespace.addObject({
                 browseName: "TestObject1",
                 componentOf: addressSpace.rootFolder.objects
             });
-
         }).throwError();
 
         should(function add_an_object_to_the_objects_folder_using_a_property_relation_instead_of_organizedBy() {
-
             namespace.addObject({
                 browseName: "TestObject2",
                 propertyOf: addressSpace.rootFolder.objects
             });
-
         }).throwError();
-
     });
 
     it("AddressSpace#extractRootViews : it should provide a mean to extract the list of views to which the object is visible", () => {
-
         // by walking up the hierarchy of node until we reach either the root.objects folder => primary view is server
         // or the views folder
 
@@ -283,33 +286,33 @@ describe("testing address space", () => {
 
         const view1 = namespace.addView({
             browseName: "View1",
-            organizedBy: addressSpace.rootFolder.views,
+            organizedBy: addressSpace.rootFolder.views
         });
 
-        const view2 = namespace.addView({
+        const _view2 = namespace.addView({
             browseName: "View2",
-            organizedBy: addressSpace.rootFolder.views,
+            organizedBy: addressSpace.rootFolder.views
         });
 
-        const view3 = namespace.addView({
+        const _view3 = namespace.addView({
             browseName: "View3",
-            organizedBy: addressSpace.rootFolder.views,
+            organizedBy: addressSpace.rootFolder.views
         });
 
         const folder = namespace.addObject({
             browseName: "EngineeringViews",
             organizedBy: addressSpace.rootFolder.views,
-            typeDefinition: addressSpace.findObjectType("FolderObjectType")!,
+            typeDefinition: addressSpace.findObjectType("FolderObjectType")!
         });
 
         const view4 = namespace.addView({
             browseName: "View4",
-            organizedBy: folder,
+            organizedBy: folder
         });
 
         const node = namespace.addObject({
             browseName: "View4",
-            organizedBy: objects,
+            organizedBy: objects
         });
 
         node.addReference({ referenceType: "OrganizedBy", nodeId: view1 });
@@ -322,11 +325,11 @@ describe("testing address space", () => {
         views[0].should.eql(view1);
         views[1].should.eql(view4);
 
-        const context = SessionContext.defaultContext;
-        view1.readAttribute(context, AttributeIds.EventNotifier).value.toString().should.eql("Variant(Scalar<UInt32>, value: 0)");
-        view1.readAttribute(context, AttributeIds.ContainsNoLoops).value.toString().should.eql("Variant(Scalar<Boolean>, value: false)");
-        view1.readAttribute(context, AttributeIds.BrowseName).value.value.toString().should.eql("1:View1");
-
+        view1.readAttribute(null, AttributeIds.EventNotifier).value.toString().should.eql("Variant(Scalar<Byte>, value: 0)");
+        view1
+            .readAttribute(null, AttributeIds.ContainsNoLoops)
+            .value.toString()
+            .should.eql("Variant(Scalar<Boolean>, value: false)");
+        view1.readAttribute(null, AttributeIds.BrowseName).value.value.toString().should.eql("1:View1");
     });
-
 });

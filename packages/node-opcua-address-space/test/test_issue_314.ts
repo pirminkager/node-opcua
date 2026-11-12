@@ -1,17 +1,13 @@
-import * as should from "should";
-
-import * as fs from "fs";
-import * as nodesets from "node-opcua-nodesets";
+import fs from "node:fs";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { nodesets } from "node-opcua-nodesets";
 import { DataType } from "node-opcua-variant";
-import * as path from "path";
+import { AddressSpace, type UAVariable } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
+import { getAddressSpaceFixture } from "../test_helpers/get_address_space_fixture.js";
 
-import { AddressSpace , generateAddressSpace, UAVariable } from "..";
-
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
-describe("testing loading ExtensionObject value from NodeSet XML file", function (this: any) {
-
-    this.timeout(20000); // could be slow on appveyor !
+describe("testing loading ExtensionObject value from NodeSet XML file", function (this: Mocha.Context) {
+    this.timeout(Math.max(this.timeout(), 30000)); // could be slow on appveyor !
 
     let addressSpace: AddressSpace;
 
@@ -25,15 +21,10 @@ describe("testing loading ExtensionObject value from NodeSet XML file", function
     });
 
     it("#314 should load a EUInformation value from nodeset xml file", async () => {
-
-        const xml_file = path.join(__dirname, "../test_helpers/test_fixtures/nodeset_with_analog_items.xml");
+        const xml_file = getAddressSpaceFixture("nodeset_with_analog_items.xml");
         fs.existsSync(xml_file).should.be.eql(true);
 
-        const xml_files = [
-            nodesets.standard_nodeset_file,
-            nodesets.di_nodeset_filename,
-            xml_file
-        ];
+        const xml_files = [nodesets.standard, nodesets.di, xml_file];
         await generateAddressSpace(addressSpace, xml_files);
 
         const nodeId = "ns=2;i=6038";
@@ -42,6 +33,9 @@ describe("testing loading ExtensionObject value from NodeSet XML file", function
 
         const dataValue = node.readValue();
         dataValue.value.dataType.should.eql(DataType.ExtensionObject);
+
+        // console.log("xx ", dataValue.value.toString());
+
         dataValue.value.value.constructor.name.should.eql("EUInformation");
         dataValue.value.value.namespaceUri.should.eql("http://www.opcfoundation.org/UA/units/un/cefact");
         dataValue.value.value.unitId.should.eql(5066068);

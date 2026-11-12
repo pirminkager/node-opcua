@@ -1,0 +1,68 @@
+/**
+ * @module node-opcua-role-set-common
+ */
+
+export {
+    type ArchiveIO,
+    ArchiveStore,
+    identitiesFromBase64,
+    identitiesToBase64,
+    type PersistedCustomRole,
+    ROLE_SET_ARCHIVE_VERSION,
+    type RoleSetArchive,
+    readArchive,
+    writeArchive
+} from "./archive.js";
+export {
+    decodeIdentityStore,
+    encodeIdentityStore,
+    identityStoreBinaryStoreSize,
+    loadFromBinaryFile,
+    saveToBinaryFile
+} from "./binary_persistence.js";
+export type { AnyUserIdentityToken, IIdentityMappingStore } from "./identity_mapping_store.js";
+export { InMemoryIdentityMappingStore, type InMemoryIdentityMappingStoreOptions } from "./in_memory_store.js";
+export {
+    BcryptHasher,
+    defaultHasherRegistry,
+    HasherRegistry,
+    type PasswordHasher,
+    ScryptHasher,
+    scryptPhc
+} from "./password_hasher.js";
+export {
+    applicationComplies,
+    deserializeRestrictions,
+    type EndpointCriteria,
+    endpointComplies,
+    InMemoryRoleRestrictionStore,
+    type IRoleRestrictionStore,
+    loadRestrictionsFromFile,
+    type ResolutionContext,
+    type SerializedRoleRestriction,
+    saveRestrictionsToFile,
+    serializeRestrictions
+} from "./role_restriction_store.js";
+export {
+    type AuthenticationResult,
+    credentialRecord,
+    InMemoryUserManagementStore,
+    type IUserManagementStore,
+    type LegacySerializedUserRecord,
+    type ModifyUserOptions,
+    type PasswordPolicy,
+    type SerializedUserRecord,
+    serializeUser,
+    type UserRecord,
+    validateUserConfiguration
+} from "./user_management_store.js";
+export { WellKnownRoleIds, WellKnownRoles } from "./well_known_role_ids.js";
+export {
+    canonicalizeX509Subject,
+    certificateSubjectPairs,
+    type MatchX509SubjectOptions,
+    matchX509Subject,
+    parseX509SubjectCriteria,
+    X509_SUBJECT_ORDER,
+    type X509SubjectName
+} from "./x509_subject.js";

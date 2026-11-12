@@ -2,42 +2,39 @@
  * @module node-opcua-extension-object
  */
 import { decodeNodeId, encodeNodeId } from "node-opcua-basic-types";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
-import { checkDebugFlag, hexDump, make_debugLog } from "node-opcua-debug";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
+import { checkDebugFlag, hexDump, make_debugLog, make_warningLog } from "node-opcua-debug";
 import {
     BaseUAObject,
-    constructObject,
+    getStandardDataTypeFactory,
+    type IStructuredTypeSchema,
     is_internal_id,
     registerBuiltInType,
     StructuredTypeSchema
 } from "node-opcua-factory";
-import { ExpandedNodeId, makeNodeId, NodeId } from "node-opcua-nodeid";
+import { makeNodeId, type NodeId } from "node-opcua-nodeid";
 
-const debugLog = make_debugLog(__filename);
+const debugLog = make_debugLog("extension_object");
+const doDebug = checkDebugFlag("extension_object");
+const warningLog = make_warningLog("extension_object");
 
-import * as chalk from "chalk";
+import chalk from "chalk";
 
-/* tslint:disable:no-empty */
 export class ExtensionObject extends BaseUAObject {
-
-    public static schema: StructuredTypeSchema = new StructuredTypeSchema({
+    public static schema: IStructuredTypeSchema = new StructuredTypeSchema({
         baseType: "",
         documentation: "",
         fields: [],
-        name: "ExtensionObject"
+        name: "ExtensionObject",
+        dataTypeFactory: getStandardDataTypeFactory()
     });
 
-    constructor(options: any) {
+    constructor(_options?: unknown) {
         super();
     }
-
 }
 
 ExtensionObject.prototype.schema = ExtensionObject.schema;
-
-function constructEmptyExtensionObject(expandedNodeId: NodeId): ExtensionObject {
-    return constructObject(expandedNodeId as ExpandedNodeId);
-}
 
 // OPC-UA Part 6 - $5.2.2.15 ExtensionObject
 // An ExtensionObject is encoded as sequence of bytes prefixed by the  NodeId of its
@@ -66,54 +63,70 @@ function constructEmptyExtensionObject(expandedNodeId: NodeId): ExtensionObject 
 //
 
 export function encodeExtensionObject(object: BaseUAObject | null, stream: OutputBinaryStream): void {
-
     if (!object) {
         encodeNodeId(makeNodeId(0), stream);
         stream.writeUInt8(0x00); // no body is encoded
         // note : Length shall not hbe specified, end of the job!
     } else {
-        /* istanbul ignore next */
-        if (!((object as any) instanceof BaseUAObject)) {
+        if (object instanceof OpaqueStructure) {
+            // Writing raw Opaque buffer as Opaque Structure ...
+            encodeNodeId(object.nodeId, stream);
+            stream.writeUInt8(0x01); // 0x01 The body is encoded as a ByteString.
+            stream.writeByteStream(object.buffer);
+            return;
+        }
+        /* c8 ignore next */
+        if (!(object instanceof BaseUAObject)) {
             throw new Error("Expecting a extension object");
         }
         // ensure we have a valid encoding Default Binary ID !!!
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (!object.schema) {
-            debugLog(" object = ", object);
-            throw new Error("object has no schema " + object.constructor.name);
+            /* c8 ignore next */
+            doDebug && debugLog(" object = ", object);
+            throw new Error(`object has no schema ${object.constructor.name}`);
         }
-        const encodingDefaultBinary = object.schema.encodingDefaultBinary!;
-        /* istanbul ignore next */
+        const encodingDefaultBinary = object.schema.encodingDefaultBinary;
+        /* c8 ignore next */
         if (!encodingDefaultBinary) {
-            debugLog(chalk.yellow("encoding ExtObj "), object);
-            throw new Error("Cannot find encodingDefaultBinary for this object : " + object.schema.name);
+            // c8 ignore next
+            doDebug && debugLog(chalk.yellow("encoding ExtObj "), object);
+            throw new Error(`Cannot find encodingDefaultBinary for this object : ${object.schema.name}`);
         }
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (encodingDefaultBinary.isEmpty()) {
-            debugLog(chalk.yellow("encoding ExtObj "), (object.constructor as any).encodingDefaultBinary.toString());
-            throw new Error("Cannot find encodingDefaultBinary for this object : " + object.schema.name);
+            // c8 ignore next
+            doDebug && debugLog(chalk.yellow("encoding ExtObj "), encodingDefaultBinary.toString());
+            throw new Error(`Cannot find encodingDefaultBinary for this object : ${object.schema.name}`);
         }
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (is_internal_id(encodingDefaultBinary.value as number)) {
-            debugLog(chalk.yellow("encoding ExtObj "),
-                (object.constructor as any).encodingDefaultBinary.toString(), object.schema.name);
-            throw new Error("Cannot find valid OPCUA encodingDefaultBinary for this object : " + object.schema.name);
+            // c8 ignore next
+            doDebug && debugLog(chalk.yellow("encoding ExtObj "), encodingDefaultBinary.toString(), object.schema.name);
+            throw new Error(`Cannot find valid OPCUA encodingDefaultBinary for this object : ${object.schema.name}`);
         }
 
         encodeNodeId(encodingDefaultBinary, stream);
         stream.writeUInt8(0x01); // 0x01 The body is encoded as a ByteString.
-        stream.writeUInt32(object.binaryStoreSize());
+        // Reserve the body length and patch it in once the body has been written, rather
+        // than asking binaryStoreSize() for it. binaryStoreSize() is a full second encode
+        // of the object, and it re-enters this function for every nested ExtensionObject -
+        // so the two-pass form costs 2^(depth+1) traversals. Reserve-then-patch is one.
+        const lengthPosition = stream.reserveUInt32();
+        const bodyStart = stream.length;
         object.encode(stream);
+        stream.patchUInt32(lengthPosition, stream.length - bodyStart);
     }
 }
 
-// tslint:disable:max-classes-per-file
 export class OpaqueStructure extends ExtensionObject {
+    // the nodeId is the same as the encodingDefaultBinary
     public nodeId: NodeId;
+
     public buffer: Buffer;
 
     constructor(nodeId: NodeId, buffer: Buffer) {
-        super({});
+        super();
         this.nodeId = nodeId;
         this.buffer = buffer;
     }
@@ -121,15 +134,33 @@ export class OpaqueStructure extends ExtensionObject {
     public toString(): string {
         const str =
             "/* OpaqueStructure */ { \n" +
-            "nodeId " + this.nodeId.toString() + "\n" +
-            "buffer = \n" + hexDump(this.buffer) + "\n" +
+            "nodeId " +
+            this.nodeId.toString() +
+            "\n" +
+            "buffer = \n" +
+            hexDump(this.buffer) +
+            "\n" +
             "}";
         return str;
     }
 }
+export interface IDataTypeFactory {
+    constructObject(dataTypeNodeId: NodeId): BaseUAObject | null;
+}
+export function decodeExtensionObject(stream: BinaryStream, _value?: ExtensionObject | null): ExtensionObject | null {
+    // An ExtensionObject body can itself contain ExtensionObjects (directly, or via a
+    // Variant), so a deeply nested value graph can descend arbitrarily far on a message
+    // that stays within its size limit. Count the descent and refuse to go past the shared
+    // limit before the recursive call consumes another stack frame (Part 6 §5.1.8).
+    stream.enterNestingLevel();
+    try {
+        return _decodeExtensionObject(stream, _value);
+    } finally {
+        stream.exitNestingLevel();
+    }
+}
 
-export function decodeExtensionObject(stream: BinaryStream): ExtensionObject | null {
-
+function _decodeExtensionObject(stream: BinaryStream, _value?: ExtensionObject | null): ExtensionObject | null {
     const nodeId = decodeNodeId(stream);
     const encodingType = stream.readUInt8();
 
@@ -139,7 +170,7 @@ export function decodeExtensionObject(stream: BinaryStream): ExtensionObject | n
 
     const length = stream.readUInt32();
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (nodeId.value === 0 || encodingType === 0) {
         return {} as ExtensionObject;
     }
@@ -147,7 +178,15 @@ export function decodeExtensionObject(stream: BinaryStream): ExtensionObject | n
     // let verify that  decode will use the expected number of bytes
     const streamLengthBefore = stream.length;
 
-    let object: any;
+    function readByteStreamOrThrow(): Buffer {
+        const byteStream = stream.readByteStream();
+        if (!byteStream) {
+            throw new Error("decodeExtensionObject: expecting a non-empty byte stream for an opaque structure");
+        }
+        return byteStream;
+    }
+
+    let object: BaseUAObject | OpaqueStructure | null;
     if (nodeId.namespace !== 0) {
         // this is a extension object define in a other namespace
         // we can only threat it as an opaque object for the time being
@@ -156,20 +195,25 @@ export function decodeExtensionObject(stream: BinaryStream): ExtensionObject | n
         // structure
         // lets rewind before the length
         stream.length -= 4;
-        object = new OpaqueStructure(nodeId, stream.readByteStream()!);
-
+        object = new OpaqueStructure(nodeId, readByteStreamOrThrow());
     } else {
-        object = constructEmptyExtensionObject(nodeId);
-        /* istanbul ignore next */
+        try {
+            object = getStandardDataTypeFactory().constructObject(nodeId);
+        } catch (_err) {
+            warningLog("cannot construct object with dataType nodeId", nodeId.toString());
+            object = null;
+        }
+        /* c8 ignore next */
         if (object === null) {
             // this object is unknown to us ..
-            stream.length += length;
-            object = {} as ExtensionObject;
+            stream.length -= 4;
+            object = new OpaqueStructure(nodeId, readByteStreamOrThrow());
         } else {
             try {
                 object.decode(stream);
             } catch (err) {
-                debugLog("Cannot decode object ", err.message);
+                // c8 ignore next
+                doDebug && debugLog("Cannot decode object ", err);
             }
         }
     }
@@ -178,12 +222,21 @@ export function decodeExtensionObject(stream: BinaryStream): ExtensionObject | n
         // this may happen if the server or client do have a different OPCUA version
         // for instance SubscriptionDiagnostics structure has been changed between OPCUA version 1.01 and 1.04
         // causing 2 extra member to be added.
-        debugLog(chalk.bgWhiteBright.red("========================================="));
+        // c8 ignore next
+        doDebug && debugLog(chalk.bgWhiteBright.red("========================================="));
 
-        // tslint:disable-next-line:no-console
-        console.warn("WARNING => Extension object decoding error on ",
-            object.constructor.name, " expected size was", length,
-            "but only this amount of bytes have been read :", stream.length - streamLengthBefore);
+        warningLog(
+            "WARNING => decodeExtensionObject: Extension object decoding error on ",
+            object?.constructor.name,
+            " expected size was",
+            length,
+            "but only this amount of bytes have been read :",
+            stream.length - streamLengthBefore,
+            "\n           encoding nodeId = ",
+            nodeId.toString(),
+            "encodingType = ",
+            encodingType
+        );
         stream.length = streamLengthBefore + length;
     }
     return object;

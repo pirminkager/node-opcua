@@ -1,35 +1,47 @@
 {
     "name": "node-opcua-samples",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -samples",
+    "type": "module",
+    "version": "2.187.26",
+    "description": "pure nodejs OPCUA SDK - module samples",
     "bin": {
-        "simple_client": "./bin/simple_client_ts.ts",
-        "interactive_client": "./bin/interactive_client.js",
-        "simple_server": "./bin/simple_server.js",
-        "di_server": "./bin/di_server.js"
+        "simple_client": "./bin/client_example.cjs",
+        "interactive_client": "./bin/interactive_client.cjs",
+        "simple_server": "./bin/simple_server.cjs",
+        "di_server": "./bin/di_server.cjs"
     },
     "scripts": {
         "build": "tsc -b",
         "pretest": "npm run certificate",
-        "certificate": "node bin/create_certificates.js demo --dev -s",
+        "certificate": "node ./bin/prepare_certificate_folder.cjs && npx pki demo --dev",
         "test": "echo no test",
-        "clean": "node -e \"require('rimraf').sync('certificates');\""
+        "clean": "npx rimraf -g certificates"
+    },
+    "engines": {
+        "node": ">=22.13.0"
     },
     "dependencies": {
-        "@types/yargs": "^15.0.5",
-        "async": "^3.2.0",
-        "colors": "^1.4.0",
-        "easy-table": "^1.1.1",
-        "exit": "^0.1.2",
-        "node-opcua": "^2.6.0-alpha.1",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-pki": "^2.0.2",
-        "node-opcua-server-configuration": "^2.6.0-alpha.1",
-        "readline": "^1.3.0",
-        "sprintf-js": "^1.1.2",
-        "treeify": "^1.1.0",
-        "underscore": "^1.10.2",
-        "yargs": "^15.3.1"
+        "@types/command-line-args": "5.2.3",
+        "@types/command-line-usage": "5.0.4",
+        "@types/underscore": "1.13.0",
+        "bcryptjs": "3.0.3",
+        "chalk": "6.0.1",
+        "command-line-args": "6.0.2",
+        "command-line-usage": "7.0.4",
+        "easy-table": "^1.2.0",
+        "env-paths": "4.0.0",
+        "node-opcua": "2.187.26",
+        "node-opcua-address-space": "2.187.26",
+        "node-opcua-address-space-for-conformance-testing": "2.187.26",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-client-proxy": "2.187.26",
+        "node-opcua-crypto": "6.2.5",
+        "node-opcua-packet-analyzer": "2.187.0",
+        "node-opcua-pki": "7.1.6",
+        "node-opcua-server-configuration": "2.187.26",
+        "node-opcua-utils": "2.187.0",
+        "node-opcua-vendor-diagnostic": "2.187.26",
+        "sprintf-js": "^1.1.3",
+        "treeify": "^1.1.0"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -46,5 +58,8 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist"
+    ]
 }

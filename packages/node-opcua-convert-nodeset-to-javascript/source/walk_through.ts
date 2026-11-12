@@ -1,0 +1,74 @@
+import { AttributeIds, BrowseDirection, type NodeClass, type QualifiedName } from "node-opcua-data-model";
+import { type ExpandedNodeId, type NodeId, resolveNodeId } from "node-opcua-nodeid";
+import type { IBasicSessionAsync } from "node-opcua-pseudo-session";
+import { ReferenceDescription } from "node-opcua-types";
+
+export interface ReferenceDescriptionEx extends ReferenceDescription {
+    parent: ReferenceDescriptionEx;
+}
+export interface NodeVisitor {
+    visit(reference: ReferenceDescriptionEx, level: number): Promise<void>;
+}
+async function _walkThroughTypes(
+    session: IBasicSessionAsync,
+    nodeId: NodeId,
+    visitor?: NodeVisitor,
+    level?: number,
+    parent?: ReferenceDescription
+): Promise<void> {
+    level = level || 0;
+
+    if (!parent) {
+        const dataValues = await session.read([
+            { nodeId, attributeId: AttributeIds.BrowseName },
+            { nodeId, attributeId: AttributeIds.NodeClass }
+        ]);
+        const browseName = dataValues[0].value.value as QualifiedName;
+        const nodeClass = dataValues[1].value.value as NodeClass;
+        parent = new ReferenceDescription({
+            isForward: true,
+            nodeId: nodeId as ExpandedNodeId,
+            browseName,
+            nodeClass,
+            referenceTypeId: resolveNodeId("HasSubtype")
+            // typeDefinition,
+        });
+    }
+    const browseResult = await session.browse({
+        browseDirection: BrowseDirection.Forward,
+        nodeId,
+        includeSubtypes: true,
+        referenceTypeId: resolveNodeId("HasSubtype"),
+        resultMask: 0xff
+    });
+    for (const reference of browseResult.references || []) {
+        if (visitor) {
+            const r = reference as ReferenceDescriptionEx;
+            r.parent = parent as ReferenceDescriptionEx;
+            await visitor.visit(r, level);
+        }
+        await _walkThroughTypes(session, reference.nodeId, visitor, level + 1, reference);
+    }
+}
+
+export async function walkThroughReferenceTypes(session: IBasicSessionAsync, nodeVisitor?: NodeVisitor): Promise<void> {
+    const baseReferenceTypeNodeId = resolveNodeId("References");
+    await _walkThroughTypes(session, baseReferenceTypeNodeId, nodeVisitor);
+}
+export async function walkThroughDataTypes(session: IBasicSessionAsync, nodeVisitor?: NodeVisitor): Promise<void> {
+    const baseDataTypeTypeNodeId = resolveNodeId("BaseDataType");
+    await _walkThroughTypes(session, baseDataTypeTypeNodeId, nodeVisitor);
+}
+
+export async function walkThroughInterfaceTypes(session: IBasicSessionAsync, nodeVisitor?: NodeVisitor): Promise<void> {
+    const baseInterfaceTypeNodeId = resolveNodeId("BaseInterfaceType");
+    await _walkThroughTypes(session, baseInterfaceTypeNodeId, nodeVisitor);
+}
+export async function walkThroughObjectTypes(session: IBasicSessionAsync, nodeVisitor?: NodeVisitor): Promise<void> {
+    const baseObjectTypeNodeId = resolveNodeId("BaseObjectType");
+    await _walkThroughTypes(session, baseObjectTypeNodeId, nodeVisitor);
+}
+export async function walkThroughVariableTypes(session: IBasicSessionAsync, nodeVisitor?: NodeVisitor): Promise<void> {
+    const baseObjectTypeNodeId = resolveNodeId("BaseVariableType");
+    await _walkThroughTypes(session, baseObjectTypeNodeId, nodeVisitor);
+}

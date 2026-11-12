@@ -1,58 +1,91 @@
-import * as fs from "fs";
-import * as os from "os";
-import * as path from "path";
-import { promisify } from "util";
-
-import * as mkdirp from "mkdirp";
-import * as rimraf from "rimraf";
-import { should } from "should";
-
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { CertificateManager } from "node-opcua-certificate-manager";
 import {
-    Certificate,
+    type Certificate,
+    type CertificateRevocationList,
     convertPEMtoDER,
-    makeSHA1Thumbprint,
-    PrivateKey,
+    identifyDERContent,
+    type PrivateKey,
+    readCertificateChain,
+    readCertificateRevocationList,
+    readCertificateSigningRequest,
+    readPrivateKey,
     split_der,
     toPem
 } from "node-opcua-crypto";
 import { getFullyQualifiedDomainName } from "node-opcua-hostname";
-import {
-    CertificateAuthority,
-    CertificateManager,
-    g_config
-} from "node-opcua-pki";
+import { CertificateAuthority } from "node-opcua-pki";
+import { randomBytes } from "node-opcua-utils";
 
-export const _tempFolder = path.join(__dirname, "../../temp");
+const { readFile, writeFile } = fs.promises;
 
-export async function initializeHelpers() {
-    await promisify(rimraf)(path.join(_tempFolder, "*"));
-    try {
-        await promisify(fs.mkdir)(_tempFolder);
-    } catch (err) {
+let sharedCA: CertificateAuthority | null = null;
+let sharedCAInitPromise: Promise<void> | null = null;
 
+export async function getSharedCertificateAuthority(): Promise<CertificateAuthority> {
+    if (!sharedCA) {
+        const caFolder = path.join(os.tmpdir(), `node-opcua2-shared-ca-${randomBytes(4).toString("hex")}`);
+        await fs.promises.rm(caFolder, { recursive: true, force: true }).catch(() => {});
+        sharedCA = new CertificateAuthority({
+            keySize: 2048,
+            location: caFolder
+        });
+        sharedCAInitPromise = sharedCA.initialize();
+    }
+    await sharedCAInitPromise;
+    return sharedCA;
+}
+
+export async function disposeSharedCertificateAuthority(): Promise<void> {
+    if (sharedCA) {
+        sharedCA = null;
+        sharedCAInitPromise = null;
     }
 }
 
-export async function produceCertificateAndPrivateKey()
-    : Promise<{ certificate: Certificate, privateKey: PrivateKey }> {
+export async function initializeHelpers(prefix: string, _n: number): Promise<string> {
+    const _tempFolder = path.join(os.tmpdir(), "node-opcua2");
+    const subfolder = path.join(_tempFolder, prefix);
+    try {
+        await fs.promises.rm(subfolder, { recursive: true, force: true });
+    } catch (_err) {
+        // ignore
+    }
+    try {
+        await fs.promises.mkdir(path.dirname(subfolder));
+    } catch (_err) {
+        // ignore
+    }
+    try {
+        await fs.promises.mkdir(subfolder);
+    } catch (_err) {
+        // ignore
+    }
+    return subfolder;
+}
 
-    // Given a Certificate Authority
+export async function produceCertificateAndPrivateKey(
+    subfolder: string
+): Promise<{ certificate: Certificate; privateKey: PrivateKey; privateKeyPEM: string }> {
+    // Use a unique directory per invocation so CertificateManager
+    // always generates a fresh key pair rather than reusing an
+    // existing private key from a previous test.
+    const uniqueId = randomBytes(8).toString("hex");
     const certificateManager = new CertificateManager({
         keySize: 2048,
-        location: path.join(_tempFolder, "tmpPKI")
+        location: path.join(subfolder, `tmpPKI_${uniqueId}`)
     });
     await certificateManager.initialize();
 
-    const certFile = path.join(_tempFolder, "tmpPKI/certificate.pem");
-    const fileExists: boolean = await promisify(fs.exists)(certFile);
+    const certFile = path.join(certificateManager.rootDir, "own/certs/certificate.pem");
 
     await certificateManager.createSelfSignedCertificate({
         applicationUri: "applicationUri",
         subject: "CN=TOTO",
 
-        dns: [
-            getFullyQualifiedDomainName()
-        ],
+        dns: [getFullyQualifiedDomainName()],
 
         startDate: new Date(),
         validity: 365,
@@ -60,103 +93,207 @@ export async function produceCertificateAndPrivateKey()
         outputFile: certFile
     });
 
-    const content = await promisify(fs.readFile)(certFile, "ascii");
-    const certificate = convertPEMtoDER(content);
+    const certificateChain = readCertificateChain(certFile);
+    const privateKey = readPrivateKey(certificateManager.privateKey);
 
-    const privateKeyFile = certificateManager.privateKey;
-    const privateKeyPEM = await promisify(fs.readFile)(privateKeyFile, "ascii");
-    const privateKey = convertPEMtoDER(privateKeyPEM);
+    const privateKeyPEM = await fs.promises.readFile(certificateManager.privateKey, "utf8");
 
-    return { certificate, privateKey };
+    // Clean up internal watcher memory explicitly!
+    await certificateManager.dispose();
+
+    return { certificate: certificateChain[0], privateKey, privateKeyPEM };
+}
+
+export async function _getFakeAuthorityCertificate(
+    _subfolder: string
+): Promise<{ certificate: Certificate; crl: CertificateRevocationList }> {
+    const certificateAuthority = await getSharedCertificateAuthority();
+    const certificateChain = readCertificateChain(certificateAuthority.caCertificate);
+    const crl = await readCertificateRevocationList(certificateAuthority.revocationList);
+    return { certificate: certificateChain[0], crl };
 }
 
 async function _produceCertificate(
-    certificateSigningRequest: Buffer,
+    _subfolder: string,
+    certificateSigningRequest: Buffer | undefined,
     startDate: Date,
     validity: number
-): Promise<Buffer> {
-    // Given a Certificate Authority
-    const certificateAuthority = new CertificateAuthority({
-        keySize: 2048,
-        location: path.join(_tempFolder, "CA")
-    });
-    await certificateAuthority.initialize();
+): Promise<Certificate[]> {
+    if (!certificateSigningRequest) {
+        throw new Error("certificateSigningRequest is required");
+    }
+    const derContent = identifyDERContent(certificateSigningRequest);
+    if (derContent !== "CertificateSigningRequest") {
+        throw new Error(`certificateSigningRequest is not a certificate request but a ${derContent}`);
+    }
+    // Given the Shared Certificate Authority
+    const certificateAuthority = await getSharedCertificateAuthority();
 
     // --- now write the certificate signing request to the disc
-    const csrFilename = "signing_request.csr";
+    const uniqueId = randomBytes(8).toString("hex");
+    const csrFilename = `signing_request_${uniqueId}.csr`;
     const csrFile = path.join(certificateAuthority.rootDir, csrFilename);
 
-    await promisify(fs.writeFile)(csrFile,
-        toPem(certificateSigningRequest,
-            "CERTIFICATE REQUEST"), "utf8");
+    await writeFile(csrFile, toPem(certificateSigningRequest, "CERTIFICATE REQUEST"), "utf8");
 
     // --- generate the certificate
+    const certificate = path.join(certificateAuthority.rootDir, `newCertificate_${uniqueId}.pem`);
 
-    const certificate = path.join(certificateAuthority.rootDir, "newCertificate.pem");
-    if (fs.existsSync(certificate)) {
-        // delete existing file
-        await promisify(fs.unlink)(certificate);
-    }
-
-    await certificateAuthority.signCertificateRequest(
-        certificate,
-        csrFile, {
+    await certificateAuthority.signCertificateRequest(certificate, csrFile, {
         applicationUri: "urn:MACHINE:MyApplication",
         dns: [os.hostname()],
         startDate,
         validity
     });
 
-    const certificatePEM = await promisify(fs.readFile)(certificate, "utf8");
-    return convertPEMtoDER(certificatePEM);
+    const certificatePEM = await readFile(certificate, "utf8");
+    const certificateDER = convertPEMtoDER(certificatePEM);
+
+    await fs.promises.unlink(csrFile).catch(() => {});
+    await fs.promises.unlink(certificate).catch(() => {});
+
+    // signCertificateRequest already writes the full chain (cert + CA), so just return it
+    return split_der(certificateDER);
 }
 
-export async function produceOutdatedCertificate(certificateSigningRequest: Buffer): Promise<Buffer> {
-
+export async function produceOutdatedCertificate(subfolder: string, certificateSigningRequest?: Buffer): Promise<Certificate[]> {
+    if (!certificateSigningRequest) {
+        throw new Error("certificateSigningRequest is required");
+    }
+    const derContent = identifyDERContent(certificateSigningRequest);
+    if (derContent !== "CertificateSigningRequest") {
+        throw new Error(`certificateSigningRequest is not a certificate request but a ${derContent}`);
+    }
     const startDate = new Date(2010, 1, 1);
     const validity = 10; //
-    return _produceCertificate(certificateSigningRequest, startDate, validity);
+    return _produceCertificate(subfolder, certificateSigningRequest, startDate, validity);
 }
 
-export async function produceCertificate(certificateSigningRequest: Buffer): Promise<Buffer> {
-    const startDate = new Date(Date.now() - (3600 * 5) * 1000);
+export async function produceCertificate(subfolder: string, certificateSigningRequest?: Buffer): Promise<Certificate[]> {
+    if (!certificateSigningRequest) {
+        throw new Error("certificateSigningRequest is required");
+    }
+    const derContent = identifyDERContent(certificateSigningRequest);
+    if (derContent !== "CertificateSigningRequest") {
+        throw new Error(`certificateSigningRequest is not a certificate request but a ${derContent}`);
+    }
+    const startDate = new Date(Date.now() - 3600 * 5 * 1000);
     const validity = 365 * 10;
-    return _produceCertificate(certificateSigningRequest, startDate, validity);
+    return _produceCertificate(subfolder, certificateSigningRequest, startDate, validity);
 }
-
-let tmpGroup: CertificateManager;
 
 /**
  * createSomeCertificate create a certificate from a private key
  * @param certName
  */
-export async function createSomeCertificate(certName: string): Promise<Buffer> {
+export async function createSomeCertificate(certificateManager: CertificateManager, certName: string): Promise<Buffer> {
+    const certFile = path.join(certificateManager.rootDir, certName);
 
-    if (!tmpGroup) {
-        tmpGroup = new CertificateManager({
-            location: path.join(_tempFolder, "tmp")
-        });
-        await tmpGroup.initialize();
-    }
-    const certFile = path.join(_tempFolder, certName);
+    const fileExists: boolean = fs.existsSync(certFile);
 
-    const fileExists: boolean = await promisify(fs.exists)(certFile);
+    const _millisecondPerDay = 3600 * 24 * 1000;
+    const validity = 365;
+
     if (!fileExists) {
-
-        await tmpGroup.createSelfSignedCertificate({
+        await certificateManager.createSelfSignedCertificate({
             applicationUri: "applicationUri",
             subject: "CN=TOTO",
 
             dns: [],
 
             startDate: new Date(),
-            validity: 365,
-
+            validity,
             outputFile: certFile
         });
     }
 
-    const content = await promisify(fs.readFile)(certFile, "ascii");
+    const content = await readFile(certFile, "utf-8");
     const certificate = convertPEMtoDER(content);
     return certificate;
+}
+
+const millisecondPerDay = 3600 * 24 * 1000;
+export async function createCertificateWithEndDate(
+    _subfolder: string,
+    certificateManager: CertificateManager,
+    certName: string,
+    endDate: Date,
+    validity: number
+): Promise<Certificate[]> {
+    const startDate = new Date(endDate.getTime() - validity * millisecondPerDay);
+    const resultCSR = await certificateManager.createCertificateRequest({
+        applicationUri: "applicationUri",
+        subject: "CN=TOTO",
+        dns: [],
+        startDate,
+        validity
+    });
+
+    const certificateAuthority = await getSharedCertificateAuthority();
+
+    await certificateAuthority.signCertificateRequest(certName, resultCSR, {
+        applicationUri: "applicationUri",
+        startDate,
+        validity
+    });
+
+    const certificateChain = readCertificateChain(certName);
+    return certificateChain;
+}
+
+export async function createSomeOutdatedCertificate(
+    subfolder: string,
+    certificateManager: CertificateManager,
+    certName: string
+): Promise<Certificate[]> {
+    const now = Date.now();
+    const startDate = new Date(now - 365 * millisecondPerDay);
+    const validity = 10;
+    const endDate = new Date(startDate.getTime() + validity * millisecondPerDay);
+
+    return await createCertificateWithEndDate(subfolder, certificateManager, certName, endDate, validity);
+}
+
+/**
+ * Produce a certificate that is not yet valid (startDate in the future)
+ */
+export async function produceNotYetValidCertificate(subfolder: string, certificateSigningRequest: Buffer): Promise<Certificate[]> {
+    const startDate = new Date(Date.now() + 3600 * 24 * 1000); // 1 day in the future
+    const validity = 365;
+    return _produceCertificate(subfolder, certificateSigningRequest, startDate, validity);
+}
+
+/**
+ * Produce a CA-signed certificate chain [leaf, CA] using a fresh
+ * private key. The certificate is signed by the shared
+ * CertificateAuthority, so the returned chain always has length ≥ 2.
+ *
+ * This is useful for tests that need a non-self-signed certificate
+ * without depending on external certificate files.
+ */
+export async function produceSignedCertificateChain(subfolder: string): Promise<Certificate[]> {
+    const uniqueId = randomBytes(8).toString("hex");
+    const certificateManager = new CertificateManager({
+        keySize: 2048,
+        location: path.join(subfolder, `tmpPKI_signed_${uniqueId}`)
+    });
+    await certificateManager.initialize();
+
+    try {
+        const csrFile = await certificateManager.createCertificateRequest({
+            applicationUri: "urn:test:signed-cert",
+            subject: "CN=TestSignedCert",
+            dns: [os.hostname()],
+            startDate: new Date(),
+            validity: 365
+        });
+
+        // The CSR file may be PEM or DER — readCertificateSigningRequest handles both
+        const csrDer = await readCertificateSigningRequest(csrFile);
+
+        // produceCertificate returns [leaf, CA] (signCertificateRequest writes full chain)
+        return await produceCertificate(subfolder, csrDer);
+    } finally {
+        await certificateManager.dispose();
+    }
 }

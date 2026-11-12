@@ -1,0 +1,34 @@
+/**
+ * @module node-opcua-address-space
+ */
+import { assert } from "node-opcua-assert";
+import { coerceInt64, type Int64 } from "node-opcua-basic-types";
+import { coerceLocalizedText } from "node-opcua-data-model";
+import { EnumValueType } from "node-opcua-types";
+import type { EnumValueTypeOptionsLike } from "../address_space_ts.js";
+
+export function coerceEnumValues(enumValues: EnumValueTypeOptionsLike[] | { [key: string]: number | Int64 }): EnumValueType[] {
+    if (Array.isArray(enumValues)) {
+        //
+        return enumValues.map((en) => {
+            assert(Object.hasOwn(en, "value"));
+            assert(Object.hasOwn(en, "displayName"));
+            return new EnumValueType({
+                description: en.description !== undefined ? coerceLocalizedText(en.description) : null,
+                displayName: coerceLocalizedText(en.displayName),
+                value: coerceInt64(en.value || 0)
+            });
+        });
+    } else {
+        return coerceEnumValues(
+            Object.entries(enumValues as { [key: string]: Int64 }).map((entry: [string, Int64]) => {
+                const [key, value] = entry;
+                return new EnumValueType({
+                    description: coerceLocalizedText(key),
+                    displayName: coerceLocalizedText(key),
+                    value: coerceInt64(value)
+                });
+            })
+        );
+    }
+}

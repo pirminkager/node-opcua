@@ -1,13 +1,14 @@
 {
     "name": "node-opcua-test-fixtures",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -test-fixtures",
+    "type": "module",
+    "version": "2.184.0",
+    "description": "pure nodejs OPCUA SDK - module test-fixtures",
     "main": "./dist/index.js",
-    "type": "./dist/index.d.ts",
+    "types": "./dist/index.d.ts",
     "private": true,
     "scripts": {
         "build": "tsc -b",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
         "test": ""
     },
     "author": "Etienne Rossignon",
@@ -25,7 +26,8 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "dependencies": {
-        "node-opcua-debug": "^2.6.0-alpha.1"
-    }
+    "files": [
+        "dist",
+        "source"
+    ]
 }

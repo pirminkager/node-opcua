@@ -1,21 +1,21 @@
 /**
  * @module node-opcua-data-model
  */
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
-import { Enum } from "node-opcua-enum";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
+import type { Enum } from "node-opcua-enum";
 import { registerEnumeration } from "node-opcua-factory";
 
 export enum BrowseDirection {
-    Forward=  0, // return forward references.
-    Inverse=  1, // return inverse references.
-    Both=     2,  // return forward and inverse references.
-    Invalid=  3, //
+    Forward = 0, // return forward references.
+    Inverse = 1, // return inverse references.
+    Both = 2, // return forward and inverse references.
+    Invalid = 3 //
 }
 
 export const schemaBrowseDirection = {
     name: "BrowseDirection",
 
-    enumValues: BrowseDirection,
+    enumValues: BrowseDirection
     // decode: (stream: BinaryStream) => {
     //
     //     const value = stream.readInteger();
@@ -26,12 +26,11 @@ export const schemaBrowseDirection = {
     // }
 };
 
-export function encodeBrowseDirection(value: BrowseDirection, stream: OutputBinaryStream) {
+export function encodeBrowseDirection(value: BrowseDirection, stream: OutputBinaryStream): void {
     stream.writeUInt32(value);
 }
 
-export function decodeBrowseDirection(stream: BinaryStream): BrowseDirection {
-
+export function decodeBrowseDirection(stream: BinaryStream, _value?: BrowseDirection): BrowseDirection {
     let value = stream.readUInt32();
     if (value < 0 || value > 3 || Number.isNaN(value)) {
         value = BrowseDirection.Invalid;

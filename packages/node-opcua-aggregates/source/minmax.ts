@@ -1,7 +1,7 @@
 /**
  * @module node-opca-aggregates
  */
-//  excert from OPC Unified Architecture, Part 13 21 Release 1.04
+//  excerpt from OPC Unified Architecture, Part 13 21 Release 1.04
 // 5.4.3.10 Minimum
 // The Minimum Aggregate defined in Table 21 retrieves the minimum Good raw value within the
 // interval, and returns that value with the timestamp at the start of the interval. Note that if the
@@ -52,21 +52,20 @@
 // No End Bound             Not Applicable
 // Bound Bad                Not Applicable
 // Bound Uncertain          Not Applicable
-import { UAVariable } from "node-opcua-address-space";
+import type { UAVariable } from "node-opcua-address-space";
 import { DataValue } from "node-opcua-data-value";
 import { StatusCode, StatusCodes } from "node-opcua-status-code";
-import { Variant } from "node-opcua-variant";
+import type { Variant } from "node-opcua-variant";
 
-import { getAggregateData } from "./common";
-import { AggregateConfigurationOptions, Interval, isGood } from "./interval";
+import { getAggregateData } from "./common.js";
+import type { AggregateConfigurationOptions, Interval } from "./interval.js";
 
 function calculateIntervalMinOrMaxValue(
     interval: Interval,
-    options: AggregateConfigurationOptions,
+    _options: AggregateConfigurationOptions,
     predicate: (a: Variant, b: Variant) => "equal" | "select" | "reject"
 ): DataValue {
-
-    //   console.log(interval.toString());
+    //   debugLog(interval.toString());
 
     const indexStart = interval.index;
     let selectedValue: Variant | null = null;
@@ -81,12 +80,12 @@ function calculateIntervalMinOrMaxValue(
     for (let i = indexStart; i < indexStart + interval.count; i++) {
         const dataValue = interval.dataValues[i];
 
-        if (dataValue.statusCode === StatusCodes.BadNoData) {
+        if (dataValue.statusCode.equals(StatusCodes.BadNoData)) {
             isPartial = true;
             continue;
         }
 
-        if (!isGood(dataValue.statusCode)) {
+        if (!dataValue.statusCode.isGood()) {
             hasBad = true;
             continue;
         }
@@ -94,13 +93,13 @@ function calculateIntervalMinOrMaxValue(
         if (!selectedValue) {
             selectedValue = dataValue.value;
             counter = 1;
-            if (i === indexStart && dataValue.sourceTimestamp!.getTime() === interval.startTime.getTime()) {
+            if (i === indexStart && dataValue.sourceTimestamp?.getTime() === interval.startTime.getTime()) {
                 isRaw = true;
             }
             continue;
         }
         const compare = predicate(selectedValue, dataValue.value);
-        if (compare === "equal")  {
+        if (compare === "equal") {
             counter = 1;
             continue;
         }
@@ -138,20 +137,20 @@ function calculateIntervalMinOrMaxValue(
     return new DataValue({
         sourceTimestamp: interval.startTime,
         statusCode: statusCode as StatusCode,
-        value: selectedValue!
+        value: selectedValue
     });
 }
 
 export function calculateIntervalMinValue(interval: Interval, options: AggregateConfigurationOptions): DataValue {
-    return calculateIntervalMinOrMaxValue(interval, options,
-        (a: Variant, b: Variant) =>
-                    a.value > b.value ? "select" : (a.value === b.value ? "equal" : "reject") );
+    return calculateIntervalMinOrMaxValue(interval, options, (a: Variant, b: Variant) =>
+        a.value > b.value ? "select" : a.value === b.value ? "equal" : "reject"
+    );
 }
 
 export function calculateIntervalMaxValue(interval: Interval, options: AggregateConfigurationOptions): DataValue {
-    return calculateIntervalMinOrMaxValue(interval, options,
-        (a: Variant, b: Variant) =>
-            a.value < b.value ? "select" : (a.value === b.value ? "equal" : "reject") );
+    return calculateIntervalMinOrMaxValue(interval, options, (a: Variant, b: Variant) =>
+        a.value < b.value ? "select" : a.value === b.value ? "equal" : "reject"
+    );
 }
 
 // From OPC Unified Architecture, Part 13 26 Release 1.04
@@ -216,8 +215,8 @@ export function getMinData(
     startDate: Date,
     endDate: Date,
     callback: (err: Error | null, dataValues?: DataValue[]) => void
-) {
-    return getAggregateData(node, processingInterval, startDate, endDate, calculateIntervalMinValue, callback);
+): void {
+    getAggregateData(node, processingInterval, startDate, endDate, calculateIntervalMinValue, callback);
 }
 
 export function getMaxData(
@@ -226,6 +225,6 @@ export function getMaxData(
     startDate: Date,
     endDate: Date,
     callback: (err: Error | null, dataValues?: DataValue[]) => void
-) {
-    return getAggregateData(node, processingInterval, startDate, endDate, calculateIntervalMaxValue, callback);
+): void {
+    getAggregateData(node, processingInterval, startDate, endDate, calculateIntervalMaxValue, callback);
 }

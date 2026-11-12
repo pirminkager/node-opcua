@@ -1,22 +1,21 @@
 {
     "name": "node-opcua-debug",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -debug",
+    "type": "module",
+    "version": "2.186.7",
+    "description": "pure nodejs OPCUA SDK - module debug",
     "scripts": {
         "build": "tsc -b",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "test": "mocha test"
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "engines": {
+        "node": ">=22.13.0"
     },
     "dependencies": {
-        "chalk": "^4.0.0",
-        "hexy": "^0.3.0",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-buffer-utils": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
-    },
-    "devDependencies": {
-        "chalk": "^4.0.0",
-        "should": "^13.2.3"
+        "chalk": "6.0.1",
+        "hexy": "0.4.0",
+        "node-opcua-assert": "2.186.7"
     },
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
@@ -35,5 +34,13 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "e4d73afdfcccb3491423149d9b9785888f4ebb3c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "distNodeJS",
+        "source",
+        "nodeJS.d.ts",
+        "nodeJS.js",
+        "source_nodejs"
+    ]
 }

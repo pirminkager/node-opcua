@@ -1,0 +1,13 @@
+import type { UAState, UAState_Base } from "node-opcua-nodeset-ua/dist/ua_state.js";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/ADI/                            |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |AnalyserChannelMaintenanceStateType i=1006                  |
+ * |isAbstract      |false                                                       |
+ */
+export type UAAnalyserChannelMaintenanceState_Base = UAState_Base;
+export interface UAAnalyserChannelMaintenanceState extends UAState, UAAnalyserChannelMaintenanceState_Base {}

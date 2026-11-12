@@ -1,0 +1,25 @@
+{
+    "extends": "../tsconfig.common.json",
+    "compilerOptions": {
+        "rootDir": "source",
+        "outDir": "dist",
+        "types": ["node"],
+        "composite": true,
+        "incremental": true
+    },
+    "include": [
+        "source/**/*.ts"
+    ],
+    "references": [
+        { "path": "../node-opcua-assert" },
+        { "path": "../node-opcua-client" },
+        { "path": "../node-opcua-common" },
+        { "path": "../node-opcua-debug" },
+        { "path": "../node-opcua-status-code" },
+        { "path": "../node-opcua-transport" }
+    ],
+    "exclude": [
+        "node_modules",
+        "dist"
+    ]
+}

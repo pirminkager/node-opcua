@@ -1,0 +1,1453 @@
+/**
+ * @module node-opcua-address-space.Private
+ */
+import chalk from "chalk";
+import type {
+    BaseNode,
+    CloneExtraInfo,
+    CloneFilter,
+    IAddressSpace,
+    ISessionContext,
+    UADataType,
+    UAMethod,
+    UAObject,
+    UAObjectType,
+    UAReference,
+    UAReferenceType,
+    UAVariable,
+    UAVariableT,
+    UAVariableType
+} from "node-opcua-address-space-base";
+import { CloneHelper, type CloneOptions, type ConstructNodeIdOptions, fullPath2 } from "node-opcua-address-space-base";
+import { assert } from "node-opcua-assert";
+import type { DataType } from "node-opcua-basic-types";
+import { ObjectTypeIds, VariableTypeIds } from "node-opcua-constants";
+import {
+    AccessLevelFlag,
+    BrowseDirection,
+    coerceLocalizedText,
+    coerceQualifiedName,
+    type LocalizedText,
+    type LocalizedTextLike,
+    NodeClass,
+    type QualifiedName,
+    ResultMask
+} from "node-opcua-data-model";
+import type { DataValue } from "node-opcua-data-value";
+import { checkDebugFlag, make_errorLog, make_warningLog } from "node-opcua-debug";
+import { ExpandedNodeId, NodeId, resolveNodeId, sameNodeId } from "node-opcua-nodeid";
+import { ReferenceDescription, type ReferenceDescriptionOptions } from "node-opcua-types";
+import type { AddressSpacePrivate } from "./address_space_private.js";
+import { BaseNodeImpl, getReferenceType } from "./base_node_impl.js";
+import { UANamespace_process_modelling_rule } from "./namespace_private.js";
+import { ReferenceImpl } from "./reference_impl.js";
+import { ReferenceIndex } from "./reference_index.js";
+import { referenceTypeVersion, typeHierarchyVersion } from "./reference_type_version.js";
+import { wipeMemorizedStuff } from "./tool_isSubtypeOf.js";
+
+const errorLog = make_errorLog("address-space:BaseNode");
+const doTrace = checkDebugFlag("INSTANTIATE");
+const traceLog = errorLog;
+const warningLog = make_warningLog("address-space:BaseNode");
+
+/**
+ * the private record hangs on the node itself under a symbol: as hidden from consumers as the
+ * WeakMap it replaces, but a property read rather than a hash lookup, on every access to every
+ * node field, in construction and in every browse and read after
+ */
+const PRIVATE = Symbol("BaseNodePrivate");
+type WithPrivate = { [PRIVATE]?: BaseNodeCache };
+
+interface BaseNodeCacheInner {
+    _children?: BaseNode[];
+    _versionNode?: UAVariableT<string, DataType.String> | null;
+
+    _ref?: Map<string, UAReference[]>;
+    /**
+     * memoized `findReferencesEx`: per reference type node, the forward then the inverse result;
+     * dropped with the rest of the cache on every reference added or removed, and when the
+     * reference-type hierarchy moved (`_refExVersion`)
+     */
+    _refEx?: Map<UAReferenceType, ReferenceScanMemo>;
+    _refExVersion?: number;
+    _encoding?: Map<string, UAObject | null>;
+    _subtype_idx?: Map<number | string, UAReferenceType> | null;
+    _subtype_idxVersion?: number;
+    _allSubTypes?: UAReferenceType[] | null;
+    _allSubTypesVersion?: number;
+    _subtypeOfObj?: BaseNode | null;
+}
+
+export type UAReferenceWithNodeRef = UAReference & { node: BaseNode };
+export type HierarchicalIndexMap = Map<string, UAReferenceWithNodeRef | UAReferenceWithNodeRef[]>;
+
+/**
+ * the memoized scans of one node for one reference type: forward, inverse, and for each whether
+ * a reference in it still waits for its target (the target may be created after the scan; the
+ * memo then resolves it on the next hit rather than hand out a reference without a node)
+ */
+export type ReferenceScanMemo = [UAReference[] | undefined, UAReference[] | undefined, boolean, boolean];
+
+interface BaseNodeCache {
+    _childByNameMap?: HierarchicalIndexMap;
+    /**
+     * set when a reference could not be indexed (target node or reference type not in the
+     * address space yet): the index is rebuilt on the next lookup instead of missing a child
+     */
+    _childByNameMapIncomplete?: boolean;
+    /**
+     * the reference-type hierarchy the index was built against (referenceTypeVersion.count): a
+     * reference of a type that became hierarchical since is not in it, so it is rebuilt
+     */
+    _childByNameMapVersion?: number;
+    __address_space: IAddressSpace | null;
+    _browseFilter?: (this: BaseNode, context?: ISessionContext) => boolean;
+    /** created on first use: a node that is never looked at pays nothing here */
+    _cache?: BaseNodeCacheInner;
+    /** built from _descriptionRaw on first read */
+    _description?: LocalizedText;
+    _descriptionRaw?: LocalizedTextLike | null;
+    /** built from _displayNameRaw on first read */
+    _displayName?: LocalizedText[];
+    _displayNameRaw?: LocalizedTextLike | LocalizedTextLike[];
+    _parent?: BaseNode | null;
+    /** the parent the document declared (`ParentNodeId`); consulted once, when _parent is first computed */
+    _declaredParentNodeId?: NodeId;
+    /**
+     * the references other nodes hold to this one; `EMPTY_REFERENCE_INDEX` until the first one
+     * arrives, since a nodeset declares most references from both ends and most nodes never get one
+     */
+    _back_referenceIdx: ReferenceIndex;
+    _referenceIdx: ReferenceIndex;
+    /** the property name this node is exposed as on its parents (see child_accessors.ts) */
+    _accessorName?: string;
+    /** how many children this node exposes through an own accessor (see install_child_as_object_property) */
+    _ownChildAccessors?: number;
+}
+
+/**
+ * shared by every node without back references; read like any map, never written to: the first
+ * back reference replaces it with a map of the node's own (BaseNode_add_backward_reference)
+ */
+const EMPTY_REFERENCE_INDEX: ReferenceIndex = new ReferenceIndex();
+
+export function BaseNode_initPrivate(self: BaseNode): BaseNodeCache {
+    const _private: BaseNodeCache = {
+        __address_space: null,
+
+        _referenceIdx: new ReferenceIndex(),
+        _back_referenceIdx: EMPTY_REFERENCE_INDEX,
+
+        _browseFilter: undefined,
+        _cache: undefined,
+        _description: undefined,
+        _descriptionRaw: undefined,
+        _displayName: undefined,
+        _displayNameRaw: undefined,
+        _parent: undefined
+    };
+    (self as unknown as WithPrivate)[PRIVATE] = _private;
+    return _private;
+}
+
+export function BaseNode_removePrivate(self: BaseNode): void {
+    // there is no need to delete object from weak map
+    // the GC will take care of this in due course
+    // g_weakMap.delete(self);
+    const _private = BaseNode_getPrivate(self);
+    _private._cache = undefined;
+    _private.__address_space = null;
+    _private._back_referenceIdx = EMPTY_REFERENCE_INDEX;
+    _private._referenceIdx = new ReferenceIndex();
+    _private._childByNameMap = undefined;
+    _private._description = undefined;
+    _private._descriptionRaw = undefined;
+    _private._displayName = undefined;
+    _private._displayNameRaw = undefined;
+}
+
+/**
+ * Drop the child index; it is rebuilt lazily on the next lookup. The nodeset loader calls this on
+ * every node once a load is complete, so an index built before the load (a second nodeset added at
+ * runtime to an address space already in use) cannot go stale.
+ */
+export function BaseNode_resetChildIndex(node: BaseNode): void {
+    const _private = BaseNode_getPrivate(node);
+    if (!_private) {
+        return;
+    }
+    _private._childByNameMap = undefined;
+    _private._childByNameMapIncomplete = false;
+}
+
+export function BaseNode_getPrivate(self: BaseNode): BaseNodeCache {
+    return (self as unknown as WithPrivate)[PRIVATE] as BaseNodeCache;
+}
+
+export function BaseNode_getCache(node: BaseNode): BaseNodeCacheInner {
+    const _private = BaseNode_getPrivate(node);
+    if (!_private._cache) {
+        _private._cache = {};
+    }
+    return _private._cache;
+}
+export function BaseNode_clearCache(node: BaseNode): void {
+    const _private = BaseNode_getPrivate(node);
+    if (_private?._cache) {
+        _private._cache = undefined;
+    }
+    // the type definition is remembered on the node itself (see BaseNodeImpl#typeDefinition)
+    const typed = node as unknown as { _typeDefinition?: unknown; _typeDefinitionObj?: unknown };
+    typed._typeDefinition = undefined;
+    typed._typeDefinitionObj = undefined;
+    wipeMemorizedStuff(node);
+}
+const hasTypeDefinition_ReferenceTypeNodeId = resolveNodeId("HasTypeDefinition");
+// looked up by NodeId rather than by name: a name lookup throws while namespace 0 is still
+// loading, and the child index must simply answer "nothing yet" at that point
+const hierarchicalReferences_ReferenceTypeNodeId = resolveNodeId("HierarchicalReferences");
+
+export interface ToStringOptionBase {
+    level: number;
+    cycleDetector: Record<string, unknown>;
+    padding: string;
+}
+export interface ToStringOption extends ToStringOptionBase {
+    add(someLine: string): void;
+    indent(a: string, b: string | null): void;
+}
+
+export class ToStringBuilder implements ToStringOption {
+    public level = 0;
+    public cycleDetector: Record<string, unknown> = {};
+    public padding = "";
+
+    private str: string[] = [];
+
+    constructor() {
+        //
+        this.str = [];
+    }
+    public add(line: string): void {
+        this.str.push(line);
+    }
+    public toString(): string {
+        return this.str.join("\n");
+    }
+
+    public indent(str: string, padding: string | null): string {
+        padding = padding || "          ";
+        return str
+            .split("\n")
+            .map((r) => {
+                return padding + r;
+            })
+            .join("\n");
+    }
+}
+
+function set_as_processed(options: ToStringOption, nodeId: NodeId) {
+    options.cycleDetector[nodeId.toString()] = nodeId;
+}
+function is_already_processed(options: ToStringOption, nodeId: NodeId): boolean {
+    return !!options.cycleDetector[nodeId.toString()];
+}
+
+export function BaseNode_toString(this: BaseNode, options: ToStringOption): void {
+    options.level = options.level || 1;
+
+    set_as_processed(options, this.nodeId);
+
+    options.add("");
+    options.add(options.padding + chalk.yellow("          nodeId              : ") + this.nodeId.toString());
+    options.add(
+        `${options.padding + chalk.yellow("          nodeClass           : ")}${NodeClass[this.nodeClass]} (${this.nodeClass})`
+    );
+    options.add(options.padding + chalk.yellow("          browseName          : ") + this.browseName.toString());
+    options.add(
+        options.padding +
+            chalk.yellow("          displayName         : ") +
+            this.displayName.map((f) => `${f.locale} ${f.text}`).join(" | ")
+    );
+
+    options.add(
+        options.padding + chalk.yellow("          description         : ") + (this.description ? this.description.toString() : "")
+    );
+}
+
+export function BaseNode_References_toString(this: BaseNode, options: ToStringOption): void {
+    const _private = BaseNode_getPrivate(this);
+
+    const displayOptions = {
+        addressSpace: this.addressSpace
+    };
+
+    const addressSpace = this.addressSpace;
+
+    options.add(`${options.padding + chalk.yellow("    references                : ")}  length =${_private._referenceIdx.size}`);
+
+    function dump_reference(follow: boolean, reference: UAReference | null) {
+        if (!reference) {
+            return;
+        }
+        const o = ReferenceImpl.resolveReferenceNode(addressSpace, reference);
+        if (!o) {
+            warningLog("cannot find reference", reference.toString());
+            return;
+        }
+        const name = o.browseName.toString();
+        const modellingRule = o.modellingRule || " ";
+        const extra =
+            modellingRule[0] +
+            (() => {
+                switch (o.nodeClass) {
+                    case NodeClass.Object:
+                        return "[O] ";
+                    case NodeClass.Variable:
+                        return `[V] ${(o as UAVariable).dataType.toString(displayOptions).padEnd(10)}`;
+                    case NodeClass.Method:
+                        return "[M] ";
+                    case NodeClass.DataType:
+                        return "[DT]";
+                    case NodeClass.ReferenceType:
+                        return "[RT]";
+                    case NodeClass.ObjectType:
+                        return "[OT]";
+                    case NodeClass.VariableType:
+                        return "[VT]";
+                    case NodeClass.View:
+                        return "[V] ";
+                }
+                return "";
+            })();
+        options.add(
+            options.padding +
+                chalk.yellow("      +-> ") +
+                reference.toString(displayOptions) +
+                " " +
+                chalk.cyan(name.padEnd(25, " ")) +
+                " " +
+                chalk.magentaBright(extra)
+        );
+
+        // ignore HasTypeDefinition as it has been already handled
+        if (sameNodeId(reference.referenceType, hasTypeDefinition_ReferenceTypeNodeId) && reference.nodeId.namespace === 0) {
+            return;
+        }
+        if (o) {
+            if (!is_already_processed(options, o.nodeId)) {
+                set_as_processed(options, o.nodeId);
+                if (options.level > 1 && follow) {
+                    const rr = (o as { toString(options: ToStringOptionBase): string }).toString({
+                        cycleDetector: options.cycleDetector,
+                        level: options.level - 1,
+                        padding: `${options.padding}         `
+                    });
+                    options.add(rr);
+                }
+            }
+        }
+    }
+
+    // direct reference
+    for (const r of _private._referenceIdx.values()) {
+        dump_reference(false, r);
+    }
+
+    options.add(
+        options.padding +
+            chalk.yellow("    back_references                 : ") +
+            chalk.cyan("  length =") +
+            _private._back_referenceIdx.size +
+            chalk.grey(" ( references held by other nodes involving this node)")
+    );
+    for (const r of _private._back_referenceIdx.values()) {
+        dump_reference(false, r);
+    }
+    // backward reference
+}
+
+function _UAType_toString(this: UAReferenceType | UADataType | UAObjectType | UAVariableType, options: ToStringOption): void {
+    if (this.subtypeOfObj) {
+        options.add(
+            options.padding +
+                chalk.yellow("          subtypeOf           : ") +
+                this.subtypeOfObj.browseName.toString() +
+                " (" +
+                this.subtypeOfObj.nodeId.toString() +
+                ")"
+        );
+    }
+}
+
+function _UAInstance_toString(this: UAVariable | UAMethod | UAObject, options: ToStringOption): void {
+    if (this.typeDefinitionObj) {
+        options.add(
+            options.padding +
+                chalk.yellow("          typeDefinition      : ") +
+                this.typeDefinitionObj.browseName.toString() +
+                " (" +
+                this.typeDefinitionObj.nodeId.toString() +
+                ")"
+        );
+    }
+}
+
+export function UAVariableType_toString(this: UAVariableType, options: ToStringOption): void {
+    BaseNode_toString.call(this, options);
+    _UAType_toString.call(this, options);
+    VariableOrVariableType_toString.call(this, options);
+    BaseNode_References_toString.call(this, options);
+}
+
+export function UAVariable_toString(this: UAVariable, options: ToStringOption): void {
+    BaseNode_toString.call(this, options);
+    _UAInstance_toString.call(this, options);
+    VariableOrVariableType_toString.call(this, options);
+    AccessLevelFlags_toString.call(this, options);
+    BaseNode_References_toString.call(this, options);
+}
+
+export function UAObject_toString(this: UAObject, options: ToStringOption): void {
+    BaseNode_toString.call(this, options);
+    _UAInstance_toString.call(this, options);
+    BaseNode_References_toString.call(this, options);
+}
+
+export function UAObjectType_toString(this: UAObjectType, options: ToStringOption): void {
+    BaseNode_toString.call(this, options);
+    _UAType_toString.call(this, options);
+    BaseNode_References_toString.call(this, options);
+}
+
+export function valueRankToString(valueRank: number): string {
+    switch (valueRank) {
+        case 1:
+            return "OneDimension (1)";
+        case 0:
+            return "OneOrMoreDimensions (0)"; // The value is an array with one or more dimensions
+        case -1:
+            return "Scalar (-1)";
+        case -2:
+            return "Any (-2)"; // The value can be a scalar or an array with any number of dimensions
+        case -3:
+            return "ScalarOrOneDimension (2)"; // The value can be a scalar or a one dimensional array.
+        default:
+            if (valueRank > 0) {
+                return `${valueRank}-Dimensions`;
+            } else {
+                return `Invalid (${valueRank})`;
+            }
+    }
+}
+
+function accessLevelFlagToString(flag: AccessLevelFlag): string {
+    const str: string[] = [];
+    if (flag & AccessLevelFlag.CurrentRead) {
+        str.push("CurrentRead");
+    }
+    if (flag & AccessLevelFlag.CurrentWrite) {
+        str.push("CurrentWrite");
+    }
+    if (flag & AccessLevelFlag.HistoryRead) {
+        str.push("HistoryRead");
+    }
+    if (flag & AccessLevelFlag.HistoryWrite) {
+        str.push("HistoryWrite");
+    }
+    if (flag & AccessLevelFlag.SemanticChange) {
+        str.push("SemanticChange");
+    }
+    if (flag & AccessLevelFlag.StatusWrite) {
+        str.push("StatusWrite");
+    }
+    if (flag & AccessLevelFlag.TimestampWrite) {
+        str.push("TimestampWrite");
+    }
+    return str.join(" | ");
+}
+
+function AccessLevelFlags_toString(this: UAVariable, options: ToStringOption) {
+    assert(options);
+    options.add(
+        `${options.padding + chalk.yellow("          accessLevel         : ")} ${accessLevelFlagToString(this.accessLevel)}`
+    );
+    if (this.userAccessLevel !== undefined) {
+        options.add(
+            `${options.padding + chalk.yellow("          userAccessLevel     : ")} ${accessLevelFlagToString(this.userAccessLevel)}`
+        );
+    }
+}
+
+interface WithDataValue {
+    $dataValue?: DataValue;
+}
+export function VariableOrVariableType_toString(this: UAVariableType | UAVariable, options: ToStringOption): void {
+    assert(options);
+    if (this.dataType) {
+        const addressSpace = this.addressSpace;
+        const d = addressSpace.findNode(this.dataType);
+        const n = d ? `(${d.browseName.toString()})` : " (???)";
+        options.add(`${options.padding + chalk.yellow("          dataType            : ")} ${this.dataType}  ${n}`);
+    }
+    if (this.nodeClass === NodeClass.Variable) {
+        const _dataValue = (<WithDataValue>this).$dataValue;
+        if (_dataValue) {
+            options.add(
+                options.padding +
+                    chalk.yellow("          value               : ") +
+                    "\n" +
+                    options.indent(_dataValue.toString(), `${options.padding}                        | `)
+            );
+        }
+    }
+
+    if (Object.hasOwn(this, "valueRank")) {
+        if (this.valueRank !== undefined) {
+            options.add(
+                `${options.padding + chalk.yellow("          valueRank           : ")} ${valueRankToString(this.valueRank)}`
+            );
+        } else {
+            options.add(`${options.padding + chalk.yellow("          valueRank           : ")} undefined`);
+        }
+    }
+    if (this.minimumSamplingInterval !== undefined) {
+        options.add(
+            `${options.padding + chalk.yellow(" minimumSamplingInterval      : ")} ${this.minimumSamplingInterval.toString()} ms`
+        );
+    }
+    if (this.arrayDimensions) {
+        options.add(
+            `${options.padding + chalk.yellow(" arrayDimension               : ")} [${this.arrayDimensions.join(",").toString()} ]`
+        );
+    }
+}
+
+/**
+ * A subtype (or an instance) may re-declare a child that its base type already declares:
+ *
+ *    MyDeriveType  ------------------- -> MyBaseType    --------------> TopologyElementType
+ *        |                                   |                                   |
+ *        +- ParameterSet                     +-> ParameterSet                    +-> ParameterSet
+ *                 |                                   |
+ *                  +- Foo1                            |
+ *                                                     +- Bar
+ *
+ * The instance gets ONE ParameterSet, cloned from the nearest declaration (Foo1), into which the
+ * base declarations are merged (Bar): see _base_declarations_of and _merge_base_declaration.
+ */
+/**
+ * the declarations, on the supertypes of `type`, of the child that `type` declares under
+ * `browseName`, nearest supertype first; none when `type` is not a type
+ */
+function _base_declarations_of(type: BaseNode, browseName: QualifiedName): BaseNode[] {
+    if (type.nodeClass !== NodeClass.ObjectType && type.nodeClass !== NodeClass.VariableType) {
+        return [];
+    }
+    const result: BaseNode[] = [];
+    let base = (type as UAObjectType | UAVariableType).subtypeOfObj;
+    while (base) {
+        // aggregates only: a child lookup would also follow HasSubtype (issue #1326)
+        const declaration = base.getAggregates().find((n) => n.browseName.equals(browseName));
+        if (declaration) {
+            result.push(declaration);
+        }
+        base = base.subtypeOfObj;
+    }
+    return result;
+}
+
+/**
+ * record `cloned` as the clone of `original` and, by browse name, each child the clone already
+ * has as the clone of the matching child of `original`, recursively: a later reference to any
+ * of them then lands on the existing node instead of a second copy
+ */
+function _register_existing_children(original: BaseNode, cloned: BaseNode, extraInfo: CloneExtraInfo): void {
+    extraInfo.registerClonedObject({ originalNode: original, clonedNode: cloned });
+    for (const ref of original.findReferencesEx("Aggregates", BrowseDirection.Forward)) {
+        const child = ref.node;
+        if (!child) continue;
+        const existing = cloned.getChildByName(child.browseName);
+        if (!existing) continue;
+        _register_existing_children(child, existing, extraInfo);
+    }
+}
+
+/**
+ * `clonedNode` was cloned from a declaration that shadows `baseDeclaration` (a subtype or an
+ * instance re-declaring a child of a base type). What the clone already has is recorded as the
+ * clone of the base declaration's same-named children; what the base declaration adds is cloned
+ * in, subject to the same filter and the same browse-name guard as the clone's own children.
+ */
+function _merge_base_declaration(
+    baseDeclaration: BaseNode,
+    clonedNode: BaseNode,
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+): void {
+    // c8 ignore next
+    doTrace && traceLog(extraInfo.pad(), "merging base declaration ", fullPath2(baseDeclaration), " into ", fullPath2(clonedNode));
+    _register_existing_children(baseDeclaration, clonedNode, extraInfo);
+    // a member the clone already reaches without aggregating it (OPC 30500 LADS: Operational
+    // organizes its state machine's Stop) is present as well: cloned again from the base
+    // declaration, it was a second Stop, or "already registered" with symbolic names
+    const aggregates = clonedNode.addressSpace.findReferenceType("Aggregates");
+    for (const reference of clonedNode.findReferencesEx("HierarchicalReferences", BrowseDirection.Forward)) {
+        const referenceType = clonedNode.addressSpace.findReferenceType(reference.referenceType);
+        if (!referenceType || (aggregates && referenceType.isSubtypeOf(aggregates))) continue;
+        const member = reference.node ?? clonedNode.addressSpace.findNode(reference.nodeId);
+        if (member)
+            browseNameMap.add(
+                `${clonedNode.nodeId.toString()}(${clonedNode.browseName.toString()})/${member.browseName.toString()}`
+            );
+    }
+    _clone_hierarchical_references(
+        baseDeclaration as UAObject | UAVariable | UAMethod,
+        clonedNode as UAObject | UAVariable | UAMethod,
+        copyAlsoModellingRules,
+        optionalFilter,
+        extraInfo,
+        browseNameMap
+    );
+}
+
+/**
+ * whether `declaringNode` is the declared parent (ParentNodeId) of `node` while `reference` links the
+ * two without aggregating it: the parent then names the node, the reference does not
+ */
+function _isDeclaredNonAggregatedMemberOf(node: BaseNode, declaringNode: BaseNode, reference: UAReference): boolean {
+    const declaredParent = node.parentNodeId;
+    if (!declaredParent || !sameNodeId(declaredParent, declaringNode.nodeId)) {
+        return false;
+    }
+    const addressSpace = node.addressSpace;
+    const referenceType = addressSpace.findReferenceType(reference.referenceType);
+    const aggregates = addressSpace.findReferenceType("Aggregates");
+    return !!referenceType && !!aggregates && !referenceType.isSubtypeOf(aggregates);
+}
+
+/**
+ * whether `organizer` reaches `node` through a reference that does not aggregate it, while the
+ * node's declared parent (ParentNodeId) is another node that aggregates it: its owner
+ */
+function _isOrganizedWhileOwnedByAnother(node: BaseNode, organizer: BaseNode, reference: UAReference): boolean {
+    const owner = node.parentNodeId;
+    if (!owner || sameNodeId(owner, organizer.nodeId)) {
+        return false;
+    }
+    const addressSpace = node.addressSpace;
+    const referenceType = addressSpace.findReferenceType(reference.referenceType);
+    const aggregates = addressSpace.findReferenceType("Aggregates");
+    if (!referenceType || !aggregates || referenceType.isSubtypeOf(aggregates)) {
+        return false;
+    }
+    return node.findReferencesEx("Aggregates", BrowseDirection.Inverse).some((r) => sameNodeId(r.nodeId, owner));
+}
+
+/*
+ * clone properties and methods
+ * @private
+ */
+function _clone_collection_new(
+    nodeToClone: UAObject | UAVariable | UAMethod | UAObjectType | UAVariableType,
+    newParent: BaseNode,
+    collectionRef: UAReference[],
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+): void {
+    const namespace = newParent.namespace;
+    extraInfo = extraInfo || new CloneHelper();
+    const addressSpace = newParent.addressSpace;
+    assert(!optionalFilter || (typeof optionalFilter.shouldKeep === "function" && typeof optionalFilter.filterFor === "function"));
+
+    for (const reference of collectionRef) {
+        const node = ReferenceImpl.resolveReferenceNode(addressSpace, reference) as UAVariable | UAObject | UAMethod;
+        // ensure node is of the correct type,
+        // it may happen that the xml nodeset2 file was malformed
+
+        // c8 ignore next
+        if (typeof node.clone !== "function") {
+            warningLog(
+                chalk.red("Warning : cannot clone node ") +
+                    fullPath2(node) +
+                    " of class " +
+                    NodeClass[node.nodeClass].toString() +
+                    " while cloning " +
+                    fullPath2(newParent)
+            );
+            continue;
+        }
+        if (node && !node.modellingRule) {
+            // c8 ignore next
+            doTrace && traceLog(extraInfo.pad(), "skipping  with no modelling rule", fullPath2(node));
+            // those node stays in the Type
+            continue; // skip this node
+        }
+
+        if (optionalFilter && node && !optionalFilter.shouldKeep(node)) {
+            // c8 ignore next
+            doTrace && traceLog(extraInfo.pad(), "skipping optional that doesn't appear in the filter", fullPath2(node));
+            continue; // skip this node
+        }
+        const key = `${newParent.nodeId.toString()}(${newParent.browseName.toString()})/${node.browseName.toString()}`;
+        if (browseNameMap?.has(key)) {
+            // a same-named child was cloned already, from a nearer declaration: this one is a
+            // base declaration of it, merge what it adds
+            doTrace && traceLog(extraInfo.pad(), "node with same browseName already cloned, merging", fullPath2(node), "key=", key);
+            const existing = newParent.getChildByName(node.browseName);
+            if (existing) {
+                _merge_base_declaration(
+                    node,
+                    existing,
+                    copyAlsoModellingRules,
+                    optionalFilter.filterFor(existing as UAObject | UAVariable | UAMethod),
+                    extraInfo,
+                    new Set<string>()
+                );
+            }
+            continue; // skipping node with same browseName
+        }
+        browseNameMap?.add(key);
+
+        // a node this one only organizes, while another node of the template owns it (aggregates
+        // it, as its ParentNodeId), is left to its owner: cloned through this reference first, it
+        // was parentless and named after its browse name alone (OPC 30100 IO-Link:
+        // IOLinkDeviceType/General organizes MethodSet/ApplicationReset). Once the whole tree is
+        // cloned, the owner's clone gets this reference too; a node no owner cloned is cloned here.
+        if (
+            extraInfo instanceof CloneHelper &&
+            extraInfo.canDefer &&
+            _isOrganizedWhileOwnedByAnother(node, nodeToClone, reference)
+        ) {
+            extraInfo.deferInCurrentContext(() => attach(reference, node));
+            continue;
+        }
+        attach(reference, node);
+    }
+
+    function attach(reference: UAReference, node: UAVariable | UAObject | UAMethod): void {
+        // assert(reference.isForward);
+        // assert(reference.referenceType instanceof NodeId, "" + reference.referenceType.toString());
+        const options: CloneOptions = {
+            namespace,
+            references: [new ReferenceImpl({ referenceType: reference.referenceType, isForward: false, nodeId: newParent.nodeId })],
+            copyAlsoModellingRules,
+            baseDeclarations: _base_declarations_of(nodeToClone, node.browseName)
+        };
+        // a member that the template declares under the node being cloned (its ParentNodeId), but links
+        // through a reference that does not aggregate it (Organizes), is named after that parent on the
+        // type (`DirectoryType_CertificateGroups`): the clone declares its own parent likewise, or it is
+        // named after its browse name alone and misses its id (`Directory_CertificateGroups`)
+        if (_isDeclaredNonAggregatedMemberOf(node, nodeToClone, reference)) {
+            options.parentNodeId = newParent.nodeId;
+        }
+
+        const alreadyCloned = extraInfo.getCloned({ originalParent: nodeToClone, clonedParent: newParent, originalNode: node });
+        if (alreadyCloned) {
+            // c8 ignore next
+            doTrace &&
+                traceLog(
+                    extraInfo.pad(),
+                    "node ",
+                    fullPath2(node),
+                    "already cloned as",
+                    fullPath2(alreadyCloned),
+                    "\nnode to clone =",
+                    fullPath2(nodeToClone),
+                    "\nnew parent   =",
+                    fullPath2(newParent)
+                );
+
+            // this parent, not any parent: a shared child may already hang under another one
+            const hasReference = alreadyCloned
+                .findReferences(reference.referenceType, false)
+                .some((r) => sameNodeId(r.nodeId, newParent.nodeId));
+            if (!hasReference) {
+                alreadyCloned.addReference({
+                    referenceType: reference.referenceType,
+                    isForward: false,
+                    nodeId: newParent.nodeId
+                });
+            } else {
+                // c8 ignore next
+                doTrace && traceLog(extraInfo.pad(), "reference to node  ", fullPath2(alreadyCloned), " already exists !");
+            }
+        } else {
+            // c8 ignore next
+            doTrace &&
+                traceLog(
+                    extraInfo.pad(),
+                    "cloning => ",
+                    reference.referenceType.toString({ addressSpace }),
+                    "=>",
+                    fullPath2(node),
+                    chalk.magentaBright(node.typeDefinitionObj?.browseName.toString())
+                );
+
+            extraInfo.level += 1;
+            const clonedNode = node.clone(options, optionalFilter, extraInfo);
+            extraInfo.level -= 1;
+
+            // c8 ignore next
+            doTrace &&
+                traceLog(
+                    extraInfo.pad(),
+                    "cloned => ",
+                    fullPath2(node),
+                    "",
+                    extraInfo.pad(),
+                    "    original nodeId",
+                    node.nodeId.toString(),
+                    "",
+                    extraInfo.pad(),
+                    "    cloned   nodeId",
+                    clonedNode.nodeId.toString(),
+                    `${fullPath2(clonedNode)}`
+                );
+
+            // also clone or instantiate interface members that may be required in the optionals
+            extraInfo.level++;
+            _cloneInterface(nodeToClone, clonedNode, node, copyAlsoModellingRules, optionalFilter, extraInfo, browseNameMap);
+            extraInfo.level--;
+            // === clone);
+            // extraInfo.registerClonedObject(clone, node);
+        }
+    }
+}
+
+type UAInterface = UAObjectType;
+function _extractInterfaces2(typeDefinitionNode: UAObjectType | UAVariableType, extraInfo: CloneExtraInfo): UAInterface[] {
+    if (
+        !typeDefinitionNode ||
+        (typeDefinitionNode.nodeId.namespace === 0 &&
+            (typeDefinitionNode.nodeId.value === ObjectTypeIds.BaseObjectType ||
+                typeDefinitionNode.nodeId.value === VariableTypeIds.BaseVariableType))
+    ) {
+        return [];
+    }
+
+    const addressSpace = typeDefinitionNode.addressSpace;
+
+    const hasInterfaceReference = addressSpace.findReferenceType("HasInterface");
+    if (!hasInterfaceReference) {
+        // this version of the standard UA namespace doesn't support Interface yet
+        return [];
+    }
+    // example:
+    // FolderType
+    //   FunctionalGroupType
+    //     MachineryItemIdentificationType     : IMachineryItemVendorNameplateType
+    //       MachineIdentificationType         : IMachineTagNameplateType, IMachineVendorNamePlateType
+    //         MachineToolIdentificationType
+    //
+    //
+    // IMachineTagNameplateType            -subtypeOf-> ITagNameplateType
+    // IMachineVendorNamePlateType         -subtypeOf-> IMachineryItemVendorNamePlateType
+    // IMachineryItemVendorNamePlateType   -subtypeOf-> IVendorNameplateType
+    const interfacesRef = typeDefinitionNode.findReferencesEx("HasInterface", BrowseDirection.Forward);
+    const interfaces = interfacesRef.map((r) => addressSpace.findNode(r.nodeId) as UAInterface);
+
+    const baseInterfaces: UAInterface[] = [];
+    for (const iface of interfaces) {
+        // c8 ignore next
+        doTrace &&
+            traceLog(
+                extraInfo.pad(),
+                typeDefinitionNode.browseName.toString(),
+                " - has interface -> ",
+                iface.browseName.toString()
+            );
+        baseInterfaces.push(iface);
+        if (iface.subtypeOfObj) {
+            extraInfo.level++;
+            baseInterfaces.push(..._extractInterfaces2(iface.subtypeOfObj, extraInfo));
+            extraInfo.level--;
+        }
+    }
+    interfaces.push(...baseInterfaces);
+    if (typeDefinitionNode.subtypeOfObj) {
+        // c8 ignore next
+        doTrace &&
+            traceLog(
+                extraInfo.pad(),
+                typeDefinitionNode.browseName.toString(),
+                " - subtypeOf  -> ",
+                typeDefinitionNode.subtypeOfObj.browseName.toString()
+            );
+        extraInfo.level++;
+        interfaces.push(..._extractInterfaces2(typeDefinitionNode.subtypeOfObj, extraInfo));
+        extraInfo.level--;
+    }
+    const deduplicatedInterfaces = [...new Set(interfaces)];
+
+    // c8 ignore next
+    doTrace &&
+        deduplicatedInterfaces.length &&
+        traceLog(
+            extraInfo.pad(),
+            chalk.yellow("Interface for ", typeDefinitionNode.browseName.toString()),
+            "=",
+            deduplicatedInterfaces.map((x) => x.browseName.toString()).join(" ")
+        );
+    return deduplicatedInterfaces;
+}
+
+function _cloneInterface(
+    nodeToClone: UAObject | UAVariable | UAMethod | UAObjectType | UAVariableType,
+    clonedNode: BaseNode,
+    node: UAObject | UAVariable | UAMethod,
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+): void {
+    // c8 ignore next
+    doTrace &&
+        traceLog(
+            extraInfo?.pad(),
+            chalk.green("-------------------- now cloning interfaces of ", node.browseName.toString(), node.nodeId.toString())
+        );
+
+    extraInfo = extraInfo || new CloneHelper();
+    const addressSpace = node.addressSpace;
+
+    if (node.nodeClass !== NodeClass.Object && node.nodeClass !== NodeClass.Variable) {
+        return;
+    }
+    const typeDefinitionNode = node.typeDefinitionObj;
+    if (!typeDefinitionNode) {
+        return;
+    }
+    const interfaces = _extractInterfaces2(typeDefinitionNode, extraInfo);
+    if (interfaces.length === 0) {
+        // c8 ignore next
+        doTrace &&
+            false &&
+            traceLog(extraInfo.pad(), chalk.yellow("No interface for ", node.browseName.toString(), node.nodeId.toString()));
+        return;
+    }
+
+    // c8 ignore next
+    doTrace && traceLog(extraInfo?.pad(), chalk.green("-------------------- interfaces are  ", interfaces.length));
+
+    const localFilter = optionalFilter.filterFor(node);
+
+    for (const iface of interfaces) {
+        // a member the clone already has (the type declares it itself) is not cloned a second time
+        const aggregates = iface
+            .findReferencesEx("Aggregates", BrowseDirection.Forward)
+            .filter((r) => !r.node || !clonedNode.getChildByName(r.node.browseName));
+        if (aggregates.length === 0) continue;
+        // c8 ignore next
+        doTrace &&
+            traceLog(
+                extraInfo.pad(),
+                chalk.magentaBright("   interface ", iface.browseName.toString()),
+                `\n${extraInfo?.pad()}`,
+                aggregates.map((r) => r.toString({ addressSpace })).join(`\n${extraInfo?.pad()}`)
+            );
+        _clone_collection_new(nodeToClone, clonedNode, aggregates, copyAlsoModellingRules, localFilter, extraInfo, browseNameMap);
+    }
+}
+
+function __clone_organizes_references(
+    nodeToClone: UAObject | UAVariable | UAMethod | UAObjectType | UAVariableType,
+    newParent: UAObject | UAVariable | UAMethod,
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+): void {
+    // find all references that derives from the Organizes
+    const organizedRef = nodeToClone.findReferencesEx("Organizes", BrowseDirection.Forward);
+    if (organizedRef.length === 0) return;
+    _clone_collection_new(nodeToClone, newParent, organizedRef, copyAlsoModellingRules, optionalFilter, extraInfo, browseNameMap);
+}
+
+function __clone_children_references(
+    nodeToClone: UAObject | UAVariable | UAMethod | UAObjectType | UAVariableType,
+    newParent: UAObject | UAVariable | UAMethod,
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+): void {
+    // find all references that derives from the Aggregates
+    const aggregatesRef = nodeToClone.findReferencesEx("Aggregates", BrowseDirection.Forward);
+    if (aggregatesRef.length === 0) return;
+    _clone_collection_new(nodeToClone, newParent, aggregatesRef, copyAlsoModellingRules, optionalFilter, extraInfo, browseNameMap);
+}
+
+function __clone_interfaces_related_references(
+    nodeToClone: UAObject | UAVariable | UAMethod | UAObjectType | UAVariableType,
+    newParent: UAObject | UAVariable | UAMethod,
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+): void {
+    // find all references that derives from the HasInterface
+    const hasInterfaceRef = nodeToClone.findReferencesEx("HasInterface", BrowseDirection.Forward);
+    if (hasInterfaceRef.length === 0) return;
+    for (const ref of hasInterfaceRef) {
+        let typeDefinitionNode = ReferenceImpl.resolveReferenceNode(nodeToClone.addressSpace, ref) as UAObjectType | null;
+        if (!typeDefinitionNode) {
+            continue;
+        }
+        if (doTrace)
+            traceLog(
+                extraInfo?.pad(),
+                chalk.blueBright(
+                    newParent.browseName.toString(),
+                    "-----> Exploring interface ",
+                    typeDefinitionNode.browseName.toString()
+                )
+            );
+        while (typeDefinitionNode) {
+            // c8 ignore next
+            doTrace &&
+                traceLog(
+                    extraInfo?.pad(),
+                    chalk.blueBright(newParent.browseName.toString(), "-----> Exploring ", typeDefinitionNode.browseName.toString())
+                );
+            __clone_children_references(
+                typeDefinitionNode,
+                newParent,
+                copyAlsoModellingRules,
+                optionalFilter,
+                extraInfo,
+                browseNameMap
+            );
+            typeDefinitionNode = typeDefinitionNode.subtypeOfObj;
+        }
+    }
+}
+export function _clone_hierarchical_references(
+    nodeToClone: UAObject | UAVariable | UAMethod | UAObjectType | UAVariableType,
+    newParent: UAObject | UAVariable | UAMethod,
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+) {
+    __clone_children_references(nodeToClone, newParent, copyAlsoModellingRules, optionalFilter, extraInfo, browseNameMap);
+    __clone_organizes_references(nodeToClone, newParent, copyAlsoModellingRules, optionalFilter, extraInfo, browseNameMap);
+    //   __clone_interfaces_related_references(nodeToClone, newParent, copyAlsoModellingRules, optionalFilter, extraInfo, browseNameMap);
+}
+export function _clone_non_hierarchical_references(
+    nodeToClone: UAObject | UAVariable | UAMethod | UAObjectType | UAVariableType,
+    newParent: BaseNode,
+    copyAlsoModellingRules: boolean,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo,
+    browseNameMap: Set<string>
+): void {
+    // clone only some non hierarchical_references that we do want to clone
+    // such as:
+    //   HasSubStateMachine
+    //   (may be other as well later ... to do )
+    assert(newParent instanceof BaseNodeImpl);
+    // find all reference that derives from the HasSubStateMachine
+    const references = nodeToClone.findReferencesEx("HasSubStateMachine", BrowseDirection.Forward);
+    if (references.length === 0) return;
+    _clone_collection_new(nodeToClone, newParent, references, copyAlsoModellingRules, optionalFilter, extraInfo, browseNameMap);
+}
+
+/**
+
+ * @private
+ */
+export function _clone<T extends UAObject | UAVariable | UAMethod, O>(
+    originalNode: T,
+    Constructor: new (options: O) => T,
+    options: CloneOptions,
+    optionalFilter: CloneFilter,
+    extraInfo: CloneExtraInfo
+): T {
+    assert(typeof Constructor === "function");
+    assert(options !== null && typeof options === "object");
+    assert(
+        !extraInfo || (extraInfo !== null && typeof extraInfo === "object" && typeof extraInfo.registerClonedObject === "function")
+    );
+    const namespace = options.namespace;
+    const constructorOptions = {
+        ...options,
+        addressSpace: namespace.addressSpace,
+        browseName: originalNode.browseName,
+        description: originalNode.description,
+        displayName: originalNode.displayName,
+        nodeClass: originalNode.nodeClass
+    };
+    constructorOptions.references = options.references || [];
+
+    if (originalNode.nodeClass === NodeClass.Variable || originalNode.nodeClass === NodeClass.Object) {
+        const voThis = originalNode as UAObject | UAVariable;
+        if (voThis.typeDefinition) {
+            constructorOptions.references.push(
+                new ReferenceImpl({
+                    isForward: true,
+                    nodeId: voThis.typeDefinition,
+                    referenceType: resolveNodeId("HasTypeDefinition")
+                })
+            );
+        }
+    }
+
+    if (!constructorOptions.modellingRule) {
+        if (originalNode.modellingRule && options.copyAlsoModellingRules) {
+            const modellingRuleNode = originalNode.findReferencesAsObject("HasModellingRule", true)[0];
+            assert(modellingRuleNode);
+            constructorOptions.references.push(
+                new ReferenceImpl({
+                    isForward: true,
+                    nodeId: modellingRuleNode.nodeId,
+                    referenceType: resolveNodeId("HasModellingRule")
+                })
+            );
+        }
+    } else {
+        UANamespace_process_modelling_rule(constructorOptions.references, constructorOptions.modellingRule);
+    }
+
+    constructorOptions.nodeId = namespace.constructNodeId(constructorOptions as ConstructNodeIdOptions);
+
+    assert(constructorOptions.nodeId instanceof NodeId);
+
+    const clonedNode = new Constructor(constructorOptions as unknown as O);
+    (originalNode.addressSpace as AddressSpacePrivate)._register(clonedNode);
+
+    extraInfo.registerClonedObject({
+        originalNode,
+        clonedNode
+    });
+
+    if (!options.ignoreChildren) {
+        // clone children and the rest ....
+        options.copyAlsoModellingRules = options.copyAlsoModellingRules || false;
+
+        const newFilter = optionalFilter.filterFor(clonedNode);
+
+        const browseNameMap = new Set<string>();
+        _clone_hierarchical_references(
+            originalNode,
+            clonedNode,
+            options.copyAlsoModellingRules,
+            newFilter,
+            extraInfo,
+            browseNameMap
+        );
+
+        // what the base types declare under the same name, before the type definition is explored:
+        // the base declaration overrides the type definition's children, so the later walk of the
+        // type definition finds them present instead of cloning them a second time
+        for (const baseDeclaration of options.baseDeclarations || []) {
+            _merge_base_declaration(
+                baseDeclaration,
+                clonedNode,
+                options.copyAlsoModellingRules,
+                newFilter,
+                extraInfo,
+                browseNameMap
+            );
+        }
+
+        if (originalNode.nodeClass === NodeClass.Object || originalNode.nodeClass === NodeClass.Variable) {
+            let typeDefinitionNode: UAVariableType | UAObjectType | null = originalNode.typeDefinitionObj;
+
+            extraInfo.pushContext({
+                clonedParent: clonedNode,
+                originalParent: originalNode
+            });
+
+            while (typeDefinitionNode) {
+                // c8 ignore next
+                doTrace &&
+                    traceLog(
+                        extraInfo?.pad(),
+                        chalk.blueBright(
+                            originalNode.browseName.toString(),
+                            "-----> Exploring ",
+                            typeDefinitionNode.browseName.toString()
+                        )
+                    );
+                _clone_hierarchical_references(
+                    typeDefinitionNode,
+                    clonedNode,
+                    options.copyAlsoModellingRules,
+                    newFilter,
+                    extraInfo,
+                    browseNameMap
+                );
+                typeDefinitionNode = typeDefinitionNode.subtypeOfObj;
+            }
+
+            extraInfo.popContext();
+        }
+        _clone_non_hierarchical_references(
+            originalNode,
+            clonedNode,
+            options.copyAlsoModellingRules,
+            newFilter,
+            extraInfo,
+            browseNameMap
+        );
+    }
+    clonedNode.propagate_back_references();
+    clonedNode.install_extra_properties();
+
+    return clonedNode;
+}
+
+/**
+ * @returns false when the reference points to a node that is not (yet) in the address space:
+ * such a dangling reference cannot be indexed by browse name, and the caller must remember that
+ * the index is incomplete rather than silently lose the child.
+ */
+function _add(_childByNameMap: HierarchicalIndexMap, reference: UAReferenceWithNodeRef): boolean {
+    const targetNode = reference.node;
+    if (!targetNode) return false;
+    const hash = targetNode.browseName?.name || "";
+    const existing = _childByNameMap.get(hash);
+    if (existing) {
+        if (Array.isArray(existing)) {
+            existing.push(reference);
+        } else {
+            _childByNameMap.set(hash, [existing, reference as UAReferenceWithNodeRef]);
+        }
+    } else {
+        _childByNameMap.set(hash, reference as UAReferenceWithNodeRef);
+    }
+    return true;
+}
+
+function sameRef(a: UAReference, b: UAReference) {
+    if (a.isForward !== b.isForward) return false;
+    if (!sameNodeId(a.nodeId, b.nodeId)) return false;
+    if (!sameNodeId(a.referenceType, b.referenceType)) return false;
+    return true;
+}
+function _remove(_childByNameMap: HierarchicalIndexMap, reference: UAReferenceWithNodeRef) {
+    const target = reference.node;
+    if (!target) return;
+    const hash = target.browseName.name || "";
+    const existing = _childByNameMap.get(hash);
+    if (Array.isArray(existing)) {
+        const remaining = existing.filter((r) => !sameRef(r, reference));
+        if (remaining.length === 0) {
+            _childByNameMap.delete(hash);
+        } else if (remaining.length === 1) {
+            _childByNameMap.set(hash, remaining[0]);
+        } else {
+            _childByNameMap.set(hash, remaining);
+        }
+    } else {
+        _childByNameMap.delete(hash);
+    }
+}
+/**
+ * keep an existing child index in step with a forward reference just added to `node`
+ */
+export function _handle_HierarchicalReference(node: BaseNode, reference: UAReference): void {
+    const _private = BaseNode_getPrivate(node);
+    if (!reference.isForward || !_private._childByNameMap) return;
+    const addressSpace = node.addressSpace;
+    const referenceType = ReferenceImpl.resolveReferenceType(addressSpace, reference);
+    const hierarchicalReferences = addressSpace.findReferenceType(hierarchicalReferences_ReferenceTypeNodeId);
+    if (!referenceType || !hierarchicalReferences) {
+        _private._childByNameMapIncomplete = true;
+        return;
+    }
+    let isHierarchical: boolean;
+    try {
+        isHierarchical = referenceType.isSubtypeOf(hierarchicalReferences);
+    } catch {
+        // the supertype chain of a reference type declared later in the file being loaded
+        _private._childByNameMapIncomplete = true;
+        return;
+    }
+    if (!isHierarchical) return;
+    ReferenceImpl.resolveReferenceNode(addressSpace, reference);
+    if (!_add(_private._childByNameMap, reference as UAReferenceWithNodeRef)) {
+        _private._childByNameMapIncomplete = true;
+    }
+}
+
+/**
+ * The child index of `node`: browse name -> forward hierarchical reference(s), target resolved.
+ *
+ * Built lazily and kept by `_handle_HierarchicalReference` / `_remove_HierarchicalReference`. It is
+ * not kept while a nodeset is loading (`suspendBackReference`) nor when some target could not be
+ * resolved: a lookup then gets a transient map and the next one rebuilds. Before namespace 0 has
+ * loaded `HierarchicalReferences` nothing can be hierarchical yet and the map is empty.
+ */
+export function _get_HierarchicalReference(node: BaseNode): HierarchicalIndexMap {
+    const _private = BaseNode_getPrivate(node);
+    if (
+        _private._childByNameMap &&
+        !_private._childByNameMapIncomplete &&
+        _private._childByNameMapVersion === referenceTypeVersion.count
+    ) {
+        return _private._childByNameMap;
+    }
+    const addressSpace = node.addressSpace as AddressSpacePrivate;
+    const map: HierarchicalIndexMap = new Map();
+    const hierarchicalReferences = addressSpace.findReferenceType(hierarchicalReferences_ReferenceTypeNodeId);
+    if (!hierarchicalReferences) {
+        return map;
+    }
+    let complete = true;
+    for (const reference of node.findReferencesEx(hierarchicalReferences, BrowseDirection.Forward)) {
+        ReferenceImpl.resolveReferenceNode(addressSpace, reference);
+        if (!_add(map, reference as UAReferenceWithNodeRef)) {
+            complete = false;
+        }
+    }
+    if (complete && !addressSpace.suspendBackReference) {
+        _private._childByNameMap = map;
+        _private._childByNameMapVersion = referenceTypeVersion.count;
+    } else {
+        _private._childByNameMap = undefined;
+    }
+    _private._childByNameMapIncomplete = false;
+    return map;
+}
+export function _remove_HierarchicalReference(node: BaseNodeImpl, reference: UAReference) {
+    const _private = BaseNode_getPrivate(node);
+    if (_private._childByNameMap && reference.isForward) {
+        const addressSpace = node.addressSpace;
+        const referenceType = ReferenceImpl.resolveReferenceType(addressSpace, reference);
+
+        if (referenceType) {
+            const HierarchicalReferencesType = addressSpace.findReferenceType(hierarchicalReferences_ReferenceTypeNodeId);
+            if (HierarchicalReferencesType && referenceType.isSubtypeOf(HierarchicalReferencesType)) {
+                ReferenceImpl.resolveReferenceNode(addressSpace, reference);
+                _remove(_private._childByNameMap, reference as UAReferenceWithNodeRef);
+            }
+        }
+    }
+}
+
+function _makeReferenceDescription(addressSpace: IAddressSpace, reference: UAReference, resultMask: number): ReferenceDescription {
+    const isForward = reference.isForward;
+
+    const referenceTypeId = ReferenceImpl.resolveReferenceType(addressSpace, reference).nodeId;
+    assert(referenceTypeId instanceof NodeId);
+
+    const obj = ReferenceImpl.resolveReferenceNode(addressSpace, reference);
+
+    let data: ReferenceDescriptionOptions = {};
+
+    if (!obj) {
+        // cannot find reference node
+        data = {
+            isForward,
+            nodeId: reference.nodeId as ExpandedNodeId,
+            referenceTypeId: resultMask & ResultMask.ReferenceType ? referenceTypeId : null,
+            typeDefinition: undefined
+        };
+    } else {
+        const obj2 = obj;
+
+        const objOrVar =
+            obj2.nodeClass === NodeClass.Object || obj2.nodeClass === NodeClass.Variable ? (obj2 as UAVariable | UAObject) : null;
+
+        assert(reference.nodeId, " obj.nodeId");
+        data = {
+            browseName: resultMask & ResultMask.BrowseName ? coerceQualifiedName(obj.browseName) : null,
+            displayName: resultMask & ResultMask.DisplayName ? coerceLocalizedText(obj.displayName[0]) : null,
+            isForward: resultMask & ResultMask.IsForward ? isForward : false,
+            nodeClass: resultMask & ResultMask.NodeClass ? obj.nodeClass : NodeClass.Unspecified,
+            nodeId: obj.nodeId as ExpandedNodeId,
+            referenceTypeId: resultMask & ResultMask.ReferenceType ? referenceTypeId : null,
+            typeDefinition: resultMask & ResultMask.TypeDefinition ? (objOrVar?.typeDefinition as ExpandedNodeId) : undefined
+        };
+    }
+    if (data.typeDefinition === null) {
+        data.typeDefinition = ExpandedNodeId.nullNodeId as ExpandedNodeId;
+    }
+    const referenceDescription = new ReferenceDescription(data);
+    return referenceDescription;
+}
+
+export function _constructReferenceDescription(
+    addressSpace: IAddressSpace,
+    references: UAReference[],
+    resultMask: number
+): ReferenceDescription[] {
+    assert(Array.isArray(references));
+    return references.map((reference: UAReference) => _makeReferenceDescription(addressSpace, reference, resultMask));
+}
+
+export function BaseNode_remove_backward_reference(this: BaseNodeImpl, reference: UAReference): void {
+    const _private = BaseNode_getPrivate(this);
+    _remove_HierarchicalReference(this, reference);
+    const h = (<ReferenceImpl>reference).key(this.addressSpace as AddressSpacePrivate);
+    if (_private._back_referenceIdx.has(h)) {
+        // note : h may not exist in _back_referenceIdx since we are not indexing
+        //        _back_referenceIdx to UAObjectType and UAVariableType for performance reasons
+        const backward = <ReferenceImpl>_private._back_referenceIdx.get(h);
+        _private._back_referenceIdx.delete(h);
+        backward.dispose();
+        // the memoized reference scans of this node listed the reference just removed
+        BaseNode_clearCache(this);
+        noteReferenceTypeChange(this, reference);
+    }
+    (<ReferenceImpl>reference).dispose();
+}
+
+/**
+ * a reference added to or removed from a reference type may move it in the hierarchy (a
+ * HasSubtype link made at runtime): every memo built against the hierarchy is then stale
+ */
+export function noteReferenceTypeChange(node: BaseNode, reference?: UAReference): void {
+    if (node.nodeClass === NodeClass.ReferenceType) {
+        referenceTypeVersion.count += 1;
+    }
+    if (reference && sameNodeId(reference.referenceType, hasSubtype_ReferenceTypeNodeId)) {
+        // the answer of isSubtypeOf may have changed for every type below this node
+        typeHierarchyVersion.count += 1;
+    }
+}
+const hasSubtype_ReferenceTypeNodeId = resolveNodeId("HasSubtype");
+
+export function BaseNode_add_backward_reference(this: BaseNodeImpl, reference: UAReference): void {
+    const _private = BaseNode_getPrivate(this);
+    const h = (<ReferenceImpl>reference).key(this.addressSpace as AddressSpacePrivate);
+    // c8 ignore next
+    const forward = _private._referenceIdx.get(h) as ReferenceImpl | undefined;
+    if (forward) {
+        // the reference exists already among the forward references: a NodeSet2 file declares
+        // most references from both ends. Nothing to add, but the forward reference may have
+        // been added before its target existed (and memoized as such): the target is here now
+        if (!forward.node) {
+            forward.node = (reference as ReferenceImpl).node || (this.addressSpace.findNode(reference.nodeId) as BaseNode);
+        }
+        return;
+    }
+    const backward = _private._back_referenceIdx.get(h) as ReferenceImpl | undefined;
+    if (backward) {
+        // installed by an earlier propagation: the end-of-load sweep visits every namespace, so a
+        // nodeset loaded into an address space already in use meets the back references of the
+        // first load. The same back reference twice is nothing to add
+        if (!backward.node) {
+            backward.node = (reference as ReferenceImpl).node || (this.addressSpace.findNode(reference.nodeId) as BaseNode);
+        }
+        return;
+    }
+
+    if (!getReferenceType(reference)) {
+        const _stop_here = 1;
+    }
+    //  assert(reference._referenceType instanceof ReferenceType);
+    if (_private._back_referenceIdx === EMPTY_REFERENCE_INDEX) {
+        _private._back_referenceIdx = new ReferenceIndex();
+    }
+    _private._back_referenceIdx.set(h, reference);
+    noteReferenceTypeChange(this, reference);
+    _handle_HierarchicalReference(this, reference);
+    BaseNode_clearCache(this);
+}

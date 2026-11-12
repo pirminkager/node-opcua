@@ -1,22 +1,23 @@
 {
     "name": "node-opcua-buffer-utils",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -buffer-utils",
+    "type": "module",
+    "version": "2.187.0",
+    "description": "pure nodejs OPCUA SDK - module buffer-utils",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "scripts": {
         "build": "tsc -b",
-        "test": "mocha test",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "lint": "tslint source/**/*.ts"
+        "test": "mocha",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "lint": "biome check --no-errors-on-unmatched ."
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
-    "dependencies": {
-        "node-opcua-assert": "^2.6.0-alpha.1"
+    "engines": {
+        "node": ">=22.13.0"
     },
     "devDependencies": {
-        "node-opcua-benchmarker": "^2.6.0-alpha.1"
+        "node-opcua-benchmarker": "2.187.0"
     },
     "repository": {
         "type": "git",
@@ -31,5 +32,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "e4d73afdfcccb3491423149d9b9785888f4ebb3c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

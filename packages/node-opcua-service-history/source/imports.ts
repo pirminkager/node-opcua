@@ -3,29 +3,27 @@
  */
 import { TimestampsToReturn } from "node-opcua-data-value";
 
+export type { HistoryReadRequestOptions } from "node-opcua-types";
 export {
     AggregateConfiguration,
     HistoryData,
     HistoryModifiedData,
     HistoryReadDetails,
-    HistoryReadValueId,
-    HistoryReadResult,
-    HistoryUpdateResult,
     HistoryReadRequest,
     HistoryReadResponse,
+    HistoryReadResult,
+    HistoryReadValueId,
     HistoryUpdateRequest,
     HistoryUpdateResponse,
-
-    ReadRawModifiedDetails,
-    ReadProcessedDetails,
-    ReadAtTimeDetails,
-
+    HistoryUpdateResult,
     HistoryUpdateType,
-
     ModificationInfo,
+    ReadAtTimeDetails,
     ReadEventDetails,
-    HistoryReadRequestOptions
+    ReadProcessedDetails,
+    ReadRawModifiedDetails
 } from "node-opcua-types";
+
 import { assert } from "node-opcua-assert";
 import { HistoryReadRequest } from "node-opcua-types";
 

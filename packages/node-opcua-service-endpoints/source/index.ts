@@ -1,21 +1,18 @@
 /**
  * @module node-opcua-service-endpoints
  */
-// tslint:disable:max-line-length
+
+export type { ApplicationDescriptionOptions, GetEndpointsRequestOptions } from "node-opcua-types";
 export {
-    ApplicationType,
     ApplicationDescription,
-    ApplicationDescriptionOptions,
-    UserTokenPolicy,
+    ApplicationType,
     EndpointDescription,
-    UserIdentityToken,
     GetEndpointsRequest,
-    GetEndpointsRequestOptions,
     GetEndpointsResponse,
+    UserIdentityToken,
+    UserTokenPolicy,
     UserTokenType
 } from "node-opcua-types";
-
-import { UserTokenType } from "node-opcua-types";
 
 // OPC Unified Architecture, Part 4 $7.1 page 106
 // ApplicationDescription",

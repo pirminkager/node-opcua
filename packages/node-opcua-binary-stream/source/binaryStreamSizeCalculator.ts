@@ -2,7 +2,7 @@
  * @module node-opcua-binary-stream
  */
 import { assert } from "node-opcua-assert";
-import { calculateByteLength } from "./binaryStream";
+import { calculateByteLength, clampArrayBufferLength } from "./binaryStream.js";
 
 /**
  * a BinaryStreamSizeCalculator can be used to quickly evaluate the required size
@@ -17,7 +17,6 @@ import { calculateByteLength } from "./binaryStream";
  *
  */
 export class BinaryStreamSizeCalculator {
-
     public length: number;
 
     constructor() {
@@ -28,42 +27,55 @@ export class BinaryStreamSizeCalculator {
         this.length = 0;
     }
 
-    public writeInt8(value: number): void {
+    public writeInt8(_value: number): void {
         this.length += 1;
     }
 
-    public writeUInt8(value: number): void {
+    public writeUInt8(_value: number): void {
         this.length += 1;
     }
 
-    public writeInt16(value: number): void {
+    public writeInt16(_value: number): void {
         this.length += 2;
     }
 
-    public writeInteger(value: number): void {
+    public writeInteger(_value: number): void {
         this.length += 4;
     }
 
-    public writeUInt32(value: number): void {
+    public writeUInt32(_value: number): void {
         this.length += 4;
     }
 
-    public writeUInt16(value: number): void {
+    public writeUInt16(_value: number): void {
         this.length += 2;
     }
 
-    public  writeFloat(value: number): void {
+    public writeFloat(_value: number): void {
         this.length += 4;
     }
 
-    public writeDouble(value: number): void {
+    public writeDouble(_value: number): void {
         this.length += 8;
     }
 
-    public writeArrayBuffer(arrayBuf: ArrayBuffer, offset: number, byteLength: number): void {
-        offset = offset || 0;
+    /**
+     * counterpart of BinaryStream.reserveUInt32: only the 4 reserved bytes matter here.
+     * The returned position is meaningless for a calculator - patchUInt32 ignores it.
+     */
+    public reserveUInt32(): number {
+        this.length += 4;
+        return -1;
+    }
+
+    public patchUInt32(_position: number, _value: number): void {
+        /* nothing to patch: a size calculator only accumulates a byte count */
+    }
+
+    public writeArrayBuffer(arrayBuf: ArrayBuffer, offset = 0, byteLength?: number): void {
         assert(arrayBuf instanceof ArrayBuffer);
-        this.length += byteLength || arrayBuf.byteLength;
+        // must resolve (offset, byteLength) exactly as BinaryStream.writeArrayBuffer does
+        this.length += clampArrayBufferLength(arrayBuf.byteLength, offset, byteLength);
     }
 
     public writeByteStream(buf: Buffer): void {
@@ -75,7 +87,7 @@ export class BinaryStreamSizeCalculator {
         }
     }
 
-    public writeString(str: null|string): void {
+    public writeString(str: null | string): void {
         if (str === undefined || str === null) {
             this.writeUInt32(-1);
             return;

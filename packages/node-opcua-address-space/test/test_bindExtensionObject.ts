@@ -1,96 +1,64 @@
-// tslint:disable: no-console
-import * as should from "should";
-import * as sinon from "sinon";
-
-import { DateTime, Double, UAString, UInt32 } from "node-opcua-basic-types";
-import { LocalizedText, LocalizedTextLike } from "node-opcua-data-model";
-import { NodeIdLike } from "node-opcua-nodeid";
+import { assert } from "node-opcua-assert";
+import type { DateTime, UInt32 } from "node-opcua-basic-types";
+import type { LocalizedText } from "node-opcua-data-model";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { nodesets } from "node-opcua-nodesets";
 import { StatusCodes } from "node-opcua-status-code";
 import {
-    ApplicationDescription,
-    ApplicationDescriptionOptions,
-    BuildInfoOptions,
     ServerState,
-    ServerStatusDataType,
-    ServiceCounterDataType, ServiceCounterDataTypeOptions,
-    SessionDiagnosticsDataType
+    type ServerStatusDataType,
+    ServiceCounterDataType,
+    type SessionDiagnosticsDataType,
+    type StructureField
 } from "node-opcua-types";
-import { DataType } from "node-opcua-variant";
-import { AddressSpace, RootFolder, UAVariable, UAVariableT, Namespace, generateAddressSpace, UADataType } from "..";
-import { getMiniAddressSpace } from "../";
-import { nodesets } from "node-opcua-nodesets";
-import * as path from "path";
-import { UAVariableType } from "../src/ua_variable_type";
+import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
+import should from "should";
+import sinon from "sinon";
+import {
+    AddressSpace,
+    type DTApplicationDescription,
+    type DTServiceCounter,
+    type DTSessionDiagnostics,
+    type Namespace,
+    type UABaseDataVariable,
+    type UADataType,
+    type UARootFolder,
+    type UASessionDiagnosticsVariable,
+    type UAVariable,
+    type UAVariableT,
+    type UAVariableType
+} from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
 
 const doDebug = false;
 
-interface ServiceCounterVariable extends UAVariable {
+interface UAServiceCounterVariableEx extends UABaseDataVariable<DTServiceCounter, DataType.ExtensionObject> {
     totalCount: UAVariableT<UInt32, DataType.UInt32>;
     errorCount: UAVariableT<UInt32, DataType.UInt32>;
 }
-
+interface ClientDescriptionVariableEx extends UABaseDataVariable<DTApplicationDescription, DataType.ExtensionObject> {
+    applicationUri: UAVariableT<string, DataType.String>;
+}
+interface UASessionDiagnosticsVariableEx extends UASessionDiagnosticsVariable<DTSessionDiagnostics> {
+    totalRequestCount: UAServiceCounterVariableEx;
+    clientDescription: ClientDescriptionVariableEx;
+}
+interface UASDInternal extends UASessionDiagnosticsVariableEx {
+    getDataTypeNode(): UADataType;
+    updateExtensionObjectPartial(partialExtensionObject?: Record<string, unknown>): DTSessionDiagnostics;
+    incrementExtensionObjectPartial(path: string | string[]): void;
+}
 interface ServerStatusVariable extends UAVariable {
     startTime: UAVariableT<DateTime, DataType.DateTime>;
     currentTime: UAVariableT<DateTime, DataType.DateTime>;
-    state: UAVariableT<any, DataType.ExtensionObject>; // ServerState
-    buildInfo: UAVariableT<any, DataType.ExtensionObject>; // BuildInfoOptions
+    state: UAVariableT<unknown, DataType.ExtensionObject>; // ServerState
+    buildInfo: UAVariableT<unknown, DataType.ExtensionObject>; // BuildInfoOptions
     secondsTillShutdown: UAVariableT<UInt32, DataType.UInt32>;
     shutdownReason: UAVariableT<LocalizedText, DataType.LocalizedText>;
 }
 
-interface SessionDiagnosticsVariable extends UAVariable {
-
-    $extensionObject: SessionDiagnosticsDataType;
-
-    sessionId: UAVariableT<NodeIdLike, DataType.NodeId>;
-    sessionName: UAVariableT<UAString, DataType.String>;
-    clientDescription: UAVariableT<ApplicationDescription, DataType.ExtensionObject>;
-    serverUri: UAVariableT<UAString, DataType.String>;
-    endpointUrl: UAVariableT<UAString, DataType.String>;
-    localeIds: UAVariableT<UAString, DataType.String>;
-    actualSessionTimeout: UAVariableT<Double, DataType.Double>;
-    maxResponseMessageSize: UAVariableT<UInt32, DataType.UInt32>;
-    clientConnectionTime: UAVariableT<DateTime, DataType.DateTime>;
-    clientLastContactTime: UAVariableT<DateTime, DataType.DateTime>;
-    currentSubscriptionsCount: UAVariableT<UInt32, DataType.UInt32>;
-    currentMonitoredItemsCount: UAVariableT<UInt32, DataType.UInt32>;
-    currentPublishRequestsInQueue: UAVariableT<UInt32, DataType.UInt32>;
-    totalRequestCount: ServiceCounterVariable;
-    unauthorizedRequestCount: ServiceCounterVariable;
-    readCount: ServiceCounterVariable;
-    historyReadCount: ServiceCounterVariable;
-    writeCount: ServiceCounterVariable;
-    historyUpdateCount: ServiceCounterVariable;
-    callCount: ServiceCounterVariable;
-    createMonitoredItemsCount: ServiceCounterVariable;
-    modifyMonitoredItemsCount: ServiceCounterVariable;
-    setMonitoringModeCount: ServiceCounterVariable;
-    setTriggeringCount: ServiceCounterVariable;
-    deleteMonitoredItemsCount: ServiceCounterVariable;
-    createSubscriptionCount: ServiceCounterVariable;
-    modifySubscriptionCount: ServiceCounterVariable;
-    setPublishingModeCount: ServiceCounterVariable;
-    publishCount: ServiceCounterVariable;
-    republishCount: ServiceCounterVariable;
-    transferSubscriptionsCount: ServiceCounterVariable;
-    deleteSubscriptionsCount: ServiceCounterVariable;
-    addNodesCount: ServiceCounterVariable;
-    addReferencesCount: ServiceCounterVariable;
-    deleteNodesCount: ServiceCounterVariable;
-    deleteReferencesCount: ServiceCounterVariable;
-    browseCount: ServiceCounterVariable;
-    browseNextCount: ServiceCounterVariable;
-    translateBrowsePathsToNodeIdsCount: ServiceCounterVariable;
-    queryFirstCount: ServiceCounterVariable;
-    queryNextCount: ServiceCounterVariable;
-    registerNodesCount: ServiceCounterVariable;
-    unregisterNodesCount: ServiceCounterVariable;
-}
-
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("Extension Object binding and sub  components\n", () => {
-
     let addressSpace: AddressSpace;
     before(async () => {
         addressSpace = await getMiniAddressSpace();
@@ -99,11 +67,9 @@ describe("Extension Object binding and sub  components\n", () => {
         addressSpace.dispose();
     });
 
-    describe("bindObject\n", () => {
-
-        it("ZZ1 - should handle a Variable containing a ServiceCounterDataType", () => {
-
-            const rootFolder = addressSpace.findNode("RootFolder")! as RootFolder;
+    describe("bindObject", () => {
+        it("BEO4 - should handle a Variable containing an array of ServiceCounterDataType", () => {
+            const rootFolder = addressSpace.findNode("RootFolder")! as UARootFolder;
 
             const serviceCounterDataType = addressSpace.findDataType("ServiceCounterDataType")!;
             serviceCounterDataType.browseName.toString().should.eql("ServiceCounterDataType");
@@ -111,13 +77,94 @@ describe("Extension Object binding and sub  components\n", () => {
             const baseVariableType = addressSpace.findVariableType("BaseVariableType")!;
             baseVariableType.browseName.toString().should.eql("BaseVariableType");
 
+            const namespace = addressSpace.getOwnNamespace();
+
             const counter = 1;
-            const extensionObjectVar = baseVariableType.instantiate({
-                browseName: "VariableWithExtensionObject" + counter,
+            const extensionObjectVar = namespace.addVariable({
+                browseName: `VariableWithExtensionObjectArray${counter}`,
                 dataType: serviceCounterDataType.nodeId,
+                valueRank: 1,
+                arrayDimensions: [0],
                 minimumSamplingInterval: 0,
-                organizedBy: rootFolder.objects,
-            }) as ServiceCounterVariable;
+                organizedBy: rootFolder.objects
+            });
+            should.not.exist(extensionObjectVar.getComponentByName("0"));
+            should.not.exist(extensionObjectVar.getComponentByName("1"));
+
+            extensionObjectVar.minimumSamplingInterval.should.eql(0);
+
+            extensionObjectVar.readValue().value.dataType.should.eql(DataType.Null); // Empty array
+            extensionObjectVar.readValue().statusCode.should.eql(StatusCodes.UncertainInitialValue);
+
+            const extensionObjectArray = extensionObjectVar.bindExtensionObjectArray(
+                [
+                    new ServiceCounterDataType({ errorCount: 1, totalCount: 2 }),
+                    new ServiceCounterDataType({ errorCount: 3, totalCount: 4 })
+                ],
+                { createMissingProp: true }
+            ) as ServiceCounterDataType[];
+            should.exist(extensionObjectVar.getComponentByName("0"));
+            should.exist(extensionObjectVar.getComponentByName("1"));
+            should.exist(extensionObjectVar.getComponentByName("0")?.getChildByName("TotalCount"));
+            should.exist(extensionObjectVar.getComponentByName("1")?.getChildByName("TotalCount"));
+
+            extensionObjectVar.installExtensionObjectVariables();
+            should.exist(extensionObjectVar.getComponentByName("0"));
+            should.exist(extensionObjectVar.getComponentByName("1"));
+            should.exist(extensionObjectVar.getComponentByName("0")?.getChildByName("TotalCount"));
+            should.exist(extensionObjectVar.getComponentByName("1")?.getChildByName("TotalCount"));
+
+            extensionObjectArray.length.should.eql(2);
+            extensionObjectArray[0].constructor.name.should.eql("ServiceCounterDataType");
+            extensionObjectArray[1].constructor.name.should.eql("ServiceCounterDataType");
+
+            extensionObjectVar.readValue().statusCode.should.eql(StatusCodes.Good);
+            extensionObjectVar.readValue().value.dataType.should.eql(DataType.ExtensionObject);
+            extensionObjectVar.readValue().value.arrayType.should.eql(VariantArrayType.Array);
+            extensionObjectVar.readValue().value.value.length.should.eql(2);
+            extensionObjectVar.readValue().value.value[0].constructor.name.should.eql("ServiceCounterDataType");
+            extensionObjectVar.readValue().value.value[1].constructor.name.should.eql("ServiceCounterDataType");
+
+            // to do
+            const el1 = extensionObjectVar.getComponentByName("0") as UAVariable;
+            const dataValueEl1 = el1.readValue();
+            dataValueEl1.value.dataType.should.eql(DataType.ExtensionObject);
+            dataValueEl1.value.arrayType.should.eql(VariantArrayType.Scalar);
+            dataValueEl1.value.value.constructor.name.should.eql("ServiceCounterDataType");
+
+            const el2 = extensionObjectVar.getComponentByName("1") as UAVariable;
+            const dataValueEl2 = el2.readValue();
+            dataValueEl2.value.dataType.should.eql(DataType.ExtensionObject);
+            dataValueEl2.value.arrayType.should.eql(VariantArrayType.Scalar);
+            dataValueEl2.value.value.constructor.name.should.eql("ServiceCounterDataType");
+        });
+
+        it("BEO1 - should handle a Variable containing a ServiceCounterDataType", () => {
+            const rootFolder = addressSpace.findNode("RootFolder") as UARootFolder;
+
+            const serviceCounterDataType = addressSpace.findDataType("ServiceCounterDataType");
+            should(serviceCounterDataType?.browseName.toString()).eql("ServiceCounterDataType");
+
+            const baseVariableType = addressSpace.findVariableType("BaseVariableType");
+            should(baseVariableType?.browseName.toString()).eql("BaseVariableType");
+
+            const counter = 1;
+            const extensionObjectVar = baseVariableType?.instantiate({
+                browseName: `VariableWithExtensionObject${counter}`,
+                dataType: serviceCounterDataType?.nodeId,
+                valueRank: -1,
+                minimumSamplingInterval: 0,
+                organizedBy: rootFolder.objects
+            }) as UAServiceCounterVariableEx;
+
+            should.exist(extensionObjectVar.$extensionObject);
+            // should.not.exist(extensionObjectVar.$$extensionObjectArray);
+            should.not.exist(extensionObjectVar.getChildByName("TotalCount"));
+            should.not.exist(extensionObjectVar.getChildByName("ErrorCount"));
+
+            extensionObjectVar.installExtensionObjectVariables();
+            should.exist(extensionObjectVar.getChildByName("TotalCount"));
+            should.exist(extensionObjectVar.getChildByName("ErrorCount"));
 
             extensionObjectVar.minimumSamplingInterval.should.eql(0);
 
@@ -152,25 +199,23 @@ describe("Extension Object binding and sub  components\n", () => {
             extensionObject.totalCount = 3;
             spy_on_ServerCounter_value_changed.callCount.should.eql(1);
             spy_on_ServerCounter_TotalCount_value_changed.callCount.should.eql(1);
-
         });
 
-        it("ZZ2 - should handle a Variable containing a ServerStatus", () => {
+        it("BEO2 - should handle a Variable containing a ServerStatus", () => {
+            const rootFolder = addressSpace.findNode("RootFolder") as UARootFolder;
 
-            const rootFolder = addressSpace.findNode("RootFolder")! as RootFolder;
+            const serverStatusDataType = addressSpace?.findDataType("ServerStatusDataType");
+            should(serverStatusDataType?.browseName.toString()).eql("ServerStatusDataType");
 
-            const serverStatusDataType = addressSpace.findDataType("ServerStatusDataType")!;
-            serverStatusDataType.browseName.toString().should.eql("ServerStatusDataType");
-
-            const serverStatusType = addressSpace.findVariableType("ServerStatusType")!;
-            serverStatusType.browseName.toString().should.eql("ServerStatusType");
-
+            const serverStatusType = addressSpace.findVariableType("ServerStatusType");
+            should.exist(serverStatusType);
+            should(serverStatusType?.browseName.toString()).eql("ServerStatusType");
             const counter = 1;
-            const extensionObjectVar = serverStatusType.instantiate({
-                browseName: "ServerStatusType" + counter,
-                dataType: serverStatusDataType.nodeId,
+            const extensionObjectVar = serverStatusType?.instantiate({
+                browseName: `ServerStatusType${counter}`,
+                dataType: serverStatusDataType?.nodeId,
                 minimumSamplingInterval: 0,
-                organizedBy: rootFolder.objects,
+                organizedBy: rootFolder.objects
             }) as ServerStatusVariable;
 
             extensionObjectVar.minimumSamplingInterval.should.eql(0);
@@ -202,17 +247,15 @@ describe("Extension Object binding and sub  components\n", () => {
             // ---------------------------------------- State ( testing Enumeration )
             extensionObject.state = ServerState.Running;
             spy_on_ServerStatus_State_value_changed.callCount.should.eql(1);
-            extensionObjectVar.state.readValue().value.value.should.eql(ServerState.Running);
+            (extensionObjectVar.state.readValue().value.value as ServerState).should.eql(ServerState.Running);
 
             extensionObject.state = ServerState.Suspended;
             spy_on_ServerStatus_State_value_changed.callCount.should.eql(2);
-            extensionObjectVar.state.readValue().value.value.should.eql(ServerState.Suspended);
-
+            (extensionObjectVar.state.readValue().value.value as ServerState).should.eql(ServerState.Suspended);
         });
 
-        it("ZZ3 - should handle a Variable containing a SessionDiagnostic", () => {
-
-            const rootFolder = addressSpace.findNode("RootFolder")! as RootFolder;
+        it("BEO3 - should handle a Variable containing a SessionDiagnostic", () => {
+            const rootFolder = addressSpace.findNode("RootFolder")! as UARootFolder;
 
             const sessionDiagnosticsDataType = addressSpace.findDataType("SessionDiagnosticsDataType")!;
             sessionDiagnosticsDataType.browseName.toString().should.eql("SessionDiagnosticsDataType");
@@ -221,23 +264,27 @@ describe("Extension Object binding and sub  components\n", () => {
             sessionDiagnosticsVariableType.browseName.toString().should.eql("SessionDiagnosticsVariableType");
 
             const counter = 1;
-            const extensionObjectVar = sessionDiagnosticsVariableType.instantiate({
-                browseName: "SessionDiagnostics" + counter,
+            const uaVariable = sessionDiagnosticsVariableType.instantiate({
+                browseName: `SessionDiagnostics${counter}`,
                 dataType: sessionDiagnosticsDataType.nodeId,
                 minimumSamplingInterval: 0,
-                organizedBy: rootFolder.objects,
-            }) as SessionDiagnosticsVariable;
+                organizedBy: rootFolder.objects
+            }) as UASessionDiagnosticsVariableEx;
 
-            extensionObjectVar.minimumSamplingInterval.should.eql(0);
-            extensionObjectVar.totalRequestCount.minimumSamplingInterval.should.eql(0);
-            extensionObjectVar.totalRequestCount.totalCount.minimumSamplingInterval.should.eql(0);
+            uaVariable.installExtensionObjectVariables();
+            uaVariable.minimumSamplingInterval.should.eql(0);
+            uaVariable.totalRequestCount.minimumSamplingInterval.should.eql(0);
 
-            extensionObjectVar.readValue().statusCode.should.eql(StatusCodes.Good);
-            extensionObjectVar.totalRequestCount.readValue().statusCode.should.eql(StatusCodes.Good);
-            extensionObjectVar.totalRequestCount.totalCount.readValue().statusCode.should.eql(StatusCodes.Good);
-            extensionObjectVar.totalRequestCount.errorCount.readValue().statusCode.should.eql(StatusCodes.Good);
+            const useTwoLevelsDeep = false;
 
-            const extensionObject = extensionObjectVar.bindExtensionObject() as SessionDiagnosticsDataType;
+            useTwoLevelsDeep && uaVariable.totalRequestCount.totalCount.minimumSamplingInterval.should.eql(0);
+
+            uaVariable.readValue().statusCode.should.eql(StatusCodes.Good);
+            uaVariable.totalRequestCount.readValue().statusCode.should.eql(StatusCodes.Good);
+            useTwoLevelsDeep && uaVariable.totalRequestCount.totalCount.readValue().statusCode.should.eql(StatusCodes.Good);
+            useTwoLevelsDeep && uaVariable.totalRequestCount.errorCount.readValue().statusCode.should.eql(StatusCodes.Good);
+
+            const extensionObject = uaVariable.bindExtensionObject() as SessionDiagnosticsDataType;
 
             extensionObject.constructor.name.should.eql("SessionDiagnosticsDataType");
 
@@ -245,53 +292,58 @@ describe("Extension Object binding and sub  components\n", () => {
             const spy_on_SessionDiagnostics_TotalRequestCount_value_changed = sinon.spy();
             const spy_on_SessionDiagnostics_TotalRequestCount_TotalCount_value_changed = sinon.spy();
 
-            extensionObjectVar.on("value_changed", spy_on_SessionDiagnostics_value_changed);
-            extensionObjectVar.totalRequestCount.on("value_changed",
-                spy_on_SessionDiagnostics_TotalRequestCount_value_changed);
-            extensionObjectVar.totalRequestCount.totalCount.on("value_changed",
-                spy_on_SessionDiagnostics_TotalRequestCount_TotalCount_value_changed);
+            uaVariable.on("value_changed", spy_on_SessionDiagnostics_value_changed);
+            uaVariable.totalRequestCount.on("value_changed", spy_on_SessionDiagnostics_TotalRequestCount_value_changed);
+            useTwoLevelsDeep &&
+                uaVariable.totalRequestCount.totalCount.on(
+                    "value_changed",
+                    spy_on_SessionDiagnostics_TotalRequestCount_TotalCount_value_changed
+                );
 
-            extensionObjectVar.totalRequestCount.totalCount.readValue().value.value.should.eql(0);
-            extensionObjectVar.totalRequestCount.readValue().value.value.totalCount.should.eql(0);
-            extensionObjectVar.readValue().value.value.totalRequestCount.totalCount.should.eql(0);
+            useTwoLevelsDeep && uaVariable.totalRequestCount.totalCount.readValue().value.value.should.eql(0);
 
-            extensionObjectVar.$extensionObject.should.eql(extensionObject);
+            const _dv1 = uaVariable.totalRequestCount.readValue();
+            const _dv2 = uaVariable.readValue();
+
+            uaVariable.totalRequestCount.readValue().value.value.totalCount.should.eql(0);
+
+            uaVariable.readValue().value.value.totalRequestCount.totalCount.should.eql(0);
+
+            uaVariable.$extensionObject.should.eql(extensionObject);
 
             extensionObject.totalRequestCount.totalCount = 1;
 
-            extensionObjectVar.$extensionObject.should.eql(extensionObject);
+            uaVariable.$extensionObject.should.eql(extensionObject);
             // xx sionObject.totalRequestCount = new Proxy(extensionObject.totalRequestCount,{});
 
-            extensionObjectVar.readValue().value.value.totalRequestCount.totalCount.should.eql(1);
+            uaVariable.readValue().value.value.totalRequestCount.totalCount.should.eql(1);
             spy_on_SessionDiagnostics_value_changed.callCount.should.eql(1);
 
-            extensionObjectVar.totalRequestCount.readValue().value.value.totalCount.should.eql(1);
+            uaVariable.totalRequestCount.readValue().value.value.totalCount.should.eql(1);
             spy_on_SessionDiagnostics_TotalRequestCount_value_changed.callCount.should.eql(1);
 
             // xx console.log(extensionObjectVar.totalRequestCount.totalCount.readValue());
-            spy_on_SessionDiagnostics_TotalRequestCount_TotalCount_value_changed.callCount.should.eql(1);
-            extensionObjectVar.totalRequestCount.totalCount.readValue().value.value.should.eql(1);
-
+            useTwoLevelsDeep && spy_on_SessionDiagnostics_TotalRequestCount_TotalCount_value_changed.callCount.should.eql(1);
+            useTwoLevelsDeep && uaVariable.totalRequestCount.totalCount.readValue().value.value.should.eql(1);
         });
     });
 
     describe("should be possible to bind an Extension Object properties with variable node properties", () => {
+        let sessionDiagnostics: UASessionDiagnosticsVariableEx;
+        let _sessionDiagnostics: SessionDiagnosticsDataType;
 
-        let _sessionDiagnostics: any;
-        let sessionDiagnostics: any;
-
-        let spy_on_sessionDiagnostics_value_changed: any;
-        let spy_on_sessionDiagnostics_totalRequestCount_value_changed: any;
-        let spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed: any;
-        let spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed: any;
-        let spy_on_sessionDiagnostics_clientDescription_value_changed: any;
+        let spy_on_sessionDiagnostics_value_changed: sinon.SinonSpy;
+        let spy_on_sessionDiagnostics_totalRequestCount_value_changed: sinon.SinonSpy;
+        let spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed: sinon.SinonSpy;
+        let spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed: sinon.SinonSpy;
+        let spy_on_sessionDiagnostics_clientDescription_value_changed: sinon.SinonSpy;
 
         let counter = 0;
 
         beforeEach(() => {
-            const rootFolder = addressSpace.findNode("RootFolder")! as RootFolder;
+            const rootFolder = addressSpace.findNode("RootFolder")! as UARootFolder;
 
-            const sessionDiagnosticsDataType = addressSpace.findDataType("SessionDiagnosticsDataType")!;
+            const _sessionDiagnosticsDataType = addressSpace.findDataType("SessionDiagnosticsDataType")!;
             const sessionDiagnosticsVariableType = addressSpace.findVariableType("SessionDiagnosticsVariableType")!;
 
             // the extension object
@@ -299,11 +351,13 @@ describe("Extension Object binding and sub  components\n", () => {
 
             counter += 1;
             sessionDiagnostics = sessionDiagnosticsVariableType.instantiate({
-                browseName: "SessionDiagnostics" + counter,
+                browseName: `SessionDiagnostics${counter}`,
                 organizedBy: rootFolder.objects
-            }) as SessionDiagnosticsVariable;
+            }) as UASessionDiagnosticsVariableEx;
 
-            _sessionDiagnostics = sessionDiagnostics.bindExtensionObject();
+            _sessionDiagnostics = sessionDiagnostics.bindExtensionObject() as SessionDiagnosticsDataType;
+            assert(sessionDiagnostics.$extensionObject === _sessionDiagnostics);
+            sessionDiagnostics.installExtensionObjectVariables();
 
             // xx console.log(_sessionDiagnostics.toString());
 
@@ -328,24 +382,27 @@ describe("Extension Object binding and sub  components\n", () => {
             spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed = sinon.spy();
 
             sessionDiagnostics.on("value_changed", spy_on_sessionDiagnostics_value_changed);
-            sessionDiagnostics.clientDescription.on("value_changed",
-                spy_on_sessionDiagnostics_clientDescription_value_changed);
-            sessionDiagnostics.totalRequestCount.on("value_changed",
-                spy_on_sessionDiagnostics_totalRequestCount_value_changed);
-            sessionDiagnostics.totalRequestCount.totalCount.on("value_changed",
-                spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed);
-            sessionDiagnostics.totalRequestCount.errorCount.on("value_changed",
-                spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed);
+            sessionDiagnostics.clientDescription.on("value_changed", spy_on_sessionDiagnostics_clientDescription_value_changed);
+            sessionDiagnostics.totalRequestCount.on("value_changed", spy_on_sessionDiagnostics_totalRequestCount_value_changed);
+            sessionDiagnostics.totalRequestCount.totalCount.on(
+                "value_changed",
+                spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed
+            );
+            sessionDiagnostics.totalRequestCount.errorCount.on(
+                "value_changed",
+                spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed
+            );
         });
 
         it("ZA1- a ExtensionObject variable should have the expected dataType node", () => {
-            const dataTypeNode = sessionDiagnostics.getDataTypeNode();
+            const dataTypeNode = (sessionDiagnostics as unknown as UASDInternal).getDataTypeNode();
 
             dataTypeNode.browseName.toString().should.eql("SessionDiagnosticsDataType");
-            const structure = addressSpace.findDataType("Structure");
-            dataTypeNode.isSupertypeOf(structure).should.eql(true);
+            const structure = addressSpace.findDataType("Structure")!;
+            dataTypeNode.isSubtypeOf(structure).should.eql(true);
 
-            dataTypeNode.$definition.fields.map((x: any) => x.name).sort().should.eql([
+            const definition = dataTypeNode.getStructureDefinition();
+            should(definition.fields?.map((x: StructureField) => x.name).sort()).eql([
                 "ActualSessionTimeout",
                 "AddNodesCount",
                 "AddReferencesCount",
@@ -388,7 +445,7 @@ describe("Extension Object binding and sub  components\n", () => {
                 "TranslateBrowsePathsToNodeIdsCount",
                 "UnauthorizedRequestCount",
                 "UnregisterNodesCount",
-                "WriteCount",
+                "WriteCount"
             ]);
         });
 
@@ -397,41 +454,45 @@ describe("Extension Object binding and sub  components\n", () => {
             extensionObject.constructor.name.should.eql("SessionDiagnosticsDataType");
         });
 
-        it("ZA3- updateExtensionObjectPartial: it should be possible to cascade changes " +
-            "by acting on the whole ExtensionObject", () => {
-
+        it(
+            "ZA3- updateExtensionObjectPartial: it should be possible to cascade changes " +
+                "by acting on the whole ExtensionObject",
+            () => {
                 spy_on_sessionDiagnostics_clientDescription_value_changed.callCount.should.eql(0);
 
-                const someClientDescription = /* new ApplicationDescription( */{
+                const someClientDescription = /* new ApplicationDescription( */ {
                     /* ApplicationDescription */
                     applicationUri: "applicationUri-1"
-                }/*)*/;
+                }; /*)*/
 
-                sessionDiagnostics.updateExtensionObjectPartial({ clientDescription: someClientDescription });
+                (sessionDiagnostics as unknown as UASDInternal).updateExtensionObjectPartial({
+                    clientDescription: someClientDescription
+                });
 
                 spy_on_sessionDiagnostics_clientDescription_value_changed.callCount.should.eql(1);
                 spy_on_sessionDiagnostics_value_changed.callCount.should.eql(1);
 
                 sessionDiagnostics.clientDescription.applicationUri.readValue().value.value.should.eql("applicationUri-1");
-                sessionDiagnostics.clientDescription.readValue().value.value.applicationUri.should.eql("applicationUri-1");
-                sessionDiagnostics.readValue().value.value.clientDescription.applicationUri.should.eql("applicationUri-1");
+                should(sessionDiagnostics.clientDescription.readValue().value.value.applicationUri).eql("applicationUri-1");
+                should(sessionDiagnostics.readValue().value.value.clientDescription.applicationUri).eql("applicationUri-1");
 
-                _sessionDiagnostics.clientDescription.applicationUri.should.eql("applicationUri-1");
+                should(_sessionDiagnostics.clientDescription?.applicationUri).eql("applicationUri-1");
 
                 spy_on_sessionDiagnostics_totalRequestCount_value_changed.callCount.should.eql(0);
                 spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed.callCount.should.eql(0);
                 spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed.callCount.should.eql(0);
 
-                const eo = sessionDiagnostics.constructExtensionObjectFromComponents();
-                eo.clientDescription.applicationUri.should.eql("applicationUri-1");
+                const eo = sessionDiagnostics.readValue().value.value;
+                should(eo.clientDescription.applicationUri).eql("applicationUri-1");
 
                 // xx console.log(eo.toString());
+            }
+        );
 
-            });
-
-        it("ZA4- updateExtensionObjectPartial: it should be possible to cascade changes " +
-            "by acting on the whole ExtensionObject - middle", () => {
-
+        it(
+            "ZA4- updateExtensionObjectPartial: it should be possible to cascade changes " +
+                "by acting on the whole ExtensionObject - middle",
+            () => {
                 spy_on_sessionDiagnostics_totalRequestCount_value_changed.callCount.should.eql(0);
                 spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed.callCount.should.eql(0);
                 spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed.callCount.should.eql(0);
@@ -441,11 +502,11 @@ describe("Extension Object binding and sub  components\n", () => {
                 sessionDiagnostics.readValue().value.value.totalRequestCount.totalCount.should.eql(0);
                 _sessionDiagnostics.totalRequestCount.totalCount.should.eql(0);
 
-                const totalRequestCount = /* new Counter( */{
+                const totalRequestCount = /* new Counter( */ {
                     errorCount: 25,
-                    totalCount: 130,
+                    totalCount: 130
                 };
-                sessionDiagnostics.updateExtensionObjectPartial({ totalRequestCount });
+                (sessionDiagnostics as unknown as UASDInternal).updateExtensionObjectPartial({ totalRequestCount });
 
                 sessionDiagnostics.totalRequestCount.totalCount.readValue().value.value.should.eql(130);
                 sessionDiagnostics.totalRequestCount.readValue().value.value.totalCount.should.eql(130);
@@ -456,12 +517,13 @@ describe("Extension Object binding and sub  components\n", () => {
                 sessionDiagnostics.totalRequestCount.readValue().value.value.errorCount.should.eql(25);
                 sessionDiagnostics.readValue().value.value.totalRequestCount.errorCount.should.eql(25);
                 _sessionDiagnostics.totalRequestCount.errorCount.should.eql(25);
+            }
+        );
 
-            });
-
-        it("ZA5- incrementExtensionObjectPartial: it should be possible to cascade changes " +
-            "by increasing a value on ExtensionObject", () => {
-
+        it(
+            "ZA5- incrementExtensionObjectPartial: it should be possible to cascade changes " +
+                "by increasing a value on ExtensionObject",
+            () => {
                 sessionDiagnostics.totalRequestCount.totalCount.readValue().value.value.should.eql(0);
                 sessionDiagnostics.totalRequestCount.readValue().value.value.totalCount.should.eql(0);
                 sessionDiagnostics.readValue().value.value.totalRequestCount.totalCount.should.eql(0);
@@ -471,14 +533,14 @@ describe("Extension Object binding and sub  components\n", () => {
                 spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed.callCount.should.eql(0);
                 spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed.callCount.should.eql(0);
 
-                sessionDiagnostics.incrementExtensionObjectPartial("totalRequestCount.totalCount");
+                (sessionDiagnostics as unknown as UASDInternal).incrementExtensionObjectPartial("totalRequestCount.totalCount");
 
                 sessionDiagnostics.totalRequestCount.totalCount.readValue().value.value.should.eql(1);
                 sessionDiagnostics.totalRequestCount.readValue().value.value.totalCount.should.eql(1);
                 sessionDiagnostics.readValue().value.value.totalRequestCount.totalCount.should.eql(1);
                 _sessionDiagnostics.totalRequestCount.totalCount.should.eql(1);
 
-                sessionDiagnostics.incrementExtensionObjectPartial("totalRequestCount.totalCount");
+                (sessionDiagnostics as unknown as UASDInternal).incrementExtensionObjectPartial("totalRequestCount.totalCount");
 
                 sessionDiagnostics.totalRequestCount.totalCount.readValue().value.value.should.eql(2);
                 sessionDiagnostics.totalRequestCount.readValue().value.value.totalCount.should.eql(2);
@@ -488,28 +550,24 @@ describe("Extension Object binding and sub  components\n", () => {
                 spy_on_sessionDiagnostics_totalRequestCount_value_changed.callCount.should.eql(2);
                 spy_on_sessionDiagnostics_totalRequestCount_errorCount_value_changed.callCount.should.eql(0);
                 spy_on_sessionDiagnostics_totalRequestCount_totalCount_value_changed.callCount.should.eql(2);
+            }
+        );
 
-            });
-
-        it("ZA6- changing property values in extension object directly should propagates changes and notification " +
-            "to NodeVariables", () => {
-
-                _sessionDiagnostics.clientDescription.applicationUri = "applicationUri-1";
+        it(
+            "ZA6- changing property values in extension object directly should propagates changes and notification " +
+                "to NodeVariables",
+            () => {
+                _sessionDiagnostics.clientDescription!.applicationUri = "applicationUri-1";
 
                 sessionDiagnostics.clientDescription.applicationUri.readValue().value.value.should.eql("applicationUri-1");
-                sessionDiagnostics.clientDescription.readValue().value.value.applicationUri.should.eql("applicationUri-1");
-                sessionDiagnostics.readValue().value.value.clientDescription.applicationUri.should.eql("applicationUri-1");
-
-            });
+                should(sessionDiagnostics.clientDescription.readValue().value.value.applicationUri).eql("applicationUri-1");
+                should(sessionDiagnostics.readValue().value.value.clientDescription.applicationUri).eql("applicationUri-1");
+            }
+        );
     });
-
 });
 
-// tslint:disable-next-line: no-empty-interface
-interface UAMeasIdDataType extends UAVariable {
-
-}
-// tslint:disable-next-line: no-empty-interface
+interface UAMeasIdDataType extends UAVariable {}
 interface UAPartIdDataType extends UAVariable {
     id: UAVariableT<string, DataType.String>;
     $description: UAVariableT<LocalizedText, DataType.LocalizedText>;
@@ -526,31 +584,28 @@ interface UAResultType extends UAVariable {
     resultId: UAResultIdDataType;
     hasTransferableDataOnFile?: UAVariableT<boolean, DataType.Boolean>; // Opt
     isPartial: UAVariableT<boolean, DataType.Boolean>;
-    isSimulated: UAVariableT<boolean, DataType.Boolean>;// Opt
+    isSimulated: UAVariableT<boolean, DataType.Boolean>; // Opt
     resultState: UAVariableT<number, DataType.Int32>;
     measId: UAMeasIdDataType;
     partId: UAPartIdDataType;
     internalConfigurationId: UAConfigurationId;
     resultContent: UAVariable;
-};
+}
 describe("Extension Object binding and sub  components On MachineVision", () => {
     let addressSpace: AddressSpace;
-    let namespace: Namespace;
+    let _namespace: Namespace;
 
     before(async () => {
-        const nodesetFilename = [
-            nodesets.standard,
-            nodesets.machineVision
-        ]
+        const nodesetFilename = [nodesets.standard, nodesets.machineVision];
         addressSpace = AddressSpace.create();
-        namespace = addressSpace.registerNamespace("private");
+        _namespace = addressSpace.registerNamespace("private");
         await generateAddressSpace(addressSpace, nodesetFilename);
     });
     after(async () => {
         addressSpace.dispose();
     });
 
-    let nsMV: number = 0;
+    let nsMV = 0;
     let resultDataType: UADataType;
     let resultType: UAVariableType;
     beforeEach(() => {
@@ -565,7 +620,82 @@ describe("Extension Object binding and sub  components On MachineVision", () => 
             throw new Error("Cannot find ResultType");
         }
     });
-    it("MachineVision-BindExtensionObject should instantitate a ResultType", () => {
+
+    it("MV0a MachineVision-ResultClone ", () => {
+        const configurationIdDataType = addressSpace.findDataType("ConfigurationIdDataType", nsMV)!;
+
+        const configurationExtObj = addressSpace.constructExtensionObject(configurationIdDataType, {
+            description: "some description",
+            hash: Buffer.from("DEADBEEF", "hex"),
+            id: "IIII",
+            version: "1.2"
+        });
+
+        const variant = new Variant({
+            dataType: DataType.ExtensionObject,
+            value: configurationExtObj
+        });
+        const clone = variant.clone();
+        should.exist(clone.value);
+        clone.value.toString().should.eql(configurationExtObj.toString());
+        clone.value.hash.toString("hex").should.eql("deadbeef");
+        clone.value.id.should.eql("IIII");
+        clone.value.version.should.eql("1.2");
+    });
+
+    it("MV0b MachineVision-ResultClone ", () => {
+        const configurationIdDataType = addressSpace.findDataType("ConfigurationIdDataType", nsMV)!;
+
+        const rr = addressSpace.constructExtensionObject(configurationIdDataType, {
+            description: "some description",
+            hash: Buffer.from("DEADBEEF", "hex"),
+            id: "IIII",
+            version: "1.2"
+        });
+        should.exist((rr as unknown as Record<string, unknown>).hash);
+        ((rr as unknown as Record<string, unknown>).hash as Buffer).toString("hex").should.eql("deadbeef");
+
+        const recipeIdExternalD = addressSpace.findDataType("RecipeIdExternalDataType", nsMV)!;
+
+        const resultContent1 = addressSpace.constructExtensionObject(recipeIdExternalD, {
+            description: "some description"
+        });
+        const partId = "PartId-1";
+        const extObj = addressSpace.constructExtensionObject(resultDataType, {
+            hasTransferableDataOnFile: true,
+            internalConfigurationId: {
+                description: "some description",
+                hash: Buffer.from("DEADBEEF", "hex"),
+                id: "IIII",
+                version: "1.2"
+            },
+            partId,
+            resultState: 32,
+
+            resultContent: [resultContent1]
+        });
+
+        ((extObj as unknown as Record<string, Record<string, unknown>>).internalConfigurationId.hash as Buffer)
+            .toString("hex")
+            .should.eql("deadbeef");
+        ((extObj as unknown as Record<string, Record<string, unknown>>).internalConfigurationId.id as string).should.eql("IIII");
+        ((extObj as unknown as Record<string, Record<string, unknown>>).internalConfigurationId.version as string).should.eql(
+            "1.2"
+        );
+
+        const variant = new Variant({
+            dataType: DataType.ExtensionObject,
+            value: extObj
+        });
+        const clone = variant.clone();
+        should.exist(clone.value);
+        clone.value.internalConfigurationId.hash.toString("hex").should.eql("deadbeef");
+        clone.value.internalConfigurationId.id.should.eql("IIII");
+        clone.value.internalConfigurationId.version.should.eql("1.2");
+        clone.value.toString().should.eql(extObj.toString());
+    });
+
+    it("MV1 MachineVision-BindExtensionObject should instantiate a ResultType", () => {
         const result = resultType.instantiate({
             browseName: `Result`,
             organizedBy: addressSpace.rootFolder.objects
@@ -575,17 +705,27 @@ describe("Extension Object binding and sub  components On MachineVision", () => 
             console.log(extObj?.toString());
         }
     });
-    it("MachineVision-BindExtensionObject should instantitate a ResultType", () => {
-
+    it("MV2 MachineVision-BindExtensionObject should instantiate a ResultType", () => {
         const partIdDataType = addressSpace.findDataType("PartIdDataType", nsMV)!;
         const partId = addressSpace.constructExtensionObject(partIdDataType, {
             description: "World",
-            id: "Hello",
+            id: "Hello"
         });
+
+        const configurationIdDataType = addressSpace.findDataType("ConfigurationIdDataType", nsMV)!;
+        const rr = addressSpace.constructExtensionObject(configurationIdDataType, {
+            description: "some description",
+            hash: Buffer.from("DEADBEEF", "hex"),
+            id: "IIII",
+            version: "1.2"
+        });
+        should.exist((rr as unknown as Record<string, unknown>).hash);
+        ((rr as unknown as Record<string, unknown>).hash as Buffer).toString("hex").should.eql("deadbeef");
 
         const recipeIdExternalD = addressSpace.findDataType("RecipeIdExternalDataType", nsMV)!;
 
-        const a = addressSpace.constructExtensionObject(recipeIdExternalD, {
+        const resultContent1 = addressSpace.constructExtensionObject(recipeIdExternalD, {
+            description: "some description"
         });
         const extObj = addressSpace.constructExtensionObject(resultDataType, {
             hasTransferableDataOnFile: true,
@@ -593,15 +733,21 @@ describe("Extension Object binding and sub  components On MachineVision", () => 
                 description: "some description",
                 hash: Buffer.from("DEADBEEF", "hex"),
                 id: "IIII",
-                version: "1.2",
+                version: "1.2"
             },
             partId,
             resultState: 32,
 
-            resultContent: [
-                { dataType: DataType.ExtensionObject, value: a }
-            ]
+            resultContent: [resultContent1]
         });
+        if (doDebug) {
+            console.log("extObj", extObj.toString());
+        }
+        should.exist((extObj as unknown as Record<string, Record<string, unknown>>).internalConfigurationId.hash);
+        ((extObj as unknown as Record<string, Record<string, unknown>>).internalConfigurationId.hash as Buffer)
+            .toString("hex")
+            .should.eql("deadbeef");
+
         const result = resultType.instantiate({
             browseName: `Result2`,
             organizedBy: addressSpace.rootFolder.objects,
@@ -611,11 +757,14 @@ describe("Extension Object binding and sub  components On MachineVision", () => 
             }
         }) as UAResultType;
 
+        const verif = result.readValue().value.value as unknown as Record<string, Record<string, unknown>>;
+        should.exist(verif.internalConfigurationId.hash);
+        (verif.internalConfigurationId.hash as Buffer).toString("hex").should.eql("deadbeef");
+
         if (doDebug) {
             console.log(result.readValue().value.value.toString());
             console.log(result.toString());
             console.log(result.internalConfigurationId.toString());
-
         }
 
         const dataValue = result.internalConfigurationId.readValue();
@@ -625,6 +774,5 @@ describe("Extension Object binding and sub  components On MachineVision", () => 
             console.log("Hash =", result.internalConfigurationId.readValue().value.value.toString("hex"));
         }
         dataValue.statusCode.should.eql(StatusCodes.Good);
-
     });
 });

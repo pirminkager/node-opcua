@@ -1,49 +1,25 @@
-import * as should from "should";
-import * as _ from "underscore";
-
-import { DataType, VariantArrayType } from "node-opcua-variant";
-import { Variant } from "node-opcua-variant";
-
 import { BinaryStream } from "node-opcua-binary-stream";
+import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
+import { resolveNodeId } from "node-opcua-nodeid";
+import { nodesets } from "node-opcua-nodesets";
+import { StatusCodes } from "node-opcua-status-code";
+import { Argument } from "node-opcua-types";
+import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
+
 import {
+    AddressSpace,
     binaryStoreSize_ArgumentList,
-    convertJavaScriptToVariant,
     decode_ArgumentList,
     encode_ArgumentList,
-    verifyArguments_ArgumentList,
-    get_mini_nodeset_filename,
-    AddressSpace,
-    generateAddressSpace
-} from "..";
-import { nodesets } from "node-opcua-nodesets";
-import { Argument, ArgumentOptions } from "node-opcua-types";
-import { resolveNodeId } from "node-opcua-nodeid";
-import { StatusCodes, StatusCode } from "node-opcua-status-code";
+    verifyArguments_ArgumentList
+} from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
 
-function extractValues(arrayVariant: Variant[]) {
-    return arrayVariant.map(_.property("value"));
-}
-
-describe("convertJavaScriptToVariant", () => {
-
-    it("should convertJavaScriptToVariant", () => {
-
-        const definition = [{ dataType: DataType.UInt32 }];
-        const args = [100];
-
-        const args_as_variant = convertJavaScriptToVariant(definition, args);
-
-        args_as_variant.length.should.eql(1);
-        args_as_variant[0].should.eql(new Variant({ dataType: DataType.UInt32, value: 100 }));
-
-        extractValues(args_as_variant).should.eql([100]);
-    });
-});
+const debugLog = make_debugLog("TEST");
+const _doDebug = checkDebugFlag("TEST");
 
 describe("testing ArgumentList special encode/decode process", () => {
-
     it("should encode/decode an ArgumentList (scalar)", () => {
-
         const definition = [{ dataType: DataType.UInt32 }];
         const args = [100];
 
@@ -54,19 +30,19 @@ describe("testing ArgumentList special encode/decode process", () => {
         encode_ArgumentList(definition, args, stream);
 
         stream.rewind();
-        const args_reloaded = decode_ArgumentList(definition, stream);
+        const args_reloaded = decode_ArgumentList(definition, stream) as number[];
 
-        _.isArray(args_reloaded).should.equal(true);
+        Array.isArray(args_reloaded).should.equal(true);
         args_reloaded[0].should.eql(100);
-
     });
 
     it("should encode/decode an ArgumentList (array)", () => {
-
-        const definition = [{
-            dataType: DataType.UInt32,
-            valueRank: 1
-        }];
+        const definition = [
+            {
+                dataType: DataType.UInt32,
+                valueRank: 1
+            }
+        ];
         const args = [[100, 200, 300]];
 
         const size = binaryStoreSize_ArgumentList(definition, args);
@@ -76,9 +52,9 @@ describe("testing ArgumentList special encode/decode process", () => {
         encode_ArgumentList(definition, args, stream);
 
         stream.rewind();
-        const args_reloaded = decode_ArgumentList(definition, stream);
+        const args_reloaded = decode_ArgumentList(definition, stream) as number[][];
 
-        _.isArray(args_reloaded).should.equal(true);
+        Array.isArray(args_reloaded).should.equal(true);
         args_reloaded.length.should.eql(1);
         args_reloaded[0].length.should.eql(3);
         args_reloaded[0][0].should.eql(100);
@@ -87,7 +63,6 @@ describe("testing ArgumentList special encode/decode process", () => {
     });
 
     it("should encode/decode an ArgumentList with a complex definition", () => {
-
         const definition = [
             { dataType: DataType.UInt32, name: "someValue" },
             { dataType: DataType.UInt32, valueRank: 1, name: "someValueArray" },
@@ -103,22 +78,20 @@ describe("testing ArgumentList special encode/decode process", () => {
 
         // here the base dataType is created with its definition before decode is called
         stream.rewind();
-        const args_reloaded = decode_ArgumentList(definition, stream);
+        const args_reloaded = decode_ArgumentList(definition, stream) as [number, number[], string];
         args_reloaded[0].should.equal(10);
         args_reloaded[1][0].should.equal(15);
         args_reloaded[1][1].should.equal(20);
         args_reloaded[2].should.equal("Hello");
-
     });
 });
 
 describe("verifyArguments_ArgumentList", () => {
-
     let addressSpace: AddressSpace;
 
     before(async () => {
         addressSpace = AddressSpace.create();
-        const xml_file = nodesets.standard_nodeset_file;
+        const xml_file = nodesets.standard;
         await generateAddressSpace(addressSpace, xml_file);
         addressSpace.registerNamespace("ServerNamespaceURI");
     });
@@ -128,48 +101,113 @@ describe("verifyArguments_ArgumentList", () => {
 
     const methodInputArgumentsOneUInt32: Argument[] = [
         new Argument({
-            arrayDimensions: [],
+            arrayDimensions: null,
             dataType: resolveNodeId(DataType.UInt32),
             description: "Some arguments",
             name: "someValue",
-            valueRank: -1,
-        }),
+            valueRank: -1
+        })
     ];
 
     it("verifyArguments_ArgumentList - One UInt32 - Good", () => {
-
-        const args = [
-            new Variant({ dataType: DataType.UInt32, value: 1 })
-        ];
+        const args = [new Variant({ dataType: DataType.UInt32, value: 1 })];
         const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneUInt32, args);
 
-        // tslint:disable: no-console
-        console.log("inputArgumentResults[0]", result.inputArgumentResults![0].toString());
-        console.log("statusCode             ", result.statusCode.toString());
+        debugLog("inputArgumentResults[0]", result.inputArgumentResults?.[0].toString());
+        debugLog("statusCode             ", result.statusCode.toString());
 
         result.should.eql({
-            inputArgumentResults: [
-                StatusCodes.Good
-            ],
+            inputArgumentResults: [StatusCodes.Good],
             statusCode: StatusCodes.Good
         });
     });
     it("verifyArguments_ArgumentList - One UInt32 - TypeMismatch", () => {
-
-        const argsBad = [
-            new Variant({ dataType: DataType.String, value: "Bad" })
-        ];
-        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneUInt32, argsBad)
-        // tslint:disable: no-console
-        console.log("inputArgumentResults[0]", result.inputArgumentResults![0].toString());
-        console.log("statusCode             ", result.statusCode.toString());
+        // OPC 10000-4 v1.05.07 §5.12.2: the operation code is BadInvalidArgument, the per-argument
+        // code says why (CTT Method Call Err-004)
+        const argsBad = [new Variant({ dataType: DataType.String, value: "Bad" })];
+        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneUInt32, argsBad);
+        debugLog("inputArgumentResults[0]", result.inputArgumentResults?.[0].toString());
+        debugLog("statusCode             ", result.statusCode.toString());
         result.should.eql({
-            inputArgumentResults: [
-                StatusCodes.BadTypeMismatch
-            ],
+            inputArgumentResults: [StatusCodes.BadTypeMismatch],
             statusCode: StatusCodes.BadInvalidArgument
         });
+    });
 
+    const methodInputArgumentsUInt32AndString: Argument[] = [
+        new Argument({
+            arrayDimensions: null,
+            dataType: resolveNodeId(DataType.UInt32),
+            description: "first",
+            name: "first",
+            valueRank: -1
+        }),
+        new Argument({
+            arrayDimensions: null,
+            dataType: resolveNodeId(DataType.String),
+            description: "second",
+            name: "second",
+            valueRank: -1
+        })
+    ];
+    it("verifyArguments_ArgumentList - UInt32 + String - only the mistyped argument is flagged", () => {
+        // CTT Subscription Durable Err-004: right count, one wrong DataType at a time,
+        // the other argument reports Good
+        const firstBad = [
+            new Variant({ dataType: DataType.String, value: "Bad" }),
+            new Variant({ dataType: DataType.String, value: "ok" })
+        ];
+        verifyArguments_ArgumentList(addressSpace, methodInputArgumentsUInt32AndString, firstBad).should.eql({
+            inputArgumentResults: [StatusCodes.BadTypeMismatch, StatusCodes.Good],
+            statusCode: StatusCodes.BadInvalidArgument
+        });
+        const secondBad = [
+            new Variant({ dataType: DataType.UInt32, value: 1 }),
+            new Variant({ dataType: DataType.UInt32, value: 2 })
+        ];
+        verifyArguments_ArgumentList(addressSpace, methodInputArgumentsUInt32AndString, secondBad).should.eql({
+            inputArgumentResults: [StatusCodes.Good, StatusCodes.BadTypeMismatch],
+            statusCode: StatusCodes.BadInvalidArgument
+        });
+        const bothGood = [
+            new Variant({ dataType: DataType.UInt32, value: 1 }),
+            new Variant({ dataType: DataType.String, value: "ok" })
+        ];
+        verifyArguments_ArgumentList(addressSpace, methodInputArgumentsUInt32AndString, bothGood).should.eql({
+            inputArgumentResults: [StatusCodes.Good, StatusCodes.Good],
+            statusCode: StatusCodes.Good
+        });
+    });
+
+    it("verifyArguments_ArgumentList - One UInt32 - BadArgumentsMissing", () => {
+        const args: Variant[] = [];
+        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneUInt32, args);
+        debugLog("statusCode             ", result.statusCode.toString());
+        result.should.eql({
+            inputArgumentResults: [StatusCodes.BadNoData],
+            statusCode: StatusCodes.BadArgumentsMissing
+        });
+    });
+    it("verifyArguments_ArgumentList - One UInt32 - BadTooManyArguments", () => {
+        const args = [new Variant({ dataType: DataType.UInt32, value: 1 }), new Variant({ dataType: DataType.UInt32, value: 1 })];
+        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneUInt32, args);
+        debugLog("statusCode             ", result.statusCode.toString());
+        result.should.eql({
+            inputArgumentResults: [StatusCodes.Good],
+            statusCode: StatusCodes.BadTooManyArguments
+        });
+    });
+    it("verifyArguments_ArgumentList - One UInt32 - BadTooManyArguments & BadTypeMismatch", () => {
+        const args = [
+            new Variant({ dataType: DataType.String, value: "Bad" }),
+            new Variant({ dataType: DataType.UInt32, value: 1 })
+        ];
+        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneUInt32, args);
+        debugLog("statusCode             ", result.statusCode.toString());
+        result.should.eql({
+            inputArgumentResults: [StatusCodes.BadTypeMismatch],
+            statusCode: StatusCodes.BadTooManyArguments
+        });
     });
 
     const methodInputArgumentsOneArrayOfAny: Argument[] = [
@@ -178,11 +216,10 @@ describe("verifyArguments_ArgumentList", () => {
             dataType: resolveNodeId("BaseDataType"),
             description: "Some arguments",
             name: "someValue",
-            valueRank: 1,
-        }),
+            valueRank: 1
+        })
     ];
     it("methodInputArgumentsOneArrayOfAny - Good", () => {
-
         const argsGood1 = [
             new Variant({
                 arrayType: VariantArrayType.Array,
@@ -190,17 +227,13 @@ describe("verifyArguments_ArgumentList", () => {
                 value: ["Good", "Good"]
             })
         ];
-        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneArrayOfAny, argsGood1)
-        // tslint:disable: no-console
-        console.log("inputArgumentResults[0]", result.inputArgumentResults![0].toString());
-        console.log("statusCode             ", result.statusCode.toString());
+        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneArrayOfAny, argsGood1);
+        debugLog("inputArgumentResults[0]", result.inputArgumentResults?.[0].toString());
+        debugLog("statusCode             ", result.statusCode.toString());
         result.should.eql({
-            inputArgumentResults: [
-                StatusCodes.Good
-            ],
+            inputArgumentResults: [StatusCodes.Good],
             statusCode: StatusCodes.Good
         });
-
     });
 
     it("methodInputArgumentsOneArrayOfAny - TypeMismatch", () => {
@@ -211,36 +244,29 @@ describe("verifyArguments_ArgumentList", () => {
                 value: "Good"
             })
         ];
-        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneArrayOfAny, argsBad)
-        // tslint:disable: no-console
-        console.log("inputArgumentResults[0]", result.inputArgumentResults![0].toString());
-        console.log("statusCode             ", result.statusCode.toString());
+        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneArrayOfAny, argsBad);
+        debugLog("inputArgumentResults[0]", result.inputArgumentResults?.[0].toString());
+        debugLog("statusCode             ", result.statusCode.toString());
+        // a wrong ValueRank is a type mismatch of the argument, the operation is BadInvalidArgument
         result.should.eql({
-            inputArgumentResults: [
-                StatusCodes.BadTypeMismatch
-            ],
+            inputArgumentResults: [StatusCodes.BadTypeMismatch],
             statusCode: StatusCodes.BadInvalidArgument
         });
     });
 
     it("methodInputArgumentsOneArrayOfAny - SpecialCase", () => {
-
         // Null variant shall be consider as a empty array !!!
         const argsBad = [
             new Variant({
-                dataType: DataType.Null,
+                dataType: DataType.Null
             })
         ];
-        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneArrayOfAny, argsBad)
-        // tslint:disable: no-console
-        console.log("inputArgumentResults[0]", result.inputArgumentResults![0].toString());
-        console.log("statusCode             ", result.statusCode.toString());
+        const result = verifyArguments_ArgumentList(addressSpace, methodInputArgumentsOneArrayOfAny, argsBad);
+        debugLog("inputArgumentResults[0]", result.inputArgumentResults?.[0].toString());
+        debugLog("statusCode             ", result.statusCode.toString());
         result.should.eql({
-            inputArgumentResults: [
-                StatusCodes.Good
-            ],
+            inputArgumentResults: [StatusCodes.Good],
             statusCode: StatusCodes.Good
         });
     });
-
 });

@@ -1,0 +1,484 @@
+/**
+ * @module node-opcua-address-space
+ *
+ * A precompiled nodeset image: the records of a document as JSON Lines, gzip-compressed. Line 1
+ * is the header, then one line per node, and a trailer with the node count and the digest of the
+ * source, so that a reader knows it saw the whole file. Writing an image is consuming records;
+ * reading one is producing them: the loader replays an image exactly as it applies the XML.
+ */
+
+import {
+    decodeHeader,
+    decodeNode,
+    type EncodeHeaderOptions,
+    encodeHeader,
+    encodeNode,
+    type JsonNodeId,
+    NodesetImageError,
+    type NodesetImageHeader,
+    type NodesetImageNode,
+    type NodesetImageTrailer
+} from "./nodeset_image_codec.js";
+import {
+    NODESET_RECORD_SCHEMA,
+    type NodesetHeaderRecord,
+    type NodesetRecord,
+    type NodesetRecordConsumer,
+    type NodesetRecordWithBytes,
+    recordBytes
+} from "./nodeset_record.js";
+import type { NodesetChunk, NodesetChunkStream } from "./nodeset_source.js";
+
+export { NodesetImageError, type NodesetImageHeader, type NodesetImageTrailer } from "./nodeset_image_codec.js";
+
+const GZIP_MAGIC_0 = 0x1f;
+const GZIP_MAGIC_1 = 0x8b;
+/** `{`: the first byte of a document whose header record was not compressed */
+const OPEN_BRACE = 0x7b;
+
+/** whether these bytes are gzip, and so need inflating before they are text */
+export function isGzip(firstBytes: Uint8Array): boolean {
+    return firstBytes.length >= 2 && firstBytes[0] === GZIP_MAGIC_0 && firstBytes[1] === GZIP_MAGIC_1;
+}
+
+/**
+ * a NodeSet-NDJSON document, compressed or not, told from NodeSet2 XML by its first byte: a gzip
+ * stream starts `1f 8b`, an XML document `<`, and an uncompressed document `{`. Compression is a
+ * property of how a document was stored, never of what it says, so a reader that took only the
+ * compressed form would be refusing the same document written plainly.
+ */
+export function isNodesetImage(firstBytes: Uint8Array): boolean {
+    return isGzip(firstBytes) || (firstBytes.length >= 1 && firstBytes[0] === OPEN_BRACE);
+}
+
+async function toReadableStream(source: Uint8Array | NodesetChunkStream): Promise<ReadableStream<Uint8Array>> {
+    if (source instanceof Uint8Array) {
+        return new Blob([source as BlobPart]).stream();
+    }
+    const asyncIterator = (source as AsyncIterable<NodesetChunk>)[Symbol.asyncIterator];
+    const iterator = asyncIterator ? asyncIterator.call(source) : (source as Iterable<NodesetChunk>)[Symbol.iterator]();
+    const encoder = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+            const result = await iterator.next();
+            if (result.done) {
+                controller.close();
+                return;
+            }
+            const chunk = result.value;
+            controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
+        },
+        cancel() {
+            iterator.return?.();
+        }
+    });
+}
+
+/** how the text of an image is compressed; see {@link setImageDeflater} */
+export type ImageDeflater = (text: string) => Promise<Uint8Array>;
+
+const deflateWithCompressionStream: ImageDeflater = async (text) => {
+    const compressed = new Blob([text])
+        .stream()
+        .pipeThrough(new CompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
+    return new Uint8Array(await new Response(compressed).arrayBuffer());
+};
+
+let gzip: ImageDeflater = deflateWithCompressionStream;
+
+/**
+ * how an image is compressed: CompressionStream everywhere by default, which offers no way to ask
+ * for a compression level and so writes at the default one; the Node.js entry point installs zlib
+ * at level 9, four percent smaller on the published nodesets for no change to the reader -- every
+ * gzip stream inflates the same whatever level wrote it. Returns the deflater installed before.
+ */
+export function setImageDeflater(deflater: ImageDeflater): ImageDeflater {
+    const previous = gzip;
+    gzip = deflater;
+    return previous;
+}
+
+/**
+ * the lines of an image given whole, inflated once and kept for the load: the sibling check, the
+ * header pre-pass and the replay all read the same buffer, and one inflate with a native split is
+ * half the cost of the streaming reader on a 3.5 MB text. The replay releases them (see
+ * {@link releaseInflatedImageLines}): the bytes may live on in an image store, which is sized by
+ * what it holds compressed, and the lines are twelve times as large
+ */
+const imageLines = new WeakMap<Uint8Array, Promise<string[]>>();
+
+/** forget the inflated lines of `image`; the next reader inflates again */
+export function releaseInflatedImageLines(image: Uint8Array): void {
+    imageLines.delete(image);
+}
+
+/** whether the inflated lines of `image` are being kept, for the tests */
+export function hasInflatedImageLines(image: Uint8Array): boolean {
+    return imageLines.has(image);
+}
+const NEWLINE = String.fromCharCode(10);
+
+/** gzip bytes to text, the way the platform does it best; see {@link setImageInflater} */
+export type ImageInflater = (image: Uint8Array) => Promise<string>;
+
+const inflateWithDecompressionStream: ImageInflater = async (image) => {
+    const inflated = new Blob([image as BlobPart])
+        .stream()
+        .pipeThrough(new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
+    return new TextDecoder("utf-8").decode(await new Response(inflated).arrayBuffer());
+};
+
+let inflateImage: ImageInflater = inflateWithDecompressionStream;
+
+/**
+ * how an image given whole is inflated: DecompressionStream everywhere by default; the Node.js
+ * entry point installs zlib, three times as fast on a 200 KB image and off the main thread.
+ * Returns the inflater that was installed before.
+ */
+export function setImageInflater(inflater: ImageInflater): ImageInflater {
+    const previous = inflateImage;
+    inflateImage = inflater;
+    return previous;
+}
+
+export function inflatedImageLines(image: Uint8Array): Promise<string[]> {
+    let lines = imageLines.get(image);
+    if (!lines) {
+        lines = (async () => {
+            let text: string;
+            try {
+                // an uncompressed document is already its own text; only gzip needs inflating
+                text = isGzip(image) ? await inflateImage(image) : new TextDecoder("utf-8").decode(image);
+            } catch (err) {
+                throw new NodesetImageError(`the image cannot be inflated: ${(err as Error).message}`);
+            }
+            return text.split(NEWLINE);
+        })();
+        imageLines.set(image, lines);
+        // a failed inflate is not worth remembering
+        lines.catch(() => imageLines.delete(image));
+    }
+    return lines;
+}
+
+/** the lines of a gzip-compressed text, as they inflate */
+async function* inflatedLines(source: Uint8Array | NodesetChunkStream): AsyncGenerator<string> {
+    if (source instanceof Uint8Array) {
+        yield* await inflatedImageLines(source);
+        return;
+    }
+    const stream = (await toReadableStream(source)).pipeThrough(
+        new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>
+    );
+    const reader = stream.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let remainder = "";
+    try {
+        for (;;) {
+            let done: boolean;
+            let value: Uint8Array | undefined;
+            try {
+                ({ done, value } = await reader.read());
+            } catch (err) {
+                // a truncated or corrupt gzip stream
+                throw new NodesetImageError(`the image cannot be inflated: ${(err as Error).message}`);
+            }
+            const text = done ? decoder.decode() : decoder.decode(value, { stream: true });
+            let start = 0;
+            for (;;) {
+                const newline = text.indexOf("\n", start);
+                if (newline === -1) {
+                    remainder += text.slice(start);
+                    break;
+                }
+                yield remainder + text.slice(start, newline);
+                remainder = "";
+                start = newline + 1;
+            }
+            if (done) {
+                break;
+            }
+        }
+    } finally {
+        reader.releaseLock();
+    }
+    if (remainder.length > 0) {
+        yield remainder;
+    }
+}
+
+export interface NodesetImageWriterOptions extends EncodeHeaderOptions {}
+
+/**
+ * a record consumer that builds the image; attach it next to the address-space applier and the
+ * image is written in the same pass as the parse, whatever the source
+ */
+export class NodesetImageWriter implements NodesetRecordConsumer {
+    private readonly nodeLines: NodesetImageNode[] = [];
+    private lines: string[] | undefined;
+    private header: NodesetHeaderRecord | undefined;
+
+    constructor(private readonly options: NodesetImageWriterOptions = {}) {}
+
+    public apply(record: NodesetRecord): void {
+        if (record.kind === "header") {
+            if (this.header) {
+                throw new NodesetImageError("an image holds one document: a second header record was applied");
+            }
+            this.header = record;
+            return;
+        }
+        if (!this.header) {
+            throw new NodesetImageError("a node record was applied before the header record");
+        }
+        this.nodeLines.push(encodeNode(record));
+        this.lines = undefined;
+    }
+
+    /**
+     * the node lines, each reference marked when the target's record in this document does not
+     * declare the inverse (see NodesetReferenceRecord.inverseDeclared): decided here, over the
+     * whole document, whatever the producer knew
+     */
+    private encodedLines(): string[] {
+        if (this.lines) {
+            return this.lines;
+        }
+        const idKey = (id: JsonNodeId): string => (typeof id === "number" ? String(id) : id.join(","));
+        const declared = new Set<string>();
+        for (const node of this.nodeLines) {
+            const source = idKey(node.nodeId);
+            for (const r of node.references) {
+                declared.add(`${source}|${r[0]}|${idKey(r[1])}|${idKey(r[2])}`);
+            }
+        }
+        for (const node of this.nodeLines) {
+            const source = idKey(node.nodeId);
+            for (const r of node.references) {
+                r.length = 3;
+                if (!declared.has(`${idKey(r[2])}|${1 - r[0]}|${idKey(r[1])}|${source}`)) {
+                    (r as unknown[]).push(0);
+                }
+            }
+        }
+        this.lines = this.nodeLines.map((node) => JSON.stringify(node));
+        return this.lines;
+    }
+
+    /**
+     * the uncompressed lines, header first, trailer last; the header is encoded here because the
+     * length of the source is only known once every chunk went through
+     */
+    public text(sourceDigest: string, sourceLength?: number): string {
+        if (!this.header) {
+            throw new NodesetImageError("no document was applied to this writer");
+        }
+        const options = sourceLength === undefined ? this.options : { ...this.options, sourceLength };
+        const header = JSON.stringify(encodeHeader(this.header, options));
+        const trailer: NodesetImageTrailer = { kind: "trailer", nodes: this.nodeLines.length, sourceDigest };
+        return `${header}\n${this.encodedLines().join("\n")}\n${JSON.stringify(trailer)}\n`;
+    }
+
+    /** the node lines alone, what an exported namespace's digest covers (the header carries a timestamp) */
+    public bodyText(): string {
+        return `${this.encodedLines().join("\n")}\n`;
+    }
+
+    /** the image: the lines, gzip-compressed */
+    public async finish(sourceDigest: string, sourceLength?: number): Promise<Uint8Array> {
+        return gzip(this.text(sourceDigest, sourceLength));
+    }
+}
+
+export interface ReadNodesetImageOptions {
+    /** the digest the trailer must carry; a mismatch is an image of another source */
+    expectedDigest?: string;
+}
+
+/**
+ * the records of an image, as its lines inflate; the header is checked first, the trailer last
+ * (node count, and the digest when one is expected); a corrupt, truncated or foreign image throws
+ * a {@link NodesetImageError}
+ */
+export async function* imageNodesetRecords(
+    image: Uint8Array | NodesetChunkStream,
+    options: ReadNodesetImageOptions = {}
+): AsyncGenerator<NodesetRecord> {
+    if (image instanceof Uint8Array) {
+        try {
+            yield* imageLinesToRecords(await inflatedImageLines(image), options);
+        } finally {
+            releaseInflatedImageLines(image);
+        }
+        return;
+    }
+    const reader = new ImageLineReader(options);
+    for await (const line of inflatedLines(image)) {
+        const record = reader.read(line);
+        if (record) {
+            yield record;
+        }
+    }
+    reader.end();
+}
+
+/** one image line to a record, the trailer checked when it comes; shared by the two iterators */
+class ImageLineReader {
+    private nodes = 0;
+    private trailer: NodesetImageTrailer | undefined;
+    private first = true;
+
+    constructor(private readonly options: ReadNodesetImageOptions) {}
+
+    /** the record of a line, or undefined for a blank line or the trailer */
+    public read(line: string): NodesetRecord | undefined {
+        if (line.length === 0) {
+            return undefined;
+        }
+        if (this.trailer) {
+            throw new NodesetImageError("an image carries nothing after its trailer");
+        }
+        let json: unknown;
+        try {
+            json = JSON.parse(line);
+        } catch (err) {
+            throw new NodesetImageError(`an image line is not JSON: ${(err as Error).message}`);
+        }
+        if (this.first) {
+            this.first = false;
+            const record: NodesetRecordWithBytes = decodeHeader(json as NodesetImageHeader);
+            record[recordBytes] = line.length;
+            return record;
+        }
+        if ((json as { kind?: string }).kind === "trailer") {
+            const trailer = json as NodesetImageTrailer;
+            if (trailer.nodes !== this.nodes) {
+                throw new NodesetImageError(`the image trailer announces ${trailer.nodes} nodes, ${this.nodes} were read`);
+            }
+            if (this.options.expectedDigest !== undefined && trailer.sourceDigest !== this.options.expectedDigest) {
+                throw new NodesetImageError("the image was built from another source (digest mismatch)");
+            }
+            this.trailer = trailer;
+            return undefined;
+        }
+        const record: NodesetRecordWithBytes = decodeNode(json as NodesetImageNode);
+        record[recordBytes] = line.length;
+        this.nodes += 1;
+        return record;
+    }
+
+    public end(): void {
+        if (this.first) {
+            throw new NodesetImageError("the image is empty");
+        }
+        if (!this.trailer) {
+            throw new NodesetImageError("the image is truncated: no trailer");
+        }
+    }
+}
+
+/**
+ * the records of an image given whole, as a synchronous iterator: what the loader consumes
+ * without a turn of the microtask queue per record. The lines come from {@link inflatedImageLines}.
+ */
+export function* imageLinesToRecords(lines: string[], options: ReadNodesetImageOptions = {}): Generator<NodesetRecord> {
+    const reader = new ImageLineReader(options);
+    for (const line of lines) {
+        const record = reader.read(line);
+        if (record) {
+            yield record;
+        }
+    }
+    reader.end();
+}
+
+/**
+ * what disqualifies an image from being replayed by this loader, or null: the one verdict the
+ * store path, the sibling path and the catalog check share. `expectedDigest` is the SHA-256 of
+ * the source the image must have been built from, when the caller knows it
+ */
+export function nodesetImageProblem(
+    info: { header: NodesetImageHeader; trailer: NodesetImageTrailer | null; lines: number },
+    expectedDigest?: string
+): string | null {
+    if (info.header.schema !== NODESET_RECORD_SCHEMA) {
+        return `the image is of schema ${info.header.schema}, this loader reads ${NODESET_RECORD_SCHEMA}`;
+    }
+    if (!info.trailer) {
+        return "the image is truncated: no trailer";
+    }
+    if (info.trailer.nodes !== info.lines) {
+        return `the image trailer announces ${info.trailer.nodes} nodes, ${info.lines} lines were read`;
+    }
+    if (expectedDigest !== undefined && info.trailer.sourceDigest !== expectedDigest) {
+        return "the image was built from another source (digest mismatch)";
+    }
+    return null;
+}
+
+/** the shape {@link readNodesetImageInfo} returns */
+export interface NodesetImageInfo {
+    header: NodesetImageHeader;
+    trailer: NodesetImageTrailer | null;
+    /** the node lines: every non-empty line but the header and the trailer */
+    lines: number;
+}
+
+const TRAILER_PREFIX = '{"kind":"trailer"';
+
+/**
+ * the header and the trailer of an image; the body lines are inflated but not parsed. An image
+ * given whole is read from its two ends, whatever its size: the header is its first line, the
+ * trailer its last non-empty one, and the node lines are counted, not read
+ */
+export async function readNodesetImageInfo(image: Uint8Array | NodesetChunkStream): Promise<NodesetImageInfo> {
+    if (image instanceof Uint8Array) {
+        return imageInfoFromLines(await inflatedImageLines(image));
+    }
+    let header: NodesetImageHeader | undefined;
+    let trailer: NodesetImageTrailer | null = null;
+    let lines = 0;
+    for await (const line of inflatedLines(image)) {
+        if (line.length === 0) continue;
+        if (!header) {
+            header = JSON.parse(line) as NodesetImageHeader;
+            if (header.kind !== "header") {
+                throw new NodesetImageError("the first line of an image must be its header");
+            }
+            continue;
+        }
+        lines += 1;
+        if (line.startsWith('{"kind":"trailer"')) {
+            trailer = JSON.parse(line) as NodesetImageTrailer;
+            lines -= 1;
+        }
+    }
+    if (!header) {
+        throw new NodesetImageError("the image is empty");
+    }
+    return { header, trailer, lines };
+}
+
+function imageInfoFromLines(lines: string[]): NodesetImageInfo {
+    let first = 0;
+    while (first < lines.length && lines[first].length === 0) first++;
+    if (first === lines.length) {
+        throw new NodesetImageError("the image is empty");
+    }
+    const header = JSON.parse(lines[first]) as NodesetImageHeader;
+    if (header.kind !== "header") {
+        throw new NodesetImageError("the first line of an image must be its header");
+    }
+    let last = lines.length - 1;
+    while (last > first && lines[last].length === 0) last--;
+    let trailer: NodesetImageTrailer | null = null;
+    if (last > first && lines[last].startsWith(TRAILER_PREFIX)) {
+        trailer = JSON.parse(lines[last]) as NodesetImageTrailer;
+        last--;
+    }
+    let count = 0;
+    for (let i = first + 1; i <= last; i++) {
+        if (lines[i].length > 0) count++;
+    }
+    return { header, trailer, lines: count };
+}

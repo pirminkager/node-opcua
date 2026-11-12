@@ -1,0 +1,78 @@
+import type { UAMethod, UAProperty } from "node-opcua-address-space-base";
+import type { UAComponent, UAComponent_Base } from "node-opcua-nodeset-di/dist/ua_component.js";
+import type { UAFunctionalGroup } from "node-opcua-nodeset-di/dist/ua_functional_group.js";
+import type { UAMachineryItemState_StateMachine } from "node-opcua-nodeset-machinery/dist/ua_machinery_item_state_state_machine.js";
+import type { UAMachineryOperationModeStateMachine } from "node-opcua-nodeset-machinery/dist/ua_machinery_operation_mode_state_machine.js";
+import type { UAAnalogUnit } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { UAFolder } from "node-opcua-nodeset-ua/dist/ua_folder.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { UAMeasuredItem } from "./ua_measured_item.js";
+import type { UATargetItem } from "./ua_target_item.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAFeederModule_machineryBuildingBlocks extends UAFolder { // Object
+      machineryItemState?: UAMachineryItemState_StateMachine;
+      machineryOperationMode?: UAMachineryOperationModeStateMachine;
+}
+/**
+ * Represents a feeder system. A feeder system is a
+ * subdevice of an automatic scale for conveying the
+ * product to or from the WeighingBridge.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Scales/V2/                      |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |FeederModuleType i=28                                       |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAFeederModule_Base extends UAComponent_Base {
+    /**
+     * feederLoad
+     * Defines the current loaded weight on the feeder
+     * system.
+     */
+    feederLoad?: UAMeasuredItem<any, any>;
+    /**
+     * feederRunning
+     * Indicates that the feeder system is running.
+     */
+    feederRunning?: UAProperty<boolean, DataType.Boolean>;
+    /**
+     * feederSpeed
+     * Defines the current speed of a feeder system. The
+     * unit of the FeederSpeed depends on the
+     * construction system.
+     */
+    feederSpeed?: UATargetItem<any, any>;
+    /**
+     * identification
+     * Used to organize parameters for identification of
+     * this TopologyElement
+     */
+    identification: UAFunctionalGroup;
+    machineryBuildingBlocks?: UAFeederModule_machineryBuildingBlocks;
+    machineryItemState?: UAMachineryItemState_StateMachine;
+    machineryOperationMode?: UAMachineryOperationModeStateMachine;
+    /**
+     * maximumFeederSpeed
+     * Defines the maximal possible speed of the feeder.
+     */
+    maximumFeederSpeed?: UAAnalogUnit<any, any>;
+    /**
+     * minimalFeederSpeed
+     * Defines the minimal possible speed of the feeder.
+     */
+    minimalFeederSpeed?: UAAnalogUnit<any, any>;
+    /**
+     * setFeederSpeed
+     * Allows to set a new value for the speed of the
+     * feeder system. The OPC UA server must check if
+     * the value is between the minimal and maximum
+     * allowed speed and if the unit is allowed.
+     */
+    setFeederSpeed?: UAMethod;
+}
+export interface UAFeederModule extends Omit<UAComponent, "identification">, UAFeederModule_Base {}

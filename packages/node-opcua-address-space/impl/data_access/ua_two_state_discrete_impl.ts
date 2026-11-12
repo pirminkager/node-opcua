@@ -1,0 +1,185 @@
+import type {
+    BindVariableOptions,
+    CloneExtraInfo,
+    CloneFilter,
+    CloneOptions,
+    INamespace,
+    UAProperty,
+    UAVariable
+} from "node-opcua-address-space-base";
+import assert from "node-opcua-assert";
+import { VariableTypeIds } from "node-opcua-constants";
+import { coerceLocalizedText, type LocalizedText, type LocalizedTextLike } from "node-opcua-data-model";
+import { DataType, Variant } from "node-opcua-variant";
+import type { AddTwoStateDiscreteOptions } from "../../api/address_space_ts.js";
+import type { UATwoStateDiscreteEx } from "../../api/interfaces/data_access/ua_two_state_discrete_ex.js";
+import type { ISetStateOptions } from "../../api/interfaces/i_set_state_options.js";
+import { registerNodePromoter } from "../../api/loader/register_node_promoter.js";
+import { UAVariableImpl, UAVariableImplT } from "../ua_variable_impl.js";
+import { add_dataItem_stuff } from "./add_dataItem_stuff.js";
+
+/** @internal */
+export class UATwoStateDiscreteImplBase extends UAVariableImplT<boolean, DataType.Boolean> implements UATwoStateDiscreteEx {
+    /**
+     * Properties installed as child nodes by the address space rather than assigned by this
+     * constructor - hence `declare`, which emits nothing.
+     */
+    declare public readonly falseState: UAProperty<LocalizedText, DataType.LocalizedText>;
+    declare public readonly trueState: UAProperty<LocalizedText, DataType.LocalizedText>;
+    /*
+     * @private
+     */
+    _post_initialize(): void {
+        // The StatusCode SemanticsChanged bit shall be set if any of the FalseState or TrueState
+        // (changes can cause misinterpretation by users or (scripting) programs) Properties are changed
+        // (see section 5.2 for additional information). That is done generically in
+        // impl/data_access/semantics_changed.ts; all this has to do is warn about a missing Property.
+        const falseState = this.getPropertyByName("FalseState");
+        if (!falseState) {
+            /* c8 ignore next */
+            console.warn(
+                "warning: UATwoStateDiscrete -> a FalseState property is mandatory ",
+                this.browseName.toString(),
+                this.nodeId.toString()
+            );
+        }
+        const trueState = this.getPropertyByName("TrueState");
+        if (!trueState) {
+            /* c8 ignore next */
+            console.warn(
+                "waring: UATwoStateDiscrete -> a TrueState property is mandatory",
+                this.browseName.toString(),
+                this.nodeId.toString()
+            );
+        }
+    }
+    setValue(value: boolean | LocalizedTextLike, options?: ISetStateOptions): void {
+        if (typeof value === "boolean") {
+            this.setValueFromSource({ dataType: DataType.Boolean, value });
+        } else {
+            const text: string = (typeof value === "string" ? value : value.text) || "";
+            if (text === this.getTrueStateAsString()) {
+                this.setValue(true, options);
+            } else if (text === this.getFalseStateAsString()) {
+                this.setValue(false, options);
+            } else {
+                throw new Error(`setValue invalid value ${value}`);
+            }
+        }
+    }
+    getValue(): boolean {
+        return this.readValue().value.value as boolean;
+    }
+    getValueAsString(): string {
+        if (this.getValue()) {
+            return this.getTrueStateAsString();
+        } else {
+            return this.getFalseStateAsString();
+        }
+    }
+    getTrueStateAsString(): string {
+        return (this.trueState.readValue().value.value as LocalizedText).text || "";
+    }
+    getFalseStateAsString(): string {
+        return (this.falseState.readValue().value.value as LocalizedText).text || "";
+    }
+
+    public clone(options1: CloneOptions, optionalFilter?: CloneFilter, extraInfo?: CloneExtraInfo): UAVariable {
+        const variable1 = UAVariableImpl.prototype.clone.call(this, options1, optionalFilter, extraInfo);
+        promoteToTwoStateDiscrete(variable1);
+        return variable1;
+    }
+}
+// The class states that it implements the published interface, so the name is just the
+// class, and promoteToTwoStateDiscrete can return it without converting.
+/** @internal */
+export type UATwoStateDiscreteImpl = UATwoStateDiscreteImplBase;
+/** @internal */
+export const UATwoStateDiscreteImpl = UATwoStateDiscreteImplBase;
+
+export function promoteToTwoStateDiscrete(node: UAVariable): UATwoStateDiscreteEx {
+    if (node instanceof UATwoStateDiscreteImpl) {
+        return node; // already promoted
+    }
+    Object.setPrototypeOf(node, UATwoStateDiscreteImpl.prototype);
+    assert(node instanceof UATwoStateDiscreteImpl, "should now  be a UATwoStateDiscrete");
+    const _node = node as UATwoStateDiscreteImpl;
+    _node._post_initialize();
+    return _node;
+}
+registerNodePromoter(VariableTypeIds.TwoStateDiscreteType, promoteToTwoStateDiscrete);
+
+/** @internal */
+export function _addTwoStateDiscrete(namespace: INamespace, options: AddTwoStateDiscreteOptions): UATwoStateDiscreteEx {
+    const addressSpace = namespace.addressSpace;
+
+    assert(!Object.hasOwn(options, "ValuePrecision"));
+
+    const twoStateDiscreteType = addressSpace.findVariableType("TwoStateDiscreteType");
+    if (!twoStateDiscreteType) {
+        throw new Error("expecting TwoStateDiscreteType to be defined , check nodeset xml file");
+    }
+
+    let value: undefined | BindVariableOptions;
+    if (typeof options.value === "boolean") {
+        value = new Variant({ dataType: DataType.Boolean, value: !!options.value });
+    } else {
+        value = options.value;
+    }
+    // todo : if options.typeDefinition is specified,
+    // todo : refactor to use twoStateDiscreteType.instantiate
+
+    const variable = namespace.addVariable({
+        accessLevel: options.accessLevel,
+        browseName: options.browseName,
+        displayName: options.displayName,
+        componentOf: options.componentOf,
+        propertyOf: options.propertyOf,
+        organizedBy: options.organizedBy,
+        dataType: DataType.Boolean,
+        nodeId: options.nodeId,
+        typeDefinition: twoStateDiscreteType.nodeId,
+        userAccessLevel: options.userAccessLevel,
+        modellingRule: options.modellingRule,
+        minimumSamplingInterval: options.minimumSamplingInterval,
+        value
+    }) as UAVariable;
+
+    /*
+    const dataValueVerif = variable.readValue();
+    assert(dataValueVerif.value.dataType === DataType.Boolean);
+    */
+
+    add_dataItem_stuff(variable, options);
+
+    namespace.addVariable({
+        browseName: { name: "TrueState", namespaceIndex: 0 },
+        dataType: "LocalizedText",
+        minimumSamplingInterval: 0,
+        propertyOf: variable,
+        typeDefinition: "PropertyType",
+        modellingRule: options.modellingRule ? "Mandatory" : undefined,
+        value: new Variant({
+            dataType: DataType.LocalizedText,
+            value: coerceLocalizedText(options.trueState || "ON")
+        })
+    });
+
+    namespace.addVariable({
+        browseName: { name: "FalseState", namespaceIndex: 0 },
+        dataType: "LocalizedText",
+        minimumSamplingInterval: 0,
+        propertyOf: variable,
+        typeDefinition: "PropertyType",
+        modellingRule: options.modellingRule ? "Mandatory" : undefined,
+
+        value: new Variant({
+            dataType: DataType.LocalizedText,
+            value: coerceLocalizedText(options.falseState || "OFF")
+        })
+    });
+
+    variable.install_extra_properties();
+
+    return promoteToTwoStateDiscrete(variable);
+}

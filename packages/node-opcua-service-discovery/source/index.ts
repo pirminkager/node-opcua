@@ -2,34 +2,30 @@
  * @module node-opcua-service-discovery
  */
 
+export type {
+    FindServersOnNetworkRequestOptions,
+    FindServersRequestOptions,
+    RegisterServer2RequestOptions,
+    RegisterServerRequestOptions
+} from "node-opcua-types";
 export {
-    RegisteredServer,
-    RegisterServerRequest,
-    RegisterServerResponse,
+    FindServersOnNetworkRequest,
+    FindServersOnNetworkResponse,
+    FindServersRequest,
+    FindServersResponse,
     MdnsDiscoveryConfiguration,
+    RegisteredServer,
     RegisterServer2Request,
     RegisterServer2Response,
-
-    RegisterServerRequestOptions,
-    RegisterServer2RequestOptions,
-
-    FindServersRequest,
-    FindServersRequestOptions,
-    FindServersResponse,
-
-    FindServersOnNetworkRequest,
-    FindServersOnNetworkRequestOptions,
-    FindServersOnNetworkResponse,
-
+    RegisterServerRequest,
+    RegisterServerResponse,
     ServerOnNetwork
 } from "node-opcua-types";
-
-export { serverCapabilities } from "./server_capabilities";
+export type { Announcement } from "./Announcement.js";
+export { announcementToServiceConfig } from "./announcement_to_service_config.js";
+export { BonjourHolder, multicastDNSInstanceCount } from "./bonjourHolder.js";
+export { serverCapabilities } from "./server_capabilities.js";
 export {
-    acquireBonjour,
-    Announcement,
-    releaseBonjour,
-    BonjourHolder,
-    sameAnnouncement,
-    _announceServerOnMulticastSubnet
-}from "./bonjour";
+    isSameService,
+    serviceToString
+} from "./tools.js";

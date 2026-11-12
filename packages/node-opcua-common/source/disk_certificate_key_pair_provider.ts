@@ -1,0 +1,118 @@
+/**
+ * Disk-backed certificate/key provider.
+ *
+ * Reads certificate chains and private keys lazily from the filesystem
+ * and caches them in `#`-private fields so they never appear in
+ * `JSON.stringify`, `console.log`, `util.inspect`, or debugger panels.
+ *
+ * @module node-opcua-common
+ */
+import fs from "node:fs";
+import { readCertificateChain, readPrivateKey } from "node-opcua-crypto";
+import type { Certificate, IKeyOperations, PrivateKey } from "node-opcua-crypto/web";
+
+import type { ICertificateChainProvider } from "./certificate_chain_provider.js";
+import { localKeyOperationsOfProvider } from "./local_key_operations_provider.js";
+import type { ICertificateKeyPairProvider2, ICertificateKeyPairProviderWithLocation } from "./opcua_secure_object.js";
+
+export class DiskCertificateKeyPairProvider
+    implements ICertificateChainProvider, ICertificateKeyPairProviderWithLocation, ICertificateKeyPairProvider2
+{
+    #certificateChain: Certificate[] | null = null;
+    #privateKey: PrivateKey | null = null;
+    readonly #certificateFile: string;
+    readonly #privateKeyFile: string;
+    readonly #passphrase?: string | Buffer;
+
+    /**
+     * @param certificateFile - path to the certificate (chain) PEM file
+     * @param privateKeyFile - path to the private key PEM file
+     * @param passphrase - optional passphrase to decrypt `privateKeyFile` if it is
+     * an encrypted PKCS#8 key. Omit for a plaintext key. If the key is encrypted
+     * and no (or the wrong) passphrase is given, `getPrivateKey()` throws
+     * `PrivateKeyPassphraseRequiredError` (fails closed).
+     */
+    constructor(certificateFile: string, privateKeyFile: string, passphrase?: string | Buffer) {
+        this.#certificateFile = certificateFile;
+        this.#privateKeyFile = privateKeyFile;
+        this.#passphrase = passphrase;
+    }
+
+    public get certificateFile(): string {
+        return this.#certificateFile;
+    }
+
+    public get privateKeyFile(): string {
+        return this.#privateKeyFile;
+    }
+
+    public getCertificate(): Certificate {
+        return this.getCertificateChain()[0];
+    }
+
+    public getCertificateChain(): Certificate[] {
+        if (!this.#certificateChain) {
+            if (!fs.existsSync(this.#certificateFile)) {
+                throw new Error(`Certificate file not found: ${this.#certificateFile}`);
+            }
+            const chain = readCertificateChain(this.#certificateFile);
+            if (!chain || chain.length === 0) {
+                throw new Error(`Invalid certificate chain (length=0) ${this.#certificateFile}`);
+            }
+            this.#certificateChain = chain;
+        }
+        return this.#certificateChain;
+    }
+
+    public getPrivateKey(): PrivateKey {
+        if (!this.#privateKey) {
+            if (!fs.existsSync(this.#privateKeyFile)) {
+                throw new Error(`Private key file not found: ${this.#privateKeyFile}`);
+            }
+            // Fails closed with PrivateKeyPassphraseRequiredError when the key
+            // is encrypted and #passphrase is missing or wrong.
+            const key = readPrivateKey(this.#privateKeyFile, this.#passphrase);
+            if (key instanceof Buffer) {
+                throw new Error(`Invalid private key ${this.#privateKeyFile}. Should not be a buffer`);
+            }
+            this.#privateKey = key;
+        }
+        return this.#privateKey;
+    }
+
+    /** The key as an opaque sign/decrypt object — see {@link localKeyOperationsOfProvider}. */
+    public getKeyOperations(): IKeyOperations {
+        return localKeyOperationsOfProvider(this);
+    }
+
+    /**
+     * Clears cached secrets so the GC can reclaim sensitive material.
+     * After calling dispose the holder will re-read from disk on next access.
+     */
+    public dispose(): void {
+        this.#certificateChain = null;
+        this.#privateKey = null;
+    }
+
+    /**
+     * Alias for {@link dispose}.
+     * Implements `ICertificateChainProvider.invalidate()`.
+     */
+    public invalidate(): void {
+        this.dispose();
+    }
+
+    // Prevent secrets from leaking through JSON serialization
+    public toJSON(): Record<string, string> {
+        return {
+            provider: "DiskCertificateKeyPairProvider",
+            certificateFile: this.#certificateFile,
+            privateKeyFile: this.#privateKeyFile
+        };
+    }
+
+    // Prevent secrets from leaking through console.log / util.inspect
+    public [Symbol.for("nodejs.util.inspect.custom")](): string {
+        return `DiskCertificateKeyPairProvider { certificateFile: "${this.#certificateFile}", privateKeyFile: "${this.#privateKeyFile}" }`;
+    }
+}

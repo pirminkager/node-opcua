@@ -1,90 +1,242 @@
 /**
  * @module node-opcua-client-dynamic-extension-object
  */
-import * as util from "util";
+import { format } from "node:util";
 
-import assert from "node-opcua-assert";
-import {
-    ConstructorFunc,
-    DataTypeFactory,
-    getStandartDataTypeFactory,
-    StructuredTypeSchema,
-} from "node-opcua-factory";
-import {
-    ExpandedNodeId,
-    NodeId,
-} from "node-opcua-nodeid";
-import {
-    AnyConstructorFunc,
-} from "node-opcua-schemas";
+import { assert } from "node-opcua-assert";
+import { BrowseDirection, NodeClassMask, ResultMask } from "node-opcua-data-model";
+import { make_warningLog } from "node-opcua-debug";
+import { type ConstructorFunc, type DataTypeFactory, getStandardDataTypeFactory, type StructureInfo } from "node-opcua-factory";
+import type { NodeId } from "node-opcua-nodeid";
+import type { IBasicSessionAsync2 } from "node-opcua-pseudo-session";
+import type { AnyConstructorFunc } from "node-opcua-schemas";
+
+import { readDataTypeDefinitionAndBuildType } from "./private/populate_data_type_manager_104.js";
+
+const warningLog = make_warningLog("ExtraDataTypeManager");
 
 export class ExtraDataTypeManager {
-
     public namespaceArray: string[] = [];
+    private dataTypeFactoryMapByNamespace: { [key: number]: DataTypeFactory } = {};
+    private _session: IBasicSessionAsync2 | null = null;
+    private _pendingExtractions: Map<string, Promise<StructureInfo>> = new Map();
 
-    private readonly dataTypeFactoryMapByNamespace: { [key: number]: DataTypeFactory } = {};
-
-    constructor() {
-        /* */
+    public setSession(session: IBasicSessionAsync2): void {
+        this._session = session;
     }
 
-    public setNamespaceArray(namespaceArray: string[]) {
+    public setNamespaceArray(namespaceArray: string[]): void {
         this.namespaceArray = namespaceArray;
     }
 
     public hasDataTypeFactory(namespaceIndex: number): boolean {
-        return !!this.dataTypeFactoryMapByNamespace.hasOwnProperty(namespaceIndex);
+        if (namespaceIndex === 0) {
+            return true;
+        }
+        return !!Object.hasOwn(this.dataTypeFactoryMapByNamespace, namespaceIndex);
     }
 
-    public registerDataTypeFactory(namespaceIndex: number, dataTypeFactory: DataTypeFactory) {
-        /* istanbul ignore next */
-        assert(namespaceIndex !== 0,
-            "registerTypeDictionary cannot be used for namespace 0");
+    public registerDataTypeFactory(namespaceIndex: number, dataTypeFactory: DataTypeFactory): void {
+        /* c8 ignore next */
+        assert(namespaceIndex !== 0, "registerTypeDictionary cannot be used for namespace 0");
         if (this.hasDataTypeFactory(namespaceIndex)) {
             throw new Error("Dictionary already registered");
         }
         this.dataTypeFactoryMapByNamespace[namespaceIndex] = dataTypeFactory;
     }
 
-    public getDataTypeFactoryForNamespace(namespaceIndex: number): DataTypeFactory {
-        assert(namespaceIndex !== 0,
-            "getTypeDictionaryForNamespace cannot be used for namespace 0");
-        return this.dataTypeFactoryMapByNamespace[namespaceIndex];
-    }
-    public getDataTypeFactory(namespaceIndex: number): DataTypeFactory {
+    /**
+     * Forget the factory of a namespace, and with it every structure, enumeration and
+     * ExtensionObject constructor that namespace registered.
+     *
+     * A namespace that is emptied and loaded again (see `IAddressSpace.deleteNamespace`) must
+     * come back to a manager that has no memory of the previous load: `registerDataTypeFactory`
+     * refuses a second factory for the same index, and the schemas of the old load carry the
+     * NodeIds of nodes that no longer exist.
+     *
+     * Namespace 0 has no factory of its own - it is served by the standard one - and is refused.
+     *
+     * A factory that other namespaces list among their base factories keeps being referenced by
+     * them; those namespaces have to be re-extracted as well if they used its types.
+     */
+    public unregisterDataTypeFactory(namespaceIndex: number): void {
+        /* c8 ignore next */
         if (namespaceIndex === 0) {
-            return getStandartDataTypeFactory();
+            throw new Error("unregisterDataTypeFactory cannot be used for namespace 0");
+        }
+        const dropped = this.dataTypeFactoryMapByNamespace[namespaceIndex];
+        if (!dropped) {
+            return;
+        }
+        delete this.dataTypeFactoryMapByNamespace[namespaceIndex];
+
+        // A namespace whose types are built on this one keeps the factory just dropped in its
+        // fallback chain, and will go on resolving those types through schemas of the load that
+        // has gone. Nothing fails when that happens, which is why it is said out loud here: the
+        // dependent namespaces have to be extracted again too.
+        const dependents: number[] = [];
+        for (const [key, factory] of Object.entries(this.dataTypeFactoryMapByNamespace)) {
+            if (factory.getBaseDataFactories().includes(dropped)) {
+                dependents.push(Number.parseInt(key, 10));
+            }
+        }
+        if (dependents.length) {
+            warningLog(
+                `unregisterDataTypeFactory: namespace ${namespaceIndex} (${dropped.targetNamespace}) is a base of ` +
+                    `namespace(s) ${dependents.join(", ")}, whose DataType factories now refer to a discarded one. ` +
+                    "Those namespaces must be reloaded as well."
+            );
+        }
+    }
+
+    public getDataTypeFactoryForNamespace(namespaceIndex: number): DataTypeFactory {
+        if (namespaceIndex === 0) {
+            return getStandardDataTypeFactory();
         }
         return this.dataTypeFactoryMapByNamespace[namespaceIndex];
     }
 
-    public getExtensionObjectConstructorFromDataType(
-        dataTypeNodeId: NodeId
-    ): AnyConstructorFunc {
+    public getDataTypeFactory(namespaceIndex: number): DataTypeFactory {
+        if (namespaceIndex === 0) {
+            return getStandardDataTypeFactory();
+        }
+        return this.dataTypeFactoryMapByNamespace[namespaceIndex];
+    }
+
+    public getBuiltInType(fieldTypeName: string) {
+        // fallback to standard factory
+        const standardDataTypeFactory = getStandardDataTypeFactory();
+        if (standardDataTypeFactory.hasBuiltInType(fieldTypeName)) {
+            return standardDataTypeFactory.getBuiltInType(fieldTypeName);
+        }
+        throw new Error(`Cannot find built-in type ${fieldTypeName}`);
+    }
+
+    public getStructureInfoForDataType(dataTypeNodeId: NodeId): StructureInfo | null {
         const dataTypeFactory = this.getDataTypeFactory(dataTypeNodeId.namespace);
+        if (!dataTypeFactory) {
+            throw new Error(
+                `cannot find dataFactory for namespace=${dataTypeNodeId.namespace} when requested for ${dataTypeNodeId.toString()}`
+            );
+        }
+        return dataTypeFactory.getStructureInfoForDataType(dataTypeNodeId);
+    }
+
+    public async getStructureInfoForDataTypeAsync(dataTypeNodeId: NodeId): Promise<StructureInfo> {
+        const structureInfo = this.getStructureInfoForDataType(dataTypeNodeId);
+        if (structureInfo) {
+            return structureInfo;
+        }
+        if (!this._session) {
+            throw new Error("Session is required for lazy loading. Call setSession first.");
+        }
+
+        const key = dataTypeNodeId.toString();
+        const pending = this._pendingExtractions.get(key);
+        if (pending) {
+            return await pending;
+        }
+
+        const session = this._session;
+        const promise = (async () => {
+            const cache = {}; // local cache for this extraction
+            await readDataTypeDefinitionAndBuildType(session, dataTypeNodeId, undefined, this, cache);
+
+            const info = this.getStructureInfoForDataType(dataTypeNodeId);
+            if (!info) {
+                throw new Error(`Failed to extract data type structure for ${dataTypeNodeId.toString()}`);
+            }
+            return info;
+        })();
+
+        this._pendingExtractions.set(key, promise);
+        try {
+            return await promise;
+        } finally {
+            this._pendingExtractions.delete(key);
+        }
+    }
+
+    public getExtensionObjectConstructorFromDataType(dataTypeNodeId: NodeId): AnyConstructorFunc {
+        const dataTypeFactory = this.getDataTypeFactory(dataTypeNodeId.namespace);
+        if (!dataTypeFactory) {
+            throw new Error(
+                `cannot find dataFactory for namespace=${dataTypeNodeId.namespace} when requested for ${dataTypeNodeId.toString()}`
+            );
+        }
         // find schema corresponding to dataTypeNodeId in typeDictionary
-        const Constructor = dataTypeFactory.findConstructorForDataType(dataTypeNodeId);
+        const structureInfo = dataTypeFactory.findStructureInfoForDataType(dataTypeNodeId);
+        const Constructor = structureInfo.constructor;
+        if (!Constructor) {
+            throw new Error("Cannot find Extension Object Constructor for Abstract dataType");
+        }
         return Constructor;
     }
 
-    public getExtensionObjectConstructorFromBinaryEncoding(
-        binaryEncodingNodeId: NodeId
-    ): ConstructorFunc {
+    public async getExtensionObjectConstructorFromDataTypeAsync(dataTypeNodeId: NodeId): Promise<AnyConstructorFunc> {
+        const structureInfo = await this.getStructureInfoForDataTypeAsync(dataTypeNodeId);
+        const Constructor = structureInfo.constructor;
+        if (!Constructor) {
+            throw new Error(`Cannot find Extension Object Constructor for Abstract dataType ${dataTypeNodeId.toString()}`);
+        }
+        return Constructor;
+    }
+
+    public getExtensionObjectConstructorFromBinaryEncoding(binaryEncodingNodeId: NodeId): ConstructorFunc {
         const dataTypeFactory = this.getDataTypeFactoryForNamespace(binaryEncodingNodeId.namespace);
         const Constructor = dataTypeFactory.getConstructor(binaryEncodingNodeId);
         if (!Constructor) {
-            throw new Error("getExtensionObjectConstructorFromBinaryEncoding cannot find constructor for binaryEncoding " + binaryEncodingNodeId.toString());
+            throw new Error(
+                "getExtensionObjectConstructorFromBinaryEncoding cannot find constructor for binaryEncoding " +
+                    binaryEncodingNodeId.toString()
+            );
         }
         return Constructor;
     }
+
+    public async getExtensionObjectConstructorFromBinaryEncodingAsync(binaryEncodingNodeId: NodeId): Promise<ConstructorFunc> {
+        const dataTypeFactory = this.getDataTypeFactoryForNamespace(binaryEncodingNodeId.namespace);
+        let Constructor = dataTypeFactory.getConstructor(binaryEncodingNodeId);
+        if (Constructor) {
+            return Constructor;
+        }
+
+        if (!this._session) {
+            throw new Error("Session is required for lazy loading. Call setSession first.");
+        }
+
+        // Need to find the DataType for this binary encoding
+        const browseResult = await this._session.browse({
+            nodeId: binaryEncodingNodeId,
+            referenceTypeId: "HasEncoding",
+            browseDirection: BrowseDirection.Inverse,
+            includeSubtypes: false,
+            nodeClassMask: NodeClassMask.DataType,
+            resultMask: ResultMask.BrowseName
+        });
+
+        if (browseResult.statusCode.isNotGood() || !browseResult.references || browseResult.references.length !== 1) {
+            throw new Error(`Cannot find DataType for binary encoding ${binaryEncodingNodeId.toString()}`);
+        }
+
+        const dataTypeNodeId = browseResult.references[0].nodeId;
+        await this.getStructureInfoForDataTypeAsync(dataTypeNodeId);
+
+        Constructor = dataTypeFactory.getConstructor(binaryEncodingNodeId);
+        if (!Constructor) {
+            throw new Error(`Cannot find constructor for binary encoding ${binaryEncodingNodeId.toString()} after extraction`);
+        }
+        return Constructor;
+    }
+
     public toString(): string {
         const l: string[] = [];
-        function write(...args: [any, ...any[]]) {
-            l.push(util.format.apply(util.format, args));
+        function write(...args: [unknown, ...unknown[]]) {
+            l.push(format.apply(format, args));
         }
-        write("ExtraDataTypeMananager");
+        write("ExtraDataTypeManager");
         for (let n = 0; n < this.namespaceArray.length; n++) {
-            write("-----------", this.namespaceArray[n]);
+            write("------------- namespace:", this.namespaceArray[n]);
             const dataFactory = this.dataTypeFactoryMapByNamespace[n];
             if (!dataFactory) {
                 continue;

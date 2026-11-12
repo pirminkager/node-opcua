@@ -1,52 +1,46 @@
 /**
  * @module node-opcua-transport
  */
-import { decodeUInt32, encodeUInt32, UInt32 } from "node-opcua-basic-types";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
+import { decodeUInt32, encodeUInt32, type UInt32 } from "node-opcua-basic-types";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
 import {
     BaseUAObject,
-    buildStructuredType, check_options_correctness_against_schema,
+    buildStructuredType,
+    check_options_correctness_against_schema,
     initialize_field,
-    parameters,
-    StructuredTypeSchema
+    parameters
 } from "node-opcua-factory";
+import type { IHelloAckLimits } from "./i_hello_ack_limits.js";
 
-const schemaAcknowledgeMessage: StructuredTypeSchema = buildStructuredType({
+const schemaAcknowledgeMessage = buildStructuredType({
     name: "AcknowledgeMessage",
 
     baseType: "BaseObjectType",
 
     fields: [
         {
-            name: "protocolVersion",
+            name: "ProtocolVersion",
 
             fieldType: "UInt32",
 
             documentation: "The latest version of the OPC UA TCP protocol supported by the Server."
         },
-        { name: "receiveBufferSize", fieldType: "UInt32" },
-        { name: "sendBufferSize", fieldType: "UInt32" },
-        { name: "maxMessageSize", fieldType: "UInt32", documentation: "The maximum size for any request message." },
+        { name: "ReceiveBufferSize", fieldType: "UInt32" },
+        { name: "SendBufferSize", fieldType: "UInt32" },
+        { name: "MaxMessageSize", fieldType: "UInt32", documentation: "The maximum size for any request message." },
         {
-            name: "maxChunkCount",
-
+            name: "MaxChunkCount",
             fieldType: "UInt32",
-
             documentation: "The maximum number of chunks in any request message."
         }
     ]
 });
 
-interface AcknowledgeMessageOptions {
+interface AcknowledgeMessageOptions extends Partial<IHelloAckLimits> {
     protocolVersion?: UInt32;
-    receiveBufferSize?: UInt32;
-    sendBufferSize?: UInt32;
-    maxMessageSize?: UInt32;
-    maxChunkCount?: UInt32;
 }
 
-export class AcknowledgeMessage extends BaseUAObject {
-
+export class AcknowledgeMessage extends BaseUAObject implements IHelloAckLimits {
     public static possibleFields: string[] = [
         "protocolVersion",
         "receiveBufferSize",
@@ -63,12 +57,11 @@ export class AcknowledgeMessage extends BaseUAObject {
     public maxChunkCount: UInt32;
 
     constructor(options?: AcknowledgeMessageOptions) {
-
         options = options || {};
 
         super();
         const schema = schemaAcknowledgeMessage;
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (parameters.debugSchemaHelper) {
             check_options_correctness_against_schema(this, schema, options);
         }
@@ -81,7 +74,6 @@ export class AcknowledgeMessage extends BaseUAObject {
     }
 
     public encode(stream: OutputBinaryStream): void {
-
         super.encode(stream);
         encodeUInt32(this.protocolVersion, stream);
         encodeUInt32(this.receiveBufferSize, stream);
@@ -98,5 +90,15 @@ export class AcknowledgeMessage extends BaseUAObject {
         this.sendBufferSize = decodeUInt32(stream);
         this.maxMessageSize = decodeUInt32(stream);
         this.maxChunkCount = decodeUInt32(stream);
+    }
+
+    public toString(): string {
+        let str = "";
+        str += `protocolVersion   = ${this.protocolVersion}\n`;
+        str += `receiveBufferSize = ${this.receiveBufferSize}\n`;
+        str += `sendBufferSize    = ${this.sendBufferSize}\n`;
+        str += `maxMessageSize    = ${this.maxMessageSize}\n`;
+        str += `maxChunkCount     = ${this.maxChunkCount}\n`;
+        return str;
     }
 }

@@ -2,388 +2,398 @@
  * @module node-opcua-data-value
  */
 import { assert } from "node-opcua-assert";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
-import { DateWithPicoseconds, getCurrentClock } from "node-opcua-date-time";
 import {
-  BaseUAObject,
-  buildStructuredType, check_options_correctness_against_schema,
-  initialize_field,
-  parameters,
-  registerSpecialVariantEncoder,
-  StructuredTypeSchema
-} from "node-opcua-factory";
-import { StatusCode, StatusCodes } from "node-opcua-status-code";
-import {
-  DataType,
-  sameVariant,
-  Variant,
-  VariantArrayType,
-  VariantOptions,
-  VariantOptionsT,
-  VariantT,
-} from "node-opcua-variant";
-import * as _ from "underscore";
-import { DataValueEncodingByte } from "./DataValueEncodingByte_enum";
-import { TimestampsToReturn } from "./TimestampsToReturn_enum";
-
-import {
-  DateTime,
-  decodeHighAccuracyDateTime,
-  decodeStatusCode, decodeUInt16,
-  decodeUInt8, encodeHighAccuracyDateTime,
-  encodeStatusCode, encodeUInt16,
-  encodeUInt8, UInt16
+    type DateTime,
+    decodeHighAccuracyDateTime,
+    decodeStatusCode,
+    decodeUInt8,
+    decodeUInt16,
+    encodeHighAccuracyDateTime,
+    encodeStatusCode,
+    encodeUInt8,
+    encodeUInt16,
+    type UInt16
 } from "node-opcua-basic-types";
+import { BinaryStream, type OutputBinaryStream } from "node-opcua-binary-stream";
 import { AttributeIds } from "node-opcua-data-model";
+import { coerceDateTime, getCurrentClock, type PreciseClock } from "node-opcua-date-time";
+import { make_errorLog } from "node-opcua-debug";
+import {
+    BaseUAObject,
+    buildStructuredType,
+    check_options_correctness_against_schema,
+    type DecodeDebugOptions,
+    FieldCategory,
+    type IStructuredTypeSchema,
+    parameters,
+    registerSpecialVariantEncoder
+} from "node-opcua-factory";
+import type { ExtractResult, NumericRange } from "node-opcua-numeric-range";
+import { coerceStatusCode, type StatusCode, StatusCodes } from "node-opcua-status-code";
+import {
+    DataType,
+    sameVariant,
+    Variant,
+    VariantArrayType,
+    type VariantOptions,
+    type VariantOptionsT,
+    type VariantT
+} from "node-opcua-variant";
+import { DataValueEncodingByte } from "./DataValueEncodingByte_enum.js";
+import { TimestampsToReturn } from "./TimestampsToReturn_enum.js";
 
-type NumericalRange = any;
+const errorLog = make_errorLog("datavalue");
 
-// tslint:disable:no-bitwise
+type NumericalRange = NumericRange;
+
 function getDataValue_EncodingByte(dataValue: DataValue): DataValueEncodingByte {
-  let encodingMask = 0;
-  if (dataValue.value && dataValue.value.dataType !== DataType.Null) {
-    encodingMask |= DataValueEncodingByte.Value;
-  }
-  //  if (dataValue.statusCode !== null ) {
-  if (_.isObject(dataValue.statusCode) && dataValue.statusCode.value !== 0) {
-    encodingMask |= DataValueEncodingByte.StatusCode;
-  }
-  if (dataValue.sourceTimestamp && (dataValue.sourceTimestamp as any) !== "null") {
-    encodingMask |= DataValueEncodingByte.SourceTimestamp;
-  }
-  // the number of picoseconds that can be encoded are
-  // 100 nano * 10000;
-  // above this the value contains the excess in pico second to make the sourceTimestamp more accurate
-  if (dataValue.sourcePicoseconds ? dataValue.sourcePicoseconds % 100000 : false) {
-    encodingMask |= DataValueEncodingByte.SourcePicoseconds;
-  }
-  if (dataValue.serverTimestamp && (dataValue.serverTimestamp as any) !== "null") {
-    encodingMask |= DataValueEncodingByte.ServerTimestamp;
-  }
-  if (dataValue.serverPicoseconds ? dataValue.serverPicoseconds % 100000 : false) {
-    encodingMask |= DataValueEncodingByte.ServerPicoseconds;
-  }
-  return encodingMask;
+    let encodingMask = 0;
+    if (dataValue.value && dataValue.value.dataType !== DataType.Null) {
+        encodingMask |= DataValueEncodingByte.Value;
+    }
+    //  if (dataValue.statusCode !== null ) {
+    if (dataValue.statusCode !== null && typeof dataValue.statusCode === "object" && dataValue.statusCode.value !== 0) {
+        encodingMask |= DataValueEncodingByte.StatusCode;
+    }
+    if (dataValue.sourceTimestamp) {
+        encodingMask |= DataValueEncodingByte.SourceTimestamp;
+    }
+    // the number of picoseconds that can be encoded are
+    // 100 nano * 10000;
+    // above this the value contains the excess in pico second to make the sourceTimestamp more accurate
+    if (dataValue.sourcePicoseconds ? dataValue.sourcePicoseconds % 100000 : false) {
+        encodingMask |= DataValueEncodingByte.SourcePicoseconds;
+    }
+    if (dataValue.serverTimestamp) {
+        encodingMask |= DataValueEncodingByte.ServerTimestamp;
+    }
+    if (dataValue.serverPicoseconds ? dataValue.serverPicoseconds % 100000 : false) {
+        encodingMask |= DataValueEncodingByte.ServerPicoseconds;
+    }
+    return encodingMask;
 }
 
+/**
+ * @internal
+ * @param dataValue
+ * @param stream
+ */
 export function encodeDataValue(dataValue: DataValue, stream: OutputBinaryStream): void {
-  const encodingMask = getDataValue_EncodingByte(dataValue);
-  assert(_.isFinite(encodingMask) && encodingMask >= 0 && encodingMask <= 0x3F);
-  // write encoding byte
-  encodeUInt8(encodingMask, stream);
+    if (dataValue instanceof EncodedDataValue && !dataValue._decoded) {
+        const bytes = dataValue._bytes;
+        if (bytes) {
+            // still the bytes it arrived as: written as they are, without decoding them first
+            stream.writeArrayBuffer(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength);
+        } else {
+            // a value kept in another form: written from it, without making its fields
+            dataValue._writeEncoded(stream);
+        }
+        return;
+    }
+    const encodingMask = getDataValue_EncodingByte(dataValue);
+    assert(Number.isFinite(encodingMask) && encodingMask >= 0 && encodingMask <= 0x3f);
+    // write encoding byte
+    encodeUInt8(encodingMask, stream);
 
-  // write value as Variant
-  if (encodingMask & DataValueEncodingByte.Value) {
-    if (!dataValue.value) {
-      dataValue.value = new Variant();
+    // write value as Variant
+    if (encodingMask & DataValueEncodingByte.Value) {
+        if (!dataValue.value) {
+            dataValue.value = new Variant();
+        }
+        /* c8 ignore next */
+        if (!dataValue.value.encode) {
+            errorLog(" CANNOT FIND ENCODE METHOD ON VARIANT !!! HELP", JSON.stringify(dataValue, null, " "));
+        }
+        dataValue.value.encode(stream);
     }
-    if (!dataValue.value.encode) {
-      // tslint:disable-next-line:no-console
-      console.log(" CANNOT FIND ENCODE METHOD ON VARIANT !!! HELP", JSON.stringify(dataValue, null, " "));
+    // write statusCode
+    if (encodingMask & DataValueEncodingByte.StatusCode) {
+        encodeStatusCode(dataValue.statusCode, stream);
     }
-    dataValue.value.encode(stream);
-  }
-  // write statusCode
-  if (encodingMask & DataValueEncodingByte.StatusCode) {
-    encodeStatusCode(dataValue.statusCode, stream);
-  }
-  // write sourceTimestamp
-  if ((encodingMask & DataValueEncodingByte.SourceTimestamp) && (dataValue.sourceTimestamp !== null)) {
-    encodeHighAccuracyDateTime(dataValue.sourceTimestamp, dataValue.sourcePicoseconds, stream);
-  }
-  // write sourcePicoseconds
-  if (encodingMask & DataValueEncodingByte.SourcePicoseconds) {
-    assert(dataValue.sourcePicoseconds !== null);
-    const sourcePicoseconds = Math.floor((dataValue.sourcePicoseconds % 100000) / 10);
-    encodeUInt16(sourcePicoseconds, stream);
-  }
-  // write serverTimestamp
-  if ((encodingMask & DataValueEncodingByte.ServerTimestamp) && dataValue.serverTimestamp !== null) {
-    encodeHighAccuracyDateTime(dataValue.serverTimestamp, dataValue.serverPicoseconds, stream);
-  }
-  // write serverPicoseconds
-  if (encodingMask & DataValueEncodingByte.ServerPicoseconds) {
-    assert(dataValue.serverPicoseconds !== null);
-    const serverPicoseconds = Math.floor((dataValue.serverPicoseconds % 100000) / 10); // we encode 10-pios
-    encodeUInt16(serverPicoseconds, stream);
-  }
+    // write sourceTimestamp
+    if (encodingMask & DataValueEncodingByte.SourceTimestamp && dataValue.sourceTimestamp !== null) {
+        encodeHighAccuracyDateTime(dataValue.sourceTimestamp, dataValue.sourcePicoseconds, stream);
+    }
+    // write sourcePicoseconds
+    if (encodingMask & DataValueEncodingByte.SourcePicoseconds) {
+        assert(dataValue.sourcePicoseconds !== null);
+        const sourcePicoseconds = Math.floor((dataValue.sourcePicoseconds % 100000) / 10);
+        encodeUInt16(sourcePicoseconds, stream);
+    }
+    // write serverTimestamp
+    if (encodingMask & DataValueEncodingByte.ServerTimestamp && dataValue.serverTimestamp !== null) {
+        encodeHighAccuracyDateTime(dataValue.serverTimestamp, dataValue.serverPicoseconds, stream);
+    }
+    // write serverPicoseconds
+    if (encodingMask & DataValueEncodingByte.ServerPicoseconds) {
+        assert(dataValue.serverPicoseconds !== null);
+        const serverPicoseconds = Math.floor((dataValue.serverPicoseconds % 100000) / 10); // we encode 10-picoseconds
+        encodeUInt16(serverPicoseconds, stream);
+    }
 }
 
-function decodeDebugDataValue(dataValue: DataValue, stream: BinaryStream, options: any) {
+function decodeDebugDataValue(dataValue: DataValue, stream: BinaryStream, options: DecodeDebugOptions) {
+    const tracer = options.tracer;
 
-  const tracer = options.tracer;
+    let cur = stream.length;
+    const encodingMask = decodeUInt8(stream);
+    assert(encodingMask <= 0x3f);
 
-  let cur = stream.length;
-  const encodingMask = decodeUInt8(stream);
-  assert(encodingMask <= 0x3F);
+    tracer.trace("member", "encodingByte", `0x${encodingMask.toString(16)}`, cur, stream.length, "Mask");
+    tracer.encoding_byte(encodingMask, DataValueEncodingByte, cur, stream.length);
 
-  tracer.trace("member", "encodingByte", "0x" + encodingMask.toString(16), cur, stream.length, "Mask");
-  tracer.encoding_byte(encodingMask, DataValueEncodingByte, cur, stream.length);
-
-  if (encodingMask & DataValueEncodingByte.Value) {
-    dataValue.value = new Variant();
-    dataValue.value.decodeDebug(stream, options);
-  }
-  // read statusCode
-  cur = stream.length;
-  if (encodingMask & DataValueEncodingByte.StatusCode) {
-    dataValue.statusCode = decodeStatusCode(stream);
-    tracer.trace("member", "statusCode", dataValue.statusCode, cur, stream.length, "StatusCode");
-  }
-  // read sourceTimestamp
-  cur = stream.length;
-  if (encodingMask & DataValueEncodingByte.SourceTimestamp) {
-    dataValue.sourceTimestamp = decodeHighAccuracyDateTime(stream);
-    dataValue.sourcePicoseconds = (dataValue.sourceTimestamp as DateWithPicoseconds).picoseconds;
-    tracer.trace("member", "sourceTimestamp", dataValue.sourceTimestamp, cur, stream.length, "DateTime");
-  }
-  // read sourcePicoseconds
-  cur = stream.length;
-  dataValue.sourcePicoseconds = 0;
-  if (encodingMask & DataValueEncodingByte.SourcePicoseconds) {
-    const tenPico = decodeUInt16(stream);
-    dataValue.sourcePicoseconds += tenPico * 10;
-    tracer.trace("member", "sourcePicoseconds", dataValue.sourcePicoseconds, cur, stream.length, "UInt16");
-  }
-  // read serverTimestamp
-  cur = stream.length;
-  dataValue.serverPicoseconds = 0;
-  if (encodingMask & DataValueEncodingByte.ServerTimestamp) {
-    dataValue.serverTimestamp = decodeHighAccuracyDateTime(stream);
-    dataValue.serverPicoseconds = (dataValue.serverTimestamp as DateWithPicoseconds).picoseconds | 0;
-    tracer.trace("member", "serverTimestamp", dataValue.serverTimestamp, cur, stream.length, "DateTime");
-  }
-  // read serverPicoseconds
-  cur = stream.length;
-  if (encodingMask & DataValueEncodingByte.ServerPicoseconds) {
-    const tenPico = decodeUInt16(stream);
-    dataValue.serverPicoseconds += tenPico * 10;
-    tracer.trace("member", "serverPicoseconds", dataValue.serverPicoseconds, cur, stream.length, "UInt16");
-  }
+    if (encodingMask & DataValueEncodingByte.Value) {
+        dataValue.value = new Variant();
+        dataValue.value.decodeDebug(stream, options);
+    }
+    // read statusCode
+    cur = stream.length;
+    if (encodingMask & DataValueEncodingByte.StatusCode) {
+        dataValue.statusCode = decodeStatusCode(stream);
+        tracer.trace("member", "statusCode", dataValue.statusCode, cur, stream.length, "StatusCode");
+    }
+    // read sourceTimestamp
+    cur = stream.length;
+    if (encodingMask & DataValueEncodingByte.SourceTimestamp) {
+        const [d, picoseconds] = decodeHighAccuracyDateTime(stream);
+        dataValue.sourceTimestamp = d;
+        dataValue.sourcePicoseconds = picoseconds | 0;
+        tracer.trace("member", "sourceTimestamp", dataValue.sourceTimestamp, cur, stream.length, "DateTime");
+    }
+    // read sourcePicoseconds
+    cur = stream.length;
+    dataValue.sourcePicoseconds = 0;
+    if (encodingMask & DataValueEncodingByte.SourcePicoseconds) {
+        const tenPico = decodeUInt16(stream);
+        dataValue.sourcePicoseconds += tenPico * 10;
+        tracer.trace("member", "sourcePicoseconds", dataValue.sourcePicoseconds, cur, stream.length, "UInt16");
+    }
+    // read serverTimestamp
+    cur = stream.length;
+    dataValue.serverPicoseconds = 0;
+    if (encodingMask & DataValueEncodingByte.ServerTimestamp) {
+        const [d, picoseconds] = decodeHighAccuracyDateTime(stream);
+        dataValue.serverTimestamp = d;
+        dataValue.serverPicoseconds = picoseconds | 0;
+        tracer.trace("member", "serverTimestamp", dataValue.serverTimestamp, cur, stream.length, "DateTime");
+    }
+    // read serverPicoseconds
+    cur = stream.length;
+    if (encodingMask & DataValueEncodingByte.ServerPicoseconds) {
+        const tenPico = decodeUInt16(stream);
+        dataValue.serverPicoseconds += tenPico * 10;
+        tracer.trace("member", "serverPicoseconds", dataValue.serverPicoseconds, cur, stream.length, "UInt16");
+    }
 }
 
 function decodeDataValueInternal(dataValue: DataValue, stream: BinaryStream) {
+    const encodingMask = decodeUInt8(stream);
+    if (encodingMask & DataValueEncodingByte.Value) {
+        dataValue.value = new Variant();
+        dataValue.value.decode(stream);
+    }
+    // read statusCode
+    if (encodingMask & DataValueEncodingByte.StatusCode) {
+        dataValue.statusCode = decodeStatusCode(stream);
+    } else {
+        dataValue.statusCode = StatusCodes.Good;
+    }
 
-  const encodingMask = decodeUInt8(stream);
-  if (encodingMask & DataValueEncodingByte.Value) {
-    dataValue.value = new Variant();
-    dataValue.value.decode(stream);
-  }
-  // read statusCode
-  if (encodingMask & DataValueEncodingByte.StatusCode) {
-    dataValue.statusCode = decodeStatusCode(stream);
-  } else {
-    dataValue.statusCode = StatusCodes.Good;
-  }
-
-  dataValue.sourcePicoseconds = 0;
-  // read sourceTimestamp
-  if (encodingMask & DataValueEncodingByte.SourceTimestamp) {
-    dataValue.sourceTimestamp = decodeHighAccuracyDateTime(stream);
-    dataValue.sourcePicoseconds += (dataValue.sourceTimestamp as DateWithPicoseconds).picoseconds | 0;
-  }
-  // read sourcePicoseconds
-  if (encodingMask & DataValueEncodingByte.SourcePicoseconds) {
-    dataValue.sourcePicoseconds += decodeUInt16(stream) * 10;
-  }
-  // read serverTimestamp
-  dataValue.serverPicoseconds = 0;
-  if (encodingMask & DataValueEncodingByte.ServerTimestamp) {
-    dataValue.serverTimestamp = decodeHighAccuracyDateTime(stream);
-    dataValue.serverPicoseconds += (dataValue.serverTimestamp as DateWithPicoseconds).picoseconds | 0;
-  }
-  // read serverPicoseconds
-  if (encodingMask & DataValueEncodingByte.ServerPicoseconds) {
-    dataValue.serverPicoseconds += decodeUInt16(stream) * 10;
-  }
+    dataValue.sourcePicoseconds = 0;
+    // read sourceTimestamp
+    if (encodingMask & DataValueEncodingByte.SourceTimestamp) {
+        const [d, picoseconds] = decodeHighAccuracyDateTime(stream);
+        dataValue.sourceTimestamp = d;
+        dataValue.sourcePicoseconds += picoseconds | 0;
+    }
+    // read sourcePicoseconds
+    if (encodingMask & DataValueEncodingByte.SourcePicoseconds) {
+        dataValue.sourcePicoseconds += decodeUInt16(stream) * 10;
+    }
+    // read serverTimestamp
+    dataValue.serverPicoseconds = 0;
+    if (encodingMask & DataValueEncodingByte.ServerTimestamp) {
+        const [d, picoseconds] = decodeHighAccuracyDateTime(stream);
+        dataValue.serverTimestamp = d;
+        dataValue.serverPicoseconds += picoseconds | 0;
+    }
+    // read serverPicoseconds
+    if (encodingMask & DataValueEncodingByte.ServerPicoseconds) {
+        dataValue.serverPicoseconds += decodeUInt16(stream) * 10;
+    }
 }
 
-export function decodeDataValue(stream: BinaryStream): DataValue {
-  const dataValue = new DataValue();
-  decodeDataValueInternal(dataValue, stream);
-  return dataValue;
+export function decodeDataValue(stream: BinaryStream, dataValue?: DataValue): DataValue {
+    dataValue = dataValue || new DataValue();
+    decodeDataValueInternal(dataValue, stream);
+    return dataValue;
 }
 
 function isValidDataValue(self: DataValue): boolean {
-
-  if (_.isObject(self.value)) {
-    assert(self.value);
-    return self.value.isValid();
-  } else {
-    assert(!self.value);
-    // in this case StatusCode shall not be Good
-    assert(self.statusCode !== StatusCodes.Good);
-  }
-  return true;
+    if (self.value !== null && typeof self.value === "object") {
+        assert(self.value);
+        return self.value.isValid();
+    } else {
+        assert(!self.value);
+        // in this case StatusCode shall not be Good
+        assert(self.statusCode.isNotGood());
+    }
+    return true;
 }
 
 // OPC-UA part 4 -  $7.7
-const schemaDataValue: StructuredTypeSchema = buildStructuredType({
-  baseType: "BaseUAObject",
-  name: "DataValue",
-
-  fields: [
-    { name: "value", fieldType: "Variant", defaultValue: null },
-    { name: "statusCode", fieldType: "StatusCode", defaultValue: StatusCodes.Good },
-    { name: "sourceTimestamp", fieldType: "DateTime", defaultValue: null },
-    { name: "sourcePicoseconds", fieldType: "UInt16", defaultValue: 0 },
-    { name: "serverTimestamp", fieldType: "DateTime", defaultValue: null },
-    { name: "serverPicoseconds", fieldType: "UInt16", defaultValue: 0 }
-  ]
+const schemaDataValue: IStructuredTypeSchema = buildStructuredType({
+    baseType: "BaseUAObject",
+    name: "DataValue",
+    category: FieldCategory.basic,
+    fields: [
+        { name: "Value", fieldType: "Variant", defaultValue: null },
+        { name: "StatusCode", fieldType: "StatusCode", defaultValue: StatusCodes.Good },
+        { name: "SourceTimestamp", fieldType: "DateTime", defaultValue: null },
+        { name: "SourcePicoseconds", fieldType: "UInt16", defaultValue: 0 },
+        { name: "ServerTimestamp", fieldType: "DateTime", defaultValue: null },
+        { name: "ServerPicoseconds", fieldType: "UInt16", defaultValue: 0 }
+    ]
 });
 
 export interface DataValueOptions {
-  value?: VariantOptions;
-  statusCode?: StatusCode;
-  sourceTimestamp?: DateTime;
-  sourcePicoseconds?: UInt16;
-  serverTimestamp?: DateTime;
-  serverPicoseconds?: UInt16;
+    value?: VariantOptions;
+    statusCode?: StatusCode;
+    sourceTimestamp?: DateTime;
+    sourcePicoseconds?: UInt16 | null;
+    serverTimestamp?: DateTime;
+    serverPicoseconds?: UInt16 | null;
 }
 
+function toMicroNanoPico(picoseconds: number): string {
+    return `${w((picoseconds / 1000000) >> 0)}.${w(((picoseconds % 1000000) / 1000) >> 0)}.${w((picoseconds % 1000) >> 0)}`;
+    //    + " (" + picoseconds+ ")";
+}
+function d(timestamp: Date | null, picoseconds: number): string {
+    return timestamp ? `${timestamp.toISOString()} $ ${toMicroNanoPico(picoseconds)}` : "null"; // + "  " + (this.serverTimestamp ? this.serverTimestamp.getTime() :"-");
+}
+const emptyObject = {};
+// passed as options by the code of this module that sets the value of the new DataValue itself (clone,
+// apply_timestamps): the constructor then makes no placeholder Variant
+const withoutValue: DataValueOptions = {};
+
 export class DataValue extends BaseUAObject {
-
-  public static possibleFields: string[] = [
-    "value",
-    "statusCode",
-    "sourceTimestamp",
-    "sourcePicoseconds",
-    "serverTimestamp",
-    "serverPicoseconds"
-  ];
-  public static schema = schemaDataValue;
-  public value: Variant;
-  public statusCode: StatusCode;
-  public sourceTimestamp: DateTime;
-  public sourcePicoseconds: UInt16;
-  public serverTimestamp: DateTime;
-  public serverPicoseconds: UInt16;
-
-  /**
-   *
-   * @class DataValue
-   * @constructor
-   * @extends BaseUAObject
-   * @param  options {Object}
-   */
-  constructor(options?: DataValueOptions) {
-
-    super();
-
-    const schema = schemaDataValue;
-
-    options = options || {};
-    /* istanbul ignore next */
-    if (parameters.debugSchemaHelper) {
-      check_options_correctness_against_schema(this, schema, options);
-    }
-    if (options === null) {
-      this.value = new Variant({ dataType: DataType.Null });
-    }
+    /**
+     * @internal
+     */
+    public static possibleFields: string[] = [
+        "value",
+        "statusCode",
+        "sourceTimestamp",
+        "sourcePicoseconds",
+        "serverTimestamp",
+        "serverPicoseconds"
+    ];
+    /**
+     * @internal
+     */
+    public static schema = schemaDataValue;
+    public value: Variant;
+    public statusCode: StatusCode;
+    public sourceTimestamp: DateTime;
+    public sourcePicoseconds: UInt16;
+    public serverTimestamp: DateTime;
+    public serverPicoseconds: UInt16;
 
     /**
-     * @property value
-     * @type {Variant}
-     * @default  null
+     *
      */
-    if (options.value === undefined || options.value === null) {
-      this.value = new Variant({ dataType: DataType.Null });
-    } else {
-      this.value = (options.value) ? new Variant(options.value) : new Variant({ dataType: DataType.Null });
+    constructor(options?: DataValueOptions | null) {
+        super();
+        // Both `new DataValue()` and `new DataValue(null)` take this branch: the general
+        // path below would allocate a fully initialised Variant that decodeDataValue
+        // overwrites on the very next line, which costs ~6x for nothing.
+        //
+        // They differ in one field only, and that difference is preserved here: `null`
+        // means "explicitly empty" and reports Bad, while a missing argument keeps the
+        // historical Good default. Widening this test without keeping them apart would
+        // silently flip the default status code of every `new DataValue()` in the SDK.
+        if (options === null || options === undefined || options === withoutValue) {
+            this.statusCode = options === undefined ? StatusCodes.Good : StatusCodes.Bad;
+            this.sourceTimestamp = null;
+            this.sourcePicoseconds = 0;
+            this.serverTimestamp = null;
+            this.serverPicoseconds = 0;
+            // withoutValue: the caller sets the value next, so no placeholder Variant is made for it
+            this.value = options === withoutValue ? (null as unknown as Variant) : new Variant(null);
+            return;
+        }
+        options = options || emptyObject;
+        /* c8 ignore next */
+        if (parameters.debugSchemaHelper) {
+            const schema = schemaDataValue;
+            check_options_correctness_against_schema(this, schema, options);
+        }
+        if (options.value === undefined || options.value === null) {
+            this.value = new Variant({ dataType: DataType.Null });
+        } else {
+            this.value = options.value ? new Variant(options.value) : new Variant({ dataType: DataType.Null });
+        }
+        this.statusCode = coerceStatusCode(options.statusCode || StatusCodes.Good);
+        this.sourceTimestamp = options.sourceTimestamp ? coerceDateTime(options.sourceTimestamp) : null;
+        this.sourcePicoseconds = options.sourcePicoseconds || 0;
+        this.serverTimestamp = options.serverTimestamp ? coerceDateTime(options.serverTimestamp) : null;
+        this.serverPicoseconds = options.serverPicoseconds || 0;
     }
 
-    /**
-     * @property statusCode
-     * @type {StatusCode}
-     * @default  Good (0x00000)
-     */
-    this.statusCode = initialize_field(schema.fields[1], options.statusCode);
-
-    /**
-     * @property sourceTimestamp
-     * @type {DateTime}
-     * @default  null
-     */
-    this.sourceTimestamp = initialize_field(schema.fields[2], options.sourceTimestamp);
-
-    /**
-     * @property sourcePicoseconds
-     * @type {UInt16}
-     * @default  0
-     */
-    this.sourcePicoseconds = initialize_field(schema.fields[3], options.sourcePicoseconds);
-
-    /**
-     * @property serverTimestamp
-     * @type {DateTime}
-     * @default  null
-     */
-    this.serverTimestamp = initialize_field(schema.fields[4], options.serverTimestamp);
-
-    /**
-     * @property serverPicoseconds
-     * @type {UInt16}
-     * @default  0
-     */
-    this.serverPicoseconds = initialize_field(schema.fields[5], options.serverPicoseconds);
-  }
-
-  public encode(stream: OutputBinaryStream): void {
-    encodeDataValue(this, stream);
-  }
-
-  public decode(stream: BinaryStream): void {
-    decodeDataValueInternal(this, stream);
-  }
-
-  public decodeDebug(stream: BinaryStream, options: any): void {
-    decodeDebugDataValue(this, stream, options);
-  }
-
-  public isValid(): boolean {
-    return isValidDataValue(this);
-  }
-
-  public toString(): string {
-
-    function toMicroNanoPico(picoseconds: number): string {
-      return ""
-        + w((picoseconds / 1000000) >> 0)
-        + "."
-        + w(((picoseconds % 1000000) / 1000) >> 0)
-        + "."
-        + w((picoseconds % 1000) >> 0);
-      //    + " (" + picoseconds+ ")";
+    public encode(stream: OutputBinaryStream): void {
+        encodeDataValue(this, stream);
     }
-    function d(timestamp: Date | null, picoseconds: number): string {
-      return (timestamp ? timestamp.toISOString()
-        + " $ " + toMicroNanoPico(picoseconds)
-        : "null"); // + "  " + (this.serverTimestamp ? this.serverTimestamp.getTime() :"-");
 
+    public decode(stream: BinaryStream): void {
+        decodeDataValueInternal(this, stream);
     }
-    let str = "{ /* DataValue */";
-    if (this.value) {
-      str += "\n" + "   value: " + Variant.prototype.toString.apply(this.value); // this.value.toString();
-    } else {
-      str += "\n" + "   value:            <null>";
-    }
-    str += "\n" + "   statusCode:      " + (this.statusCode ? this.statusCode.toString() : "null");
-    str += "\n" + "   serverTimestamp: " + d(this.serverTimestamp, this.serverPicoseconds)
-    str += "\n" + "   sourceTimestamp: " + d(this.sourceTimestamp, this.sourcePicoseconds);
-    str += "\n" + "}";
-    return str;
-  }
 
-  public clone() {
-    return new DataValue({
-      serverPicoseconds: this.serverPicoseconds,
-      serverTimestamp: this.serverTimestamp,
-      sourcePicoseconds: this.sourcePicoseconds,
-      sourceTimestamp: this.sourceTimestamp,
-      statusCode: this.statusCode,
-      value: this.value ? this.value.clone() : undefined
-    });
-  }
+    public decodeDebug(stream: BinaryStream, options: DecodeDebugOptions): void {
+        decodeDebugDataValue(this, stream, options);
+    }
+
+    public isValid(): boolean {
+        return isValidDataValue(this);
+    }
+
+    public toString(): string {
+        let str = "{ /* DataValue */";
+        if (this.value) {
+            str += `\n   value: ${Variant.prototype.toString.apply(this.value)}`; // this.value.toString();
+        } else {
+            str += "\n" + "   value:            <null>";
+        }
+        str += `\n   statusCode:      ${this.statusCode ? this.statusCode.toString() : "null"}`;
+        str += `\n   serverTimestamp: ${d(this.serverTimestamp, this.serverPicoseconds)}`;
+        str += `\n   sourceTimestamp: ${d(this.sourceTimestamp, this.sourcePicoseconds)}`;
+        str += "\n" + "}";
+        return str;
+    }
+
+    public clone(): DataValue {
+        // Assign the fields rather than routing them back through the constructor. Passing
+        // an already-cloned Variant as `options.value` made the constructor clone it a
+        // second time - `new Variant(variant)` copies the value, typed arrays included - so
+        // every DataValue.clone() copied its payload twice. The server clones each sampled
+        // value on the monitored-item path, so that duplicate was paid per value.
+        //
+        // The remaining Variant.clone() is the one that matters and is deliberately kept:
+        // the result must not share mutable state with the source, or a later write to the
+        // address space would retroactively alter an already-recorded sample.
+        //
+        // The other fields are copied exactly as the constructor would: statusCode is
+        // already a StatusCode, and the timestamps are already Date | null, so the coercion
+        // being skipped here is a no-op on both.
+        const dataValue = new DataValue(withoutValue);
+        dataValue.value = this.value ? this.value.clone() : new Variant(null);
+        dataValue.statusCode = this.statusCode;
+        dataValue.sourceTimestamp = this.sourceTimestamp;
+        dataValue.sourcePicoseconds = this.sourcePicoseconds;
+        dataValue.serverTimestamp = this.serverTimestamp;
+        dataValue.serverPicoseconds = this.serverPicoseconds;
+        return dataValue;
+    }
 }
 
 DataValue.prototype.schema = DataValue.schema;
@@ -392,153 +402,207 @@ registerSpecialVariantEncoder(DataValue);
 export type DataValueLike = DataValueOptions | DataValue;
 
 function w(n: number): string {
-  return ("0000" + n).substr(-3);
+    return n.toString().padStart(3, "0");
 }
 
-function _partial_clone(dataValue: DataValue): DataValue {
-  const cloneDataValue = new DataValue();
-  cloneDataValue.value = dataValue.value;
-  cloneDataValue.statusCode = dataValue.statusCode;
-  return cloneDataValue;
-}
-
+/**
+ * apply the provided timestampsToReturn flag to the dataValue and return a cloned dataValue
+ * with the specified timestamps.
+ * @param dataValue
+ * @param timestampsToReturn
+ * @param attributeId
+ * @returns
+ */
 export function apply_timestamps(
-  dataValue: DataValue,
-  timestampsToReturn: TimestampsToReturn,
-  attributeId: AttributeIds
+    dataValue: DataValue,
+    timestampsToReturn: TimestampsToReturn,
+    attributeId: AttributeIds
 ): DataValue {
-
-  assert(attributeId > 0);
-  assert(dataValue.hasOwnProperty("serverTimestamp"));
-  assert(dataValue.hasOwnProperty("sourceTimestamp"));
-
-  let cloneDataValue = null;
-  let now = null;
-  // apply timestamps
-  switch (timestampsToReturn) {
-    case TimestampsToReturn.Neither:
-      cloneDataValue = cloneDataValue || _partial_clone(dataValue);
-      break;
-    case TimestampsToReturn.Server:
-      cloneDataValue = cloneDataValue || _partial_clone(dataValue);
-      cloneDataValue.serverTimestamp = dataValue.serverTimestamp;
-      cloneDataValue.serverPicoseconds = dataValue.serverPicoseconds;
-      // xx if (!cloneDataValue.serverTimestamp) {
-      now = now || getCurrentClock();
-      cloneDataValue.serverTimestamp = now.timestamp as DateTime;
-      cloneDataValue.serverPicoseconds = now.picoseconds;
-      // xx }
-      break;
-    case TimestampsToReturn.Source:
-      cloneDataValue = cloneDataValue || _partial_clone(dataValue);
-      cloneDataValue.sourceTimestamp = dataValue.sourceTimestamp;
-      cloneDataValue.sourcePicoseconds = dataValue.sourcePicoseconds;
-      break;
-    case TimestampsToReturn.Both:
-    default:
-      assert(timestampsToReturn === TimestampsToReturn.Both);
-      cloneDataValue = cloneDataValue || _partial_clone(dataValue);
-      cloneDataValue.serverTimestamp = dataValue.serverTimestamp;
-      cloneDataValue.serverPicoseconds = dataValue.serverPicoseconds;
-      //xx if (!cloneDataValue.serverTimestamp) {
-      now = now || getCurrentClock();
-      cloneDataValue.serverTimestamp = now.timestamp as DateTime;
-      cloneDataValue.serverPicoseconds = now.picoseconds;
-      //xx }
-      cloneDataValue.sourceTimestamp = dataValue.sourceTimestamp;
-      cloneDataValue.sourcePicoseconds = dataValue.sourcePicoseconds;
-      break;
-  }
-
-  // unset sourceTimestamp unless AttributeId is Value
-  if (attributeId !== AttributeIds.Value) {
-    cloneDataValue.sourceTimestamp = null;
-  }
-  return cloneDataValue;
+    // apply_timestamps_into sets the value: no Variant is made for the new DataValue before that
+    return apply_timestamps_into(new DataValue(withoutValue), dataValue, timestampsToReturn, attributeId);
 }
 
-function apply_timestamps2(
-  dataValue: DataValue,
-  timestampsToReturn: TimestampsToReturn,
-  attributeId: AttributeIds
+/**
+ * {@link apply_timestamps} written into `target` instead of a new DataValue: `target` gets the status code and
+ * the Variant of `dataValue` and the timestamps `timestampsToReturn` asks for, whatever it held before. The
+ * Variant is shared rather than copied - only timestamps and the status code are adjusted, which are
+ * DataValue fields, so the payload is never written through this alias. `target` must be a DataValue
+ * nothing else holds.
+ */
+export function apply_timestamps_into(
+    target: DataValue,
+    dataValue: DataValue,
+    timestampsToReturn: TimestampsToReturn,
+    attributeId: AttributeIds
 ): DataValue {
+    target.value = dataValue.value;
+    target.statusCode = dataValue.statusCode;
+    target.sourceTimestamp = null;
+    target.sourcePicoseconds = 0;
+    target.serverTimestamp = null;
+    target.serverPicoseconds = 0;
+    let now: PreciseClock | null = null;
+    // apply timestamps
+    switch (timestampsToReturn) {
+        case TimestampsToReturn.Neither:
+            break;
+        case TimestampsToReturn.Server:
+            target.serverTimestamp = dataValue.serverTimestamp;
+            target.serverPicoseconds = dataValue.serverPicoseconds;
+            if (!target.serverTimestamp) {
+                now = now || getCurrentClock();
+                target.serverTimestamp = now.timestamp as DateTime;
+                target.serverPicoseconds = now.picoseconds;
+            }
+            break;
+        case TimestampsToReturn.Source:
+            target.sourceTimestamp = dataValue.sourceTimestamp;
+            target.sourcePicoseconds = dataValue.sourcePicoseconds;
+            break;
+        default:
+            assert(timestampsToReturn === TimestampsToReturn.Both);
+            target.serverTimestamp = dataValue.serverTimestamp;
+            target.serverPicoseconds = dataValue.serverPicoseconds;
+            if (!dataValue.serverTimestamp) {
+                now = now || getCurrentClock();
+                target.serverTimestamp = now.timestamp as DateTime;
+                target.serverPicoseconds = now.picoseconds;
+            }
+            target.sourceTimestamp = dataValue.sourceTimestamp;
+            target.sourcePicoseconds = dataValue.sourcePicoseconds;
+            break;
+    }
 
-  assert(attributeId > 0);
-  assert(dataValue.hasOwnProperty("serverTimestamp"));
-  assert(dataValue.hasOwnProperty("sourceTimestamp"));
-  const cloneDataValue = new DataValue({});
-  cloneDataValue.value = dataValue.value;
-  cloneDataValue.statusCode = dataValue.statusCode;
-  const now = getCurrentClock();
-  // apply timestamps
-  switch (timestampsToReturn) {
-    case TimestampsToReturn.Server:
-      cloneDataValue.serverTimestamp = dataValue.serverTimestamp;
-      cloneDataValue.serverPicoseconds = dataValue.serverPicoseconds;
-      cloneDataValue.serverTimestamp = now.timestamp as DateTime;
-      cloneDataValue.serverPicoseconds = now.picoseconds;
-      break;
-    case TimestampsToReturn.Source:
-      cloneDataValue.sourceTimestamp = dataValue.sourceTimestamp;
-      cloneDataValue.sourcePicoseconds = dataValue.sourcePicoseconds;
-      break;
-    case TimestampsToReturn.Both:
-      cloneDataValue.serverTimestamp = dataValue.serverTimestamp;
-      cloneDataValue.serverPicoseconds = dataValue.serverPicoseconds;
-      cloneDataValue.serverTimestamp = now.timestamp as DateTime;
-      cloneDataValue.serverPicoseconds = now.picoseconds;
+    // unset sourceTimestamp unless AttributeId is Value
+    if (attributeId !== AttributeIds.Value) {
+        target.sourceTimestamp = null;
+    }
+    return target;
+}
 
-      cloneDataValue.sourceTimestamp = dataValue.sourceTimestamp;
-      cloneDataValue.sourcePicoseconds = dataValue.sourcePicoseconds;
-      break;
-  }
+/**
+ *
+ * @param dataValue a DataValue
+ * @param timestampsToReturn  a TimestampsToReturn flag to determine which timestamp should be kept
+ * @param attributeId if attributeId is not Value, sourceTimestamp will forcefully be set to null
+ * @param now an optional current clock to be used to set the serverTimestamp
+ * @returns
+ */
+export type DataValueOptionsWithoutTimestamps = Omit<
+    DataValueOptions,
+    "sourceTimestamp" | "sourcePicoseconds" | "serverTimestamp" | "serverPicoseconds"
+>;
 
-  // unset sourceTimestamp unless AttributeId is Value
-  if (attributeId !== AttributeIds.Value) {
-    cloneDataValue.sourceTimestamp = null;
-  }
-  return cloneDataValue;
+/**
+ * A DataValue built at read time and stamped with the clock of that moment, both
+ * timestamps included. The natural shape for an operation result the server makes
+ * up on the spot, a Bad one included: a DataValue may carry timestamps whatever its
+ * status, and the CTT expects the requested ones on every result.
+ *
+ * @param options everything but the timestamps
+ * @param now the clock to stamp with, the current one by default
+ */
+export function makeNowDataValue(
+    options: DataValueOptionsWithoutTimestamps = {},
+    now: PreciseClock = getCurrentClock()
+): DataValue {
+    return new DataValue({
+        ...options,
+        sourceTimestamp: now.timestamp,
+        sourcePicoseconds: now.picoseconds,
+        serverTimestamp: now.timestamp,
+        serverPicoseconds: now.picoseconds
+    });
+}
+
+export function apply_timestamps_no_copy(
+    dataValue: DataValue,
+    timestampsToReturn: TimestampsToReturn,
+    attributeId: AttributeIds,
+    now?: PreciseClock
+): DataValue {
+    switch (timestampsToReturn) {
+        case TimestampsToReturn.Neither:
+            dataValue.sourceTimestamp = null;
+            dataValue.sourcePicoseconds = 0;
+            dataValue.serverTimestamp = null;
+            dataValue.serverPicoseconds = 0;
+            break;
+        case TimestampsToReturn.Server:
+            dataValue.sourceTimestamp = null;
+            dataValue.sourcePicoseconds = 0;
+            if (!dataValue.serverTimestamp) {
+                now = now || getCurrentClock();
+                dataValue.serverTimestamp = now.timestamp as DateTime;
+                dataValue.serverPicoseconds = now.picoseconds;
+            }
+            break;
+        case TimestampsToReturn.Source:
+            // Part 4 7.40: only the requested timestamps are returned (CTT Attribute Read 007)
+            dataValue.serverTimestamp = null;
+            dataValue.serverPicoseconds = 0;
+            break;
+        default:
+            assert(timestampsToReturn === TimestampsToReturn.Both);
+            if (!dataValue.serverTimestamp) {
+                now = now || getCurrentClock();
+                dataValue.serverTimestamp = now.timestamp as DateTime;
+                dataValue.serverPicoseconds = now.picoseconds;
+            }
+            break;
+    }
+    // unset sourceTimestamp unless AttributeId is Value
+    if (attributeId !== AttributeIds.Value) {
+        dataValue.sourceTimestamp = null;
+    }
+    return dataValue;
 }
 
 /*
- * @method _clone_with_array_replacement
+
  * @param dataValue
  * @param result
  * @return {DataValue}
  * @private
  * @static
  */
-function _clone_with_array_replacement(dataValue: DataValue, result: any): DataValue {
+function _clone_with_array_replacement(dataValue: DataValue, result: ExtractResult<unknown>): DataValue {
+    const statusCode = result.statusCode.isGood() ? dataValue.statusCode : result.statusCode;
 
-  const statusCode = result.statusCode === StatusCodes.Good ? dataValue.statusCode : result.statusCode;
+    const clonedDataValue = new DataValue({
+        statusCode,
 
-  const clonedDataValue = new DataValue({
-    statusCode,
+        serverTimestamp: dataValue.serverTimestamp,
 
-    serverTimestamp: dataValue.serverTimestamp,
+        serverPicoseconds: dataValue.serverPicoseconds,
 
-    serverPicoseconds: dataValue.serverPicoseconds,
+        sourceTimestamp: dataValue.sourceTimestamp,
 
-    sourceTimestamp: dataValue.sourceTimestamp,
+        sourcePicoseconds: dataValue.sourcePicoseconds,
 
-    sourcePicoseconds: dataValue.sourcePicoseconds,
+        value: {
+            dataType: DataType.Null
+        }
+    });
+    clonedDataValue.value.dataType = dataValue.value.dataType;
+    clonedDataValue.value.arrayType = dataValue.value.arrayType;
+    clonedDataValue.value.dimensions = result.dimensions ?? null;
 
-    value: {
-      dataType: DataType.Null
+    if (Array.isArray(result.array)) {
+        clonedDataValue.value.value = [...result.array];
+    } else {
+        clonedDataValue.value.value = result.array;
     }
-  });
-  clonedDataValue.value.dataType = dataValue.value.dataType;
-  clonedDataValue.value.arrayType = dataValue.value.arrayType;
-  clonedDataValue.value.dimensions = result.dimensions;
-  clonedDataValue.value.value = result.array;
-  return clonedDataValue;
+    return clonedDataValue;
 }
 
 function canRange(dataValue: DataValue): boolean {
-  return dataValue.value && ((dataValue.value.arrayType !== VariantArrayType.Scalar) ||
-    ((dataValue.value.arrayType === VariantArrayType.Scalar) && (dataValue.value.dataType === DataType.ByteString))
-    ||
-    ((dataValue.value.arrayType === VariantArrayType.Scalar) && (dataValue.value.dataType === DataType.String)));
+    return (
+        dataValue.value &&
+        (dataValue.value.arrayType !== VariantArrayType.Scalar ||
+            (dataValue.value.arrayType === VariantArrayType.Scalar && dataValue.value.dataType === DataType.ByteString) ||
+            (dataValue.value.arrayType === VariantArrayType.Scalar && dataValue.value.dataType === DataType.String))
+    );
 }
 
 /**
@@ -547,122 +611,215 @@ function canRange(dataValue: DataValue): boolean {
  * @param indexRange {NumericalRange}
  * @return {DataValue}
  */
-export function extractRange(dataValue: DataValue, indexRange: NumericalRange): DataValue {
-
-  const variant = dataValue.value;
-  if (indexRange && canRange(dataValue)) {
-    if (!indexRange.isValid()) {
-      return new DataValue({ statusCode: StatusCodes.BadIndexRangeInvalid });
+export function extractRange(dataValue: DataValue, indexRange: NumericalRange | undefined): DataValue {
+    const variant = dataValue.value;
+    if (indexRange && canRange(dataValue)) {
+        if (!indexRange.isValid()) {
+            return new DataValue({ statusCode: StatusCodes.BadIndexRangeInvalid });
+        }
+        // let's extract an array of elements corresponding to the indexRange
+        const result = indexRange.extract_values(variant.value, variant.dimensions);
+        dataValue = _clone_with_array_replacement(dataValue, result);
+    } else {
+        // clone the whole data Value
+        dataValue = dataValue.clone();
     }
-    // let's extract an array of elements corresponding to the indexRange
-    const result = indexRange.extract_values(variant.value, variant.dimensions);
-    dataValue = _clone_with_array_replacement(dataValue, result);
-  } else {
-    // clone the whole data Value
-    dataValue = dataValue.clone();
-  }
-  return dataValue;
+    return dataValue;
 }
 
 function sameDate(date1: DateTime, date2: DateTime): boolean {
-
-  if (date1 === date2) {
-    return true;
-  }
-  if (date1 && date2 === null) {
-    return false;
-  }
-  if (date1 === null && date2) {
-    return false;
-  }
-  if (date1 === null || date2 === null) {
-    return false;
-  }
-  return date1.getTime() === date2.getTime();
-}
-
-export function sourceTimestampHasChanged(dataValue1: DataValue, dataValue2: DataValue): boolean {
-  return !sameDate(dataValue1.sourceTimestamp, dataValue2.sourceTimestamp)
-    || (dataValue1.sourcePicoseconds !== dataValue2.sourcePicoseconds);
-}
-
-export function serverTimestampHasChanged(dataValue1: DataValue, dataValue2: DataValue): boolean {
-  return !sameDate(dataValue1.serverTimestamp, dataValue2.serverTimestamp)
-    || (dataValue1.serverPicoseconds !== dataValue2.serverPicoseconds);
-}
-
-export function timestampHasChanged(
-  dataValue1: DataValue,
-  dataValue2: DataValue,
-  timestampsToReturn?: TimestampsToReturn
-): boolean {
-  // TODO:    timestampsToReturn = timestampsToReturn || { key: "Neither"};
-  if (timestampsToReturn === undefined) {
-    return sourceTimestampHasChanged(dataValue1, dataValue2); // || serverTimestampHasChanged(dataValue1, dataValue2);
-  }
-  switch (timestampsToReturn) {
-    case TimestampsToReturn.Neither:
-      return false;
-    case TimestampsToReturn.Both:
-      return sourceTimestampHasChanged(dataValue1, dataValue2) ||
-        serverTimestampHasChanged(dataValue1, dataValue2);
-    case TimestampsToReturn.Source:
-      return sourceTimestampHasChanged(dataValue1, dataValue2);
-    default:
-      assert(timestampsToReturn === TimestampsToReturn.Server);
-      return serverTimestampHasChanged(dataValue1, dataValue2);
-  }
-}
-
-export function sameStatusCode(statusCode1: StatusCode, statusCode2: StatusCode) {
-  return statusCode1.value === statusCode2.value;
+    if (date1 === date2) {
+        return true;
+    }
+    if (date1 && date2 === null) {
+        return false;
+    }
+    if (date1 === null && date2) {
+        return false;
+    }
+    if (date1 === null || date2 === null) {
+        return false;
+    }
+    return date1.getTime() === date2.getTime();
 }
 
 /**
- * @method sameDataValue
- * @param v1 {DataValue}
- * @param v2 {DataValue}
- * @param [timestampsToReturn {TimestampsToReturn}]
+ * returns true if the sourceTimestamp and sourcePicoseconds of the two dataValue are different
+ * @param dataValue1
+ * @param dataValue2
+ * @returns
+ */
+export function sourceTimestampHasChanged(dataValue1: DataValue, dataValue2: DataValue): boolean {
+    return (
+        !sameDate(dataValue1.sourceTimestamp, dataValue2.sourceTimestamp) ||
+        dataValue1.sourcePicoseconds !== dataValue2.sourcePicoseconds
+    );
+}
+
+/**
+ * returns true if the serverTimestamp and serverPicoseconds of the two dataValue are different
+ * @param dataValue1
+ * @param dataValue2
+ * @returns
+ */
+export function serverTimestampHasChanged(dataValue1: DataValue, dataValue2: DataValue): boolean {
+    return (
+        !sameDate(dataValue1.serverTimestamp, dataValue2.serverTimestamp) ||
+        dataValue1.serverPicoseconds !== dataValue2.serverPicoseconds
+    );
+}
+
+/**
+ * return if the timestamps of the two dataValue are different
+ *
+ * - if timestampsToReturn is not specified, both sourceTimestamp are compared
+ * - if timestampsToReturn is **Neither**, the function returns false
+ * - if timestampsToReturn is **Both**, both sourceTimestamp and serverTimestamp are compared
+ * - if timestampsToReturn is **Source**, only sourceTimestamp are compared
+ * - if timestampsToReturn is **Server**, only serverTimestamp are compared
+ *
+ * @param dataValue1
+ * @param dataValue2
+ * @param timestampsToReturn
+ * @returns
+ */
+
+export function timestampHasChanged(
+    dataValue1: DataValue,
+    dataValue2: DataValue,
+    timestampsToReturn?: TimestampsToReturn
+): boolean {
+    // TODO:    timestampsToReturn = timestampsToReturn || { key: "Neither"};
+    if (timestampsToReturn === undefined) {
+        return sourceTimestampHasChanged(dataValue1, dataValue2); // || serverTimestampHasChanged(dataValue1, dataValue2);
+    }
+    switch (timestampsToReturn) {
+        case TimestampsToReturn.Neither:
+            return false;
+        case TimestampsToReturn.Both:
+            return sourceTimestampHasChanged(dataValue1, dataValue2) || serverTimestampHasChanged(dataValue1, dataValue2);
+        case TimestampsToReturn.Source:
+            return sourceTimestampHasChanged(dataValue1, dataValue2);
+        default:
+            assert(timestampsToReturn === TimestampsToReturn.Server);
+            return serverTimestampHasChanged(dataValue1, dataValue2);
+    }
+}
+
+/**
+ * @param statusCode1
+ * @param statusCode2
+ * @returns true if the two statusCodes are identical, i.e have the same value
+ */
+export function sameStatusCode(statusCode1: StatusCode, statusCode2: StatusCode): boolean {
+    return statusCode1.value === statusCode2.value;
+}
+
+/**
  * @return {boolean} true if data values are identical
  */
-export function sameDataValue(v1: DataValue, v2: DataValue, timestampsToReturn?: TimestampsToReturn) {
+export function sameDataValue(v1: DataValue, v2: DataValue, timestampsToReturn?: TimestampsToReturn): boolean {
+    if (v1 === v2) {
+        return true;
+    }
+    if (v1 && !v2) {
+        return false;
+    }
+    if (v2 && !v1) {
+        return false;
+    }
+    if (!sameStatusCode(v1.statusCode, v2.statusCode)) {
+        return false;
+    }
 
-  if (v1 === v2) {
-    return true;
-  }
-  if (v1 && !v2) {
-    return false;
-  }
-  if (v2 && !v1) {
-    return false;
-  }
-  if (!sameStatusCode(v1.statusCode, v2.statusCode)) {
-    return false;
-  }
-
-  /*
-  //
-  // For performance reason, sourceTimestamp is
-  // used to determine if a dataValue has changed.
-  // if sourceTimestamp and sourcePicoseconds are identical
-  // then we make the assumption that Variant value is identical too.
-  // This will prevent us to deep compare potential large arrays.
-  // but before this is possible, we need to implement a mechanism
-  // that ensure that date() is always strictly increasing
-  if ((v1.sourceTimestamp && v2.sourceTimestamp) && !sourceTimestampHasChanged(v1, v2)) {
-      return true;
-  }
-  */
-  if (timestampHasChanged(v1, v2, timestampsToReturn)) {
-    return false;
-  }
-  return sameVariant(v1.value, v2.value);
+    if (timestampHasChanged(v1, v2, timestampsToReturn)) {
+        return false;
+    }
+    return sameVariant(v1.value, v2.value);
 }
-
-export interface DataValueT<T, DT extends DataType> extends DataValue {
-  value: VariantT<T, DT>;
-}
-
+/**
+ * a DataValueOptions specialized for a specific DataType
+ */
 export interface DataValueOptionsT<T, DT extends DataType> extends DataValueOptions {
-  value: VariantOptionsT<T, DT>;
+    value: VariantOptionsT<T, DT>;
+}
+
+/**
+ * a DataValue specialized for a specific DataType
+ */
+export declare interface DataValueT<T, DT extends DataType> extends DataValue {
+    value: VariantT<T, DT>;
+}
+// The interface above narrows `value` to VariantT for this specialization.
+// Merging is the whole point — the class carries no extra runtime state.
+// biome-ignore lint/suspicious/noUnsafeDeclarationMerging: deliberate API shaping
+// biome-ignore lint/correctness/noUnusedVariables: T/DT are consumed by the merged interface above, not the empty class body
+export class DataValueT<T, DT extends DataType> extends DataValue {}
+
+/**
+ * a DataValue still in its binary encoding, as another thread or process sent it: encoding it again
+ * writes those bytes as they are. A server that only passes a value on (a front thread answering a
+ * Read with what its engine read) then never decodes it, which for a large array saves decoding it,
+ * copying it to align its elements, and encoding it again.
+ *
+ * Its fields are decoded the first time one of them is read or set; from then on it is an ordinary
+ * DataValue, encoded from its fields. Built by encodedDataValue(), never with `new`.
+ */
+export class EncodedDataValue extends DataValue {
+    /** the bytes not decoded yet; null once the fields have been decoded */
+    declare _bytes: Uint8Array | null;
+    declare _decoded: DataValue | null;
+
+    /**
+     * a subclass that keeps the value in another form than bytes (its _bytes null) writes its encoding
+     * from there, as encodeDataValue() would from the fields, until they are made (_decodeFields)
+     */
+    public _writeEncoded(_stream: OutputBinaryStream): void {
+        throw new Error("EncodedDataValue: no bytes and no _writeEncoded() of its own");
+    }
+
+    /** the fields, made the first time one is used: decoded from the bytes, or by a subclass from its own form */
+    public _decodeFields(): DataValue {
+        const bytes = this._bytes as Uint8Array;
+        return decodeDataValue(new BinaryStream(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)));
+    }
+}
+
+function decodedFieldsOf(dataValue: EncodedDataValue): DataValue {
+    if (!dataValue._decoded) {
+        dataValue._decoded = dataValue._decodeFields();
+        dataValue._bytes = null;
+    }
+    return dataValue._decoded;
+}
+
+// the fields of an EncodedDataValue live in the DataValue it decodes to, behind these accessors
+// (a subclass cannot redeclare the fields of DataValue as accessors in TypeScript)
+for (const field of [
+    "value",
+    "statusCode",
+    "sourceTimestamp",
+    "sourcePicoseconds",
+    "serverTimestamp",
+    "serverPicoseconds"
+] as const) {
+    Object.defineProperty(EncodedDataValue.prototype, field, {
+        get(this: EncodedDataValue) {
+            return decodedFieldsOf(this)[field];
+        },
+        set(this: EncodedDataValue, value: unknown) {
+            (decodedFieldsOf(this) as unknown as Record<string, unknown>)[field] = value; // check-proto-pollution: ok - field is one of the six DataValue field names of the literal list above
+        },
+        configurable: true,
+        enumerable: true
+    });
+}
+
+/** a DataValue for the binary encoding of one DataValue, decoded only if one of its fields is used */
+export function encodedDataValue(bytes: Uint8Array): DataValue {
+    // Object.create: the constructor of DataValue would define the fields on the instance itself
+    const dataValue = Object.create(EncodedDataValue.prototype) as EncodedDataValue;
+    dataValue._bytes = bytes;
+    dataValue._decoded = null;
+    return dataValue;
 }

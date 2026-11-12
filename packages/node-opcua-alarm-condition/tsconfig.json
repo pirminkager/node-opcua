@@ -1,0 +1,62 @@
+{
+    "extends": "../tsconfig.common.json",
+    "compilerOptions": {
+        "rootDir": "source",
+        "outDir": "dist",
+        "composite": true
+    },
+    "include": [
+        "source/*.ts"
+    ],
+    "references": [
+        {
+            "path": "../node-opcua-assert"
+        },
+        {
+            "path": "../node-opcua-basic-types"
+        },
+        {
+            "path": "../node-opcua-constants"
+        },
+        {
+            "path": "../node-opcua-data-model"
+        },
+        {
+            "path": "../node-opcua-debug"
+        },
+        {
+            "path": "../node-opcua-nodeid"
+        },
+        {
+            "path": "../node-opcua-pseudo-session"
+        },
+        {
+            "path": "../node-opcua-service-filter"
+        },
+        {
+            "path": "../node-opcua-service-read"
+        },
+        {
+            "path": "../node-opcua-service-subscription"
+        },
+        {
+            "path": "../node-opcua-service-translate-browse-path"
+        },
+        {
+            "path": "../node-opcua-status-code"
+        },
+        {
+            "path": "../node-opcua-types"
+        },
+        {
+            "path": "../node-opcua-utils"
+        },
+        {
+            "path": "../node-opcua-variant"
+        }
+    ],
+    "exclude": [
+        "node_modules",
+        "dist"
+    ]
+}

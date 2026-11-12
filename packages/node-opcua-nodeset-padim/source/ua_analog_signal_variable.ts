@@ -1,0 +1,27 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { EUInformation } from "node-opcua-data-access";
+import type { UAAnalogUnitRange, UAAnalogUnitRange_Base } from "node-opcua-nodeset-ua/dist/ua_analog_unit_range.js";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/PADIM/                          |
+ * |nodeClass       |VariableType                                                |
+ * |typedDefinition |AnalogSignalVariableType i=1111                             |
+ * |dataType        |Variant                                                     |
+ * |dataType Name   |(number | number[]) i=26                                    |
+ * |value rank      |-2                                                          |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAAnalogSignalVariable_Base<T, DT extends DataType>  extends UAAnalogUnitRange_Base<T, DT> {
+    simulationState?: UABaseDataVariable<boolean, DataType.Boolean>;
+    actualValue?: UABaseDataVariable<any, any>;
+    simulationValue?: UABaseDataVariable<any, any>;
+    damping?: UAProperty<number, DataType.Float>;
+    engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+}
+export interface UAAnalogSignalVariable<T, DT extends DataType> extends Omit<UAAnalogUnitRange<T, DT>, "engineeringUnits">, UAAnalogSignalVariable_Base<T, DT> {}

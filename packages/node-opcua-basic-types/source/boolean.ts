@@ -2,13 +2,13 @@
  * @module node-opcua-basic-types
  */
 import { assert } from "node-opcua-assert";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
 
-export function isValidBoolean(value: any): boolean {
+export function isValidBoolean(value: unknown): boolean {
     return typeof value === "boolean";
 }
 
-export function randomBoolean() {
+export function randomBoolean(): boolean {
     return Math.random() > 0.5;
 }
 
@@ -17,19 +17,18 @@ export function encodeBoolean(value: boolean, stream: OutputBinaryStream): void 
     stream.writeUInt8(value ? 1 : 0);
 }
 
-export function decodeBoolean(stream: BinaryStream): boolean {
+export function decodeBoolean(stream: BinaryStream, _value?: boolean): boolean {
     return !!stream.readUInt8();
 }
 
 const falseDetectionRegex = /^(?:f(?:alse)?|no?|0+)$/i;
 
-export function coerceBoolean(value: any): boolean {
+export function coerceBoolean(value: boolean | string | number | null | undefined): boolean {
     if (value === null || value === undefined) {
-        return value;
+        return false;
     }
     // http://stackoverflow.com/a/24744599/406458
-    return !falseDetectionRegex.test(value) && !!value;
-    // return !!(+value||String(value).toLowerCase().replace(!!0,''));
+    return !falseDetectionRegex.test(value.toString()) && !!value;
 }
 
 export type UABoolean = boolean;

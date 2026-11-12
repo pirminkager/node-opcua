@@ -1,0 +1,698 @@
+/**
+ * ==========================================================================
+ * Copyright (c) 2021-2026 Sterfive - etienne.rossignon@sterfive.com
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ * ==========================================================================
+ */
+
+import type { UAString } from "node-opcua-basic-types";
+import type { DiagnosticInfoOptions, LocalizedTextOptions, QualifiedNameOptions } from "node-opcua-data-model";
+import { DataValue, type DataValueOptions } from "node-opcua-data-value";
+import { make_errorLog } from "node-opcua-debug";
+import { ExtensionObject } from "node-opcua-extension-object";
+import {
+    BasicTypeSchema,
+    type FieldType,
+    getStandardDataTypeFactory,
+    type IStructuredTypeSchema,
+    type StructuredTypeSchema,
+    type StructureInfo
+} from "node-opcua-factory";
+import { NodeId } from "node-opcua-nodeid";
+import { NumericRange } from "node-opcua-numeric-range";
+import { DataType, type VariantOptions } from "node-opcua-variant";
+import type { Pojo } from "./decode_opcua_json.js";
+import {
+    bodyDecodeFunctor,
+    bodyEncodeFunctor,
+    type DecoderFunc,
+    type EncoderFunc,
+    type ExtensionObjectBuilder
+} from "./json_basic_encoding_body_functor.js";
+import { type NodeIdJSON, opcuaJsonDecodeNodeId, opcuaJsonEncodeNodeId } from "./json_basic_encoding_decoding_nodeid.js";
+import { JsonEncodingScheme } from "./json_encoding_scheme.js";
+
+const errorLog = make_errorLog("JSON");
+
+export interface ExtensionObjectJSON104 {
+    TypeId: NodeIdJSON;
+    Body: Pojo;
+    UaTypeId?: never;
+    UaBody?: never;
+}
+/**
+ * 1.05 clause 5.4.2.16: the fields of the Structure, with the UaTypeId field inserted among them.
+ * UaEncoding and UaBody only carry a UA Binary or UA XML body (Table 40).
+ */
+export interface ExtensionObjectJSON105 {
+    UaTypeId: NodeIdJSON;
+    /** 1 for a UA Binary UaBody, 2 for a UA XML one; omitted for a JSON encoded Structure */
+    UaEncoding?: 1 | 2;
+    /**
+     * A UA Binary or UA XML encoded Structure. node-opcua used to nest a JSON encoded Structure
+     * here: that form is still decoded.
+     */
+    UaBody?: Pojo | string;
+    TypeId?: never;
+    Body?: never;
+    [field: string]: unknown;
+}
+export type ExtensionObjectJSON = ExtensionObjectJSON104 | ExtensionObjectJSON105;
+
+const g_DataType = DataType as unknown as Record<string | number, DataType>;
+function toDataType(field: FieldType): DataType {
+    if (field.category === "enumeration") {
+        return DataType.Int32; // enumeration is always Int32
+    }
+    let dataType: DataType | undefined = g_DataType[field.fieldType];
+    if (dataType === undefined) {
+        dataType = field.basicDataType as DataType | undefined;
+        if (dataType === undefined) {
+            if (field.schema instanceof BasicTypeSchema) {
+                dataType = g_DataType[field.schema.subType] || g_DataType[field.schema.name];
+            } else {
+                dataType = g_DataType[field.schema.name];
+                if (!dataType) {
+                    g_DataType[(field.schema as unknown as { subType: string }).subType];
+                }
+            }
+        }
+    }
+    return dataType;
+}
+
+function encodeNumericRange(numericRange: NumericRange, _scheme: JsonEncodingScheme): string | null | undefined {
+    return numericRange.toEncodeableString();
+}
+
+function findEncoder(field: FieldType): EncoderFunc<unknown> | null {
+    const dataType: DataType = toDataType(field);
+
+    if (dataType === DataType.String) {
+        // like basic : NumericRange
+        if (field.fieldType === "NumericRange") {
+            return encodeNumericRange as EncoderFunc<unknown>;
+        }
+    }
+    if (!dataType) {
+        if (field.fieldType === "UAString") {
+            return ((str: UAString, _scheme: JsonEncodingScheme, _namespaceArray?: string[]) => {
+                return str;
+            }) as EncoderFunc<unknown>;
+        }
+    }
+    const encoderFunc = (() => {
+        switch (field.category) {
+            case "complex":
+                if (field.fieldType === "ExtensionObject") {
+                    return opcuaJsonEncodeExtensionObject;
+                } else {
+                    return opcuaJsonEncodeExtensionObjectBody;
+                }
+            case "basic":
+                return bodyEncodeFunctor(dataType);
+            default:
+                return (a: number) => a;
+        }
+    })();
+
+    // istanbul ignore next
+    if (!encoderFunc) {
+        errorLog("findEncoder: Cannot find encoderFunc for ", DataType[dataType], field);
+        return null;
+    }
+    return encoderFunc as EncoderFunc<unknown>;
+}
+
+function findDecoder(field: FieldType): DecoderFunc<unknown> | null {
+    const dataType = toDataType(field);
+    if (dataType === DataType.String) {
+        // like basic : NumericRange
+        if (field.fieldType === "NumericRange") {
+            return ((numericRange: string) => {
+                return new NumericRange(numericRange);
+            }) as DecoderFunc<unknown>;
+        }
+    }
+    if (!dataType) {
+        if (field.fieldType === "UAString") {
+            return ((str: UAString) => {
+                return str;
+            }) as DecoderFunc<unknown>;
+        }
+        //   dataType = toDataType((field.schema as unknown as { subType: string }).subType);
+    }
+    const decoderFunc = (() => {
+        switch (field.category) {
+            case "complex":
+                if (field.fieldType === "ExtensionObject") {
+                    return opcuaJsonDecodeExtensionObject;
+                } else {
+                    if (field.schema) {
+                        return opcuaJsonDecodeExtensionObjectBody.bind(null, field.schema as StructuredTypeSchema);
+                    } else {
+                        const factory = getStandardDataTypeFactory();
+                        const schema = factory.getStructuredTypeSchema(field.fieldType);
+                        return opcuaJsonDecodeExtensionObjectBody.bind(null, schema);
+                    }
+                }
+            case "basic":
+                return bodyDecodeFunctor(dataType);
+            default:
+                return (a: number) => a;
+        }
+    })();
+    // istanbul ignore next
+    if (!decoderFunc) {
+        errorLog("findEncoder: Cannot find decoderFunc for ", DataType[dataType], field);
+        return null;
+    }
+    return decoderFunc as DecoderFunc<unknown>;
+}
+
+function getAllExtensionObjectFields1(schema: IStructuredTypeSchema): FieldType[] {
+    const baseSchema = schema.getBaseSchema();
+    const baseFields: FieldType[] = baseSchema ? getAllExtensionObjectFields1(baseSchema) : ([] as FieldType[]);
+    return [...baseFields, ...schema.fields];
+}
+
+function getAllExtensionObjectFields(extensionObject: ExtensionObject) {
+    return getAllExtensionObjectFields1(extensionObject.schema);
+}
+
+interface ExtensionObjectWithOptionalSwitchField extends ExtensionObject {
+    switchField?: number;
+}
+export function makeBody(
+    extensionObject: ExtensionObject,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): Pojo | undefined {
+    const switchField = (extensionObject as ExtensionObjectWithOptionalSwitchField).switchField;
+    const fields = getAllExtensionObjectFields(extensionObject);
+    if (switchField !== undefined && isUnionSchema(fields)) {
+        return makeUnionBody(extensionObject, fields, switchField, scheme, namespaceArray);
+    }
+
+    const pojo: Pojo = {};
+
+    let allAreDefault = true;
+    // optional fields (switchBit): an undefined value is an absent field, any other value sets
+    // the field's bit in the EncodingMask, even when the value itself is omitted as a default
+    const hasOptionalFields = fields.some((field) => field.switchBit !== undefined);
+    let encodingMask = 0;
+
+    for (const field of fields) {
+        const value = (extensionObject as unknown as Record<string, unknown>)[field.name];
+        const encoder = findEncoder(field);
+
+        const fieldName = field.originalName;
+        if (field.switchBit !== undefined && value !== undefined) {
+            encodingMask |= 1 << field.switchBit;
+        }
+
+        // istanbul ignore next
+        if (!encoder) {
+            errorLog("cannot find encoder for field", field);
+            continue;
+        }
+        if (field.isArray) {
+            if (!value) {
+                // xx pojo[name] = null;
+            } else if (typeof value === "object" && value && (value as { length?: number }).length === 0) {
+                if (scheme === JsonEncodingScheme.Compact) {
+                    // encoding empty array as undefined in compact mode
+                } else {
+                    pojo[fieldName] = [];
+                }
+            } else {
+                const valueAsArray = value as unknown[];
+                // in array default value must be explicitly set to default
+                pojo[fieldName] = valueAsArray.map((a: unknown) =>
+                    a !== undefined && a !== null ? encoder(a, scheme, namespaceArray) : null
+                );
+                allAreDefault = false;
+            }
+        } else {
+            if (value !== undefined) {
+                const fieldValue = encoder(value, scheme, namespaceArray);
+                if (fieldValue !== undefined) {
+                    pojo[fieldName] = fieldValue;
+                    if (allAreDefault && !isDefault(field, fieldValue)) {
+                        allAreDefault = false;
+                    }
+                }
+            }
+        }
+    }
+    // 1.04 Table 33 (reversible) and 1.05 Table 46 (Compact) carry the EncodingMask;
+    // 1.04 NonReversible and 1.05 Verbose show presence by the fields themselves
+    const writesEncodingMask =
+        hasOptionalFields && (scheme === JsonEncodingScheme.DeprecatedReversible || scheme === JsonEncodingScheme.Compact);
+    if (allAreDefault && scheme === JsonEncodingScheme.Compact && encodingMask === 0) {
+        return undefined;
+    }
+    return writesEncodingMask ? { EncodingMask: encodingMask, ...pojo } : pojo;
+}
+
+/** A Union schema has one field per choice, each with a switchValue, beside the switch field. */
+function isUnionSchema(fields: FieldType[]): boolean {
+    return fields.some((field) => field.switchValue !== undefined);
+}
+
+/**
+ * A Union, in the shape of each encoding:
+ * - 1.04 Reversible (Table 34, Annex H.10): `{ SwitchField, Value }`, nothing when the switch is 0;
+ * - 1.04 NonReversible (Annex H.10): the value of the current field, null when the switch is 0;
+ * - 1.05 Compact (5.4.8, Table 48): `{ SwitchField, <FieldName> }`, `{}` when the switch is 0;
+ * - 1.05 Verbose (5.4.8): `{ <FieldName> }`, `{}` when the switch is 0.
+ */
+function makeUnionBody(
+    extensionObject: ExtensionObject,
+    fields: FieldType[],
+    switchField: number,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): Pojo | undefined {
+    const field = fields.find((f) => f.switchValue === switchField);
+    if (!field) {
+        return scheme === JsonEncodingScheme.DeprecatedNonReversible ? (null as unknown as Pojo) : {};
+    }
+    const encoder = findEncoder(field);
+    // istanbul ignore next
+    if (!encoder) {
+        errorLog("cannot find encoder for field", field);
+        return {};
+    }
+    const value = (extensionObject as unknown as Record<string, unknown>)[field.name];
+    const encoded = field.isArray
+        ? ((value as unknown[] | null | undefined) ?? []).map((a) =>
+              a !== undefined && a !== null ? encoder(a, scheme, namespaceArray) : null
+          )
+        : value === undefined || value === null
+          ? null
+          : encoder(value, scheme, namespaceArray);
+    switch (scheme) {
+        case JsonEncodingScheme.DeprecatedReversible:
+            return { SwitchField: switchField, Value: encoded } as Pojo;
+        case JsonEncodingScheme.DeprecatedNonReversible:
+            return encoded as Pojo;
+        case JsonEncodingScheme.Compact:
+            return { SwitchField: switchField, [field.originalName]: encoded } as Pojo;
+        default:
+            return { [field.originalName]: encoded } as Pojo;
+    }
+}
+
+function isDefault(field: FieldType, value: unknown): boolean {
+    if (value === undefined || value === null) {
+        return true; // undefined or null is always default
+    }
+    const dataType = toDataType(field);
+    // detect if the filedl
+    switch (dataType) {
+        case DataType.Null:
+            // a null value was already answered above; a non-null one of the Null type is not
+            // a default, and there is nothing else it could be
+            return false;
+        case DataType.Boolean:
+            return value === false;
+        case DataType.Byte:
+        case DataType.Int16:
+        case DataType.Int32:
+        case DataType.UInt16:
+        case DataType.UInt32:
+        case DataType.Float:
+        case DataType.Double:
+        case DataType.SByte:
+            return value === 0;
+        case DataType.Int64:
+        case DataType.UInt64:
+            if (typeof value === "number") {
+                return value === 0;
+            } else if (typeof value === "bigint") {
+                return value === BigInt(0);
+            } else if (Array.isArray(value) && value.length === 2) {
+                return value[0] === 0 && value[1] === 0;
+            }
+            return false;
+        case DataType.DateTime:
+            return !value || (value instanceof Date && value.getTime() === 0);
+        case DataType.String:
+            return !value || value === "";
+        case DataType.LocalizedText:
+            return !value || (!(value as LocalizedTextOptions).text && !(value as LocalizedTextOptions).locale);
+        case DataType.NodeId:
+            return (
+                !value || (!(value as NodeId).identifierType && (value as NodeId).namespace === 0 && (value as NodeId).value === 0)
+            );
+        case DataType.Guid:
+            return !value || value === "00000000-0000-0000-0000-000000000000";
+        case DataType.QualifiedName:
+            return !value || (!(value as QualifiedNameOptions).name && (value as QualifiedNameOptions).namespaceIndex === 0);
+        case DataType.ExtensionObject:
+            // ExtensionObject is default if it has no body
+            return !value || (Object.keys(value).length === 0 && value.constructor === ExtensionObject);
+        case DataType.Variant:
+            // Variant is default if it has no body
+            return !value || (value as VariantOptions).dataType === DataType.Null;
+        case DataType.DataValue:
+            // DataValue is default if it has no body
+            return (
+                !value ||
+                ((value as DataValueOptions).value === null &&
+                    value instanceof DataValue &&
+                    (value as DataValue).statusCode.value === 0 &&
+                    (value as DataValueOptions).serverPicoseconds === 0 &&
+                    (value as DataValueOptions).sourcePicoseconds === 0)
+            );
+        case DataType.DiagnosticInfo: {
+            // DiagnosticInfo is default if it has no body
+            const valueAsDiag = value as DiagnosticInfoOptions;
+            return (
+                (valueAsDiag.symbolicId ?? -1) === -1 &&
+                (valueAsDiag.namespaceURI ?? -1) === -1 &&
+                (valueAsDiag.locale ?? -1) === -1 &&
+                (valueAsDiag.localizedText ?? -1) === -1 &&
+                !valueAsDiag.additionalInfo &&
+                (!valueAsDiag.innerStatusCode || valueAsDiag.innerStatusCode.value === 0) &&
+                !valueAsDiag.innerDiagnosticInfo
+            );
+        }
+        case DataType.StatusCode: {
+            // StatusCode is default if it has no body
+            const valueAsStatusCode = value as {
+                code: number;
+                description?: string;
+                symbol?: string;
+            };
+            return valueAsStatusCode.code === 0 && valueAsStatusCode.symbol === "Good" && valueAsStatusCode.description === "";
+        }
+        case DataType.ByteString:
+            // ByteString is default if it has no body
+            return value instanceof Buffer && value.length === 0;
+        case DataType.XmlElement:
+            // XmlElement is default if it has no body
+            return typeof value === "string" && value.length === 0;
+    }
+    return false; // default value is not defined for this type
+}
+
+function adaptBody(
+    body: Pojo,
+    schema: IStructuredTypeSchema,
+    builder: ExtensionObjectBuilder,
+    namespaceArray: string[]
+): Pojo | Pojo[] {
+    if (Array.isArray(body)) {
+        const result: Pojo[] = body.map((b) => adaptBody(b, schema, builder, namespaceArray) as Pojo);
+        return result;
+    }
+    if (body === null || body === undefined) {
+        return body;
+    }
+
+    const pojo: Pojo = {};
+    const allFields = getAllExtensionObjectFields1(schema);
+
+    if (isUnionSchema(allFields)) {
+        // every form is accepted: { SwitchField, Value } (1.04), { SwitchField, <FieldName> }
+        // (1.05 Compact), { <FieldName> } (1.05 Verbose) and {} (no field selected)
+        const choices = allFields.filter((f) => f.switchValue !== undefined);
+        const switchValue = body.SwitchField as number | undefined;
+        const field =
+            switchValue !== undefined
+                ? choices.find((f) => f.switchValue === switchValue)
+                : choices.find((f) => body[f.originalName] !== undefined);
+        if (!field) {
+            return pojo;
+        }
+        const value = body[field.originalName] !== undefined ? body[field.originalName] : body.Value;
+        build(field, value, findDecoder(field));
+        return pojo;
+    }
+    // with an EncodingMask (1.04 Table 33, 1.05 Table 46) an optional field is present when its bit
+    // is set, and takes its default value if Compact omitted it; without one, when its name is there
+    const encodingMask = typeof body.EncodingMask === "number" ? body.EncodingMask : undefined;
+    for (const field of allFields) {
+        const value = body[field.originalName];
+        const bitSet =
+            encodingMask !== undefined && field.switchBit !== undefined ? (encodingMask & (1 << field.switchBit)) !== 0 : undefined;
+        if (bitSet === false) {
+            continue;
+        }
+        // istanbul ignore next
+        if (value === undefined) {
+            if (bitSet) {
+                build(field, defaultFieldJson(field), findDecoder(field));
+            }
+            continue;
+        }
+        const decoder = findDecoder(field);
+        build(field, value, decoder);
+    }
+    return pojo;
+
+    /**
+     * The JSON of a present field that the CompactEncoding omitted because it had its default value;
+     * it is then decoded like any other field.
+     */
+    function defaultFieldJson(field: FieldType): unknown {
+        if (field.isArray) {
+            return [];
+        }
+        if (field.category === "complex") {
+            return {};
+        }
+        if (field.category === "enumeration") {
+            return 0;
+        }
+        const defaultValue = (field.schema as { defaultValue?: unknown } | undefined)?.defaultValue;
+        return typeof defaultValue === "function" ? defaultValue() : (defaultValue ?? null);
+    }
+
+    function build(field: FieldType, value: unknown, decoder?: DecoderFunc<unknown> | null) {
+        if (!decoder) {
+            errorLog("Cannot find decoder for", field);
+            return;
+        }
+        if (field.isArray) {
+            if (!value) {
+                pojo[field.name] = [];
+            } else if (typeof value === "object" && value && (value as { length?: number }).length === 0) {
+                pojo[field.name] = [];
+            } else {
+                const valueAsArray = value as unknown[];
+                pojo[field.name] = valueAsArray.map((a: unknown) => (a ? decoder(a as never, builder, namespaceArray) : undefined));
+            }
+        } else {
+            if (value !== undefined && value !== null) {
+                pojo[field.name] = decoder(value as never, builder, namespaceArray);
+            } else if (value === null) {
+                pojo[field.name] = null;
+            }
+        }
+    }
+}
+
+export function opcuaJsonDecodeExtensionObjectBody(
+    schema: IStructuredTypeSchema,
+    body: Pojo,
+    builder: ExtensionObjectBuilder,
+    namespaceArray: string[] = []
+): Pojo | Pojo[] {
+    const result = adaptBody(body, schema, builder, namespaceArray);
+    return result;
+}
+
+export function opcuaJsonEncodeExtensionObjectBody(
+    extensionObject: ExtensionObject | null,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): ExtensionObjectJSON | Pojo | null | undefined {
+    if (!extensionObject) {
+        if (scheme === JsonEncodingScheme.Compact) {
+            // Compact encoding does not encode empty ExtensionObject
+            return undefined;
+        }
+        return null;
+    }
+    return makeBody(extensionObject, scheme, namespaceArray);
+}
+
+/**
+ *
+ * ExtensionObject values shall be encoded as a JSON object with the fields shown:
+ *
+ * JSON Object - Definition for a ExtensionObject
+ * Name	        Description
+ * TypeId	    The NodeId of a DataTypeEncoding Node formatted using the rules in 5.4.2.10.
+ * Encoding	    The format of the Body field encoded as a JSON number.
+ *                 This value is 0 if the body is Structure encoded as a JSON object (see 5.4.6).
+ *                 This value is 1 if the body is a ByteString value encoded as a JSON string (see 5.4.2.8).
+ *                 This value is 2 if the body is a XmlElement value encoded as a JSON string (see 5.4.2.9).
+ *                 This field is omitted if the value is 0.
+ * Body	        Body of the ExtensionObject. The type of this field is specified by the Encoding field.
+ *              If the Body is empty, the ExtensionObject is NULL and is omitted or encoded as a JSON null.
+ *
+ * For the non-reversible form, ExtensionObject values shall be encoded as a JSON object containing only
+ * the value of the Body field. The TypeId and Encoding fields are dropped.
+ */
+export function opcuaJsonEncodeExtensionObject(
+    extensionObject: ExtensionObject | ExtensionObject[] | null,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): ExtensionObjectJSON | Pojo | (ExtensionObjectJSON | Pojo)[] | null | undefined {
+    if (!extensionObject) {
+        if (scheme === JsonEncodingScheme.Compact) {
+            // Compact encoding does not encode empty ExtensionObject
+            return undefined;
+        }
+        return null;
+    }
+
+    if (Array.isArray(extensionObject)) {
+        return extensionObject.map(singleItem);
+    }
+    return singleItem(extensionObject);
+
+    function singleItem(extensionObject: ExtensionObject): ExtensionObjectJSON | Pojo {
+        const body = opcuaJsonEncodeExtensionObjectBody(extensionObject, scheme, namespaceArray);
+        const typeNodeId =
+            scheme === JsonEncodingScheme.DeprecatedReversible
+                ? typeIdOfReversibleEncoding(extensionObject.schema)
+                : extensionObject.schema.dataTypeNodeId;
+        const typeId = opcuaJsonEncodeNodeId(typeNodeId, scheme, namespaceArray);
+        switch (scheme) {
+            case JsonEncodingScheme.DeprecatedNonReversible:
+                // null stays null: a Union with no field selected (Annex H.10)
+                return body === undefined ? {} : (body as Pojo);
+            case JsonEncodingScheme.DeprecatedReversible:
+                return {
+                    TypeId: typeId,
+                    Body: body
+                };
+            case JsonEncodingScheme.Verbose:
+            case JsonEncodingScheme.Compact:
+                // 1.05 clause 5.4.2.16: the fields of the Structure with UaTypeId inserted among
+                // them. UaEncoding and UaBody are for UA Binary or UA XML bodies only (Table 40).
+                return { UaTypeId: typeId, ...((body as Pojo | null | undefined) ?? {}) } as ExtensionObjectJSON105;
+            default:
+                throw new Error(`Unknown JsonEncodingScheme ${scheme}`);
+        }
+    }
+}
+
+/**
+ * 1.04 Table 29: the TypeId of the reversible encoding is the DataTypeEncoding Node of the JSON
+ * body (its "Default JSON" encoding). It is used in namespace 0, where a decoder finds the type from
+ * it in the standard factory. Other namespaces keep the DataType Node, which 1.05 Annex H.7 also
+ * allows: a decoder resolves them through its ExtensionObjectBuilder, which works on DataType Nodes.
+ */
+function typeIdOfReversibleEncoding(schema: IStructuredTypeSchema): NodeId {
+    const jsonEncoding = schema.encodingDefaultJson;
+    if (schema.dataTypeNodeId.namespace === 0 && jsonEncoding && jsonEncoding.namespace === 0 && jsonEncoding.value) {
+        return new NodeId(jsonEncoding.identifierType, jsonEncoding.value, 0);
+    }
+    return schema.dataTypeNodeId;
+}
+
+let structureInfoByJsonEncoding: Map<string, StructureInfo> | undefined;
+/** The standard structure whose "Default JSON" encoding Node is this one, if any. */
+function findStandardStructureInfoForJsonEncoding(encodingNodeId: NodeId): StructureInfo | null {
+    if (!structureInfoByJsonEncoding) {
+        structureInfoByJsonEncoding = new Map();
+        for (const structureInfo of getStandardDataTypeFactory().getStructureIterator()) {
+            const jsonEncoding = structureInfo.schema.encodingDefaultJson;
+            if (jsonEncoding?.value) {
+                structureInfoByJsonEncoding.set(
+                    new NodeId(jsonEncoding.identifierType, jsonEncoding.value, 0).toString(),
+                    structureInfo
+                );
+            }
+        }
+    }
+    return structureInfoByJsonEncoding.get(encodingNodeId.toString()) ?? null;
+}
+
+/**
+ * The fields of the Structure, from any of the forms a decoder can meet:
+ * 1.04 `{ TypeId, Body }`; the 1.05 form `{ UaTypeId, <fields> }` (clause 5.4.2.16); and
+ * `{ UaTypeId, UaBody: { <fields> } }`, which node-opcua wrote before it followed 5.4.2.16.
+ */
+function extensionObjectBody(pojo: ExtensionObjectJSON104 | ExtensionObjectJSON105): Pojo {
+    if (pojo.TypeId !== undefined) {
+        return pojo.Body as Pojo;
+    }
+    if (typeof pojo.UaBody === "string") {
+        throw new Error(
+            `ExtensionObject ${JSON.stringify(pojo.UaTypeId)}: a UA Binary or UA XML UaBody (UaEncoding ${pojo.UaEncoding}) cannot be decoded from JSON`
+        );
+    }
+    if (pojo.UaBody !== undefined && pojo.UaBody !== null) {
+        return pojo.UaBody as Pojo;
+    }
+    const { UaTypeId: _typeId, UaEncoding: _encoding, UaBody: _body, ...fields } = pojo as ExtensionObjectJSON105;
+    return fields as Pojo;
+}
+
+export function opcuaJsonDecodeExtensionObject(
+    _pojo: ExtensionObjectJSON104 | ExtensionObjectJSON105,
+    builder: ExtensionObjectBuilder,
+    namespaceArray: string[]
+): ExtensionObject | ExtensionObject[] | null {
+    if (!_pojo) {
+        return null;
+    }
+    const dataTypeNodeId = opcuaJsonDecodeNodeId(_pojo.TypeId || _pojo.UaTypeId, builder, namespaceArray);
+    const body = extensionObjectBody(_pojo);
+
+    if (dataTypeNodeId.namespace === 0) {
+        const factory = getStandardDataTypeFactory();
+        // the TypeId is the DataType Node, or (1.04 Table 29) its Default JSON encoding Node
+        const schema =
+            factory.getStructureInfoForDataType(dataTypeNodeId) ??
+            findStandardStructureInfoForJsonEncoding(dataTypeNodeId) ??
+            factory.findStructureInfoForDataType(dataTypeNodeId);
+        if (!schema) return null;
+        const Constructor = schema.constructor;
+        if (!Constructor) {
+            return null;
+        }
+        const body2 = adaptBody(body, Constructor.schema, builder, namespaceArray);
+        if (Array.isArray(body2)) {
+            const result: ExtensionObject[] = body2.map((b) => new Constructor(b));
+            return result;
+        }
+        return new Constructor(body2);
+    } else {
+        if (!builder) {
+            throw new Error("Expecting a extension object builder for non-0 namespace extension objects");
+        }
+        const Constructor = builder.getExtensionObjectConstructor(dataTypeNodeId);
+        const body2 = adaptBody(body, Constructor.schema, builder, namespaceArray);
+
+        if (Array.isArray(body2)) {
+            const result: ExtensionObject[] = body2.map((b) => new Constructor(b));
+            return result;
+        }
+        return new Constructor(body2);
+    }
+}

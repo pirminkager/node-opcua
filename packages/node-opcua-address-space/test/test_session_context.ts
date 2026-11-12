@@ -1,26 +1,23 @@
-import * as path from "path";
-
-import { readCertificate } from "node-opcua-crypto";
-import { X509IdentityToken } from "node-opcua-types";
+import fs from "node:fs";
+import path from "node:path";
+import { readCertificateChain } from "node-opcua-crypto";
+import { AttributeIds, makeAccessLevelFlag } from "node-opcua-data-model";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import type { NodeId } from "node-opcua-nodeid";
+import { PermissionType, X509IdentityToken } from "node-opcua-types";
 import { DataType } from "node-opcua-variant";
-import { should } from "should";
-import { AddressSpace, BaseNode, Namespace, SessionContext, UAObject } from "..";
+import "should";
 
-// let's make sure should don't get removed by typescript optimizer
-const keep_should = should;
+import { samplesCertificateFolder } from "node-opcua-test-helpers";
+import { type AddressSpace, makeRoles, SessionContext } from "../dist/api/index.js";
+import { getMiniAddressSpace, makeMockSessionContext } from "../testHelpers.js";
 
-import { getMiniAddressSpace } from "../";
+const certificateFolder = samplesCertificateFolder;
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("SessionContext", () => {
-
     let addressSpace: AddressSpace;
-    let namespace: Namespace;
     before(async () => {
-
         addressSpace = await getMiniAddressSpace();
-        namespace = addressSpace.getOwnNamespace();
     });
     after(() => {
         addressSpace.dispose();
@@ -28,33 +25,32 @@ describe("SessionContext", () => {
 
     it("should provide a default session context - getCurrentUserRole", () => {
         const context = SessionContext.defaultContext;
-        context.getCurrentUserRole().should.eql("default");
+        context.getCurrentUserRoles().should.eql([]);
     });
 
     it("should provide a  default session context - checkPermission", () => {
         const context = SessionContext.defaultContext;
 
-        const someNode = addressSpace.getOwnNamespace().addVariable({
+        const someVariableNode = addressSpace.getOwnNamespace().addVariable({
             browseName: "SomeNode",
             dataType: DataType.Double,
             nodeId: "i=12",
             userAccessLevel: "CurrentRead"
         });
-        context.checkPermission(someNode, "CurrentRead").should.eql(true);
-        context.checkPermission(someNode, "CurrentWrite").should.eql(false);
-
+        context.checkPermission(someVariableNode, PermissionType.Read).should.eql(true);
+        context.checkPermission(someVariableNode, PermissionType.Write).should.eql(true);
+        const dataValue = someVariableNode.readAttribute(context, AttributeIds.UserAccessLevel);
+        dataValue.value.value.should.eql(makeAccessLevelFlag("CurrentRead"));
+        someVariableNode.isUserWritable(context).should.eql(false);
+        someVariableNode.isUserReadable(context).should.eql(true);
     });
 });
 describe("SessionContext - with  dedicated SessionContext and certificate ", () => {
-
     let addressSpace: AddressSpace;
-    let namespace: Namespace;
     let sessionContext: SessionContext;
 
     const mockUserManager = {
-
         isValidUser: (userName: string, password: string) => {
-
             if (userName === "NodeOPCUA") {
                 return true;
             }
@@ -84,14 +80,14 @@ describe("SessionContext - with  dedicated SessionContext and certificate ", () 
         // ConfigureAdmin     The Role is allowed to change the non-security related configuration settings.
         // SecurityAdmin      The Role is allowed to change security related settings.
 
-        getUserRole(username: string): string {
+        getUserRoles(username: string): NodeId[] {
             if (username === "anonymous") {
-                return "Anonymous";
+                return makeRoles("Anonymous");
             }
             if (username === "NodeOPCUA") {
-                return "AuthenticatedUser;SecurityAdmin";
+                return makeRoles("AuthenticatedUser;SecurityAdmin");
             }
-            return "None";
+            return makeRoles([]);
         }
     };
 
@@ -99,23 +95,19 @@ describe("SessionContext - with  dedicated SessionContext and certificate ", () 
         userManager: mockUserManager
     };
 
-    const certificateFilename = path.join(__dirname, "../../node-opcua-samples/certificates/client_cert_2048.pem");
-
-    const certificate = readCertificate(certificateFilename);
-    const mockSession = {
-        userIdentityToken: new X509IdentityToken({
-            certificateData: certificate
-        })
-    };
-
     before(async () => {
+        fs.existsSync(certificateFolder).should.eql(true, `expecting certificate store at ${certificateFolder}`);
 
-        sessionContext = new SessionContext({
+        const certificateFilename = path.join(certificateFolder, "client_cert_2048.pem");
+        const certificate = readCertificateChain(certificateFilename);
+
+        sessionContext = makeMockSessionContext({
             server: mockServer,
-            session: mockSession
+            userIdentityToken: new X509IdentityToken({
+                certificateData: Array.isArray(certificate) ? certificate[0] : certificate
+            })
         });
         addressSpace = await getMiniAddressSpace();
-        namespace = addressSpace.getOwnNamespace();
     });
     after(() => {
         addressSpace.dispose();
@@ -123,20 +115,28 @@ describe("SessionContext - with  dedicated SessionContext and certificate ", () 
 
     it("should provide a default session context - getCurrentUserRole", () => {
         const context = sessionContext;
-        context.getCurrentUserRole().should.eql("AuthenticatedUser;SecurityAdmin");
+        context
+            .getCurrentUserRoles()
+            .map((s) => s.toString())
+            .join(";")
+            .should.eql("ns=0;i=15656;ns=0;i=15704");
     });
 
-    it("should provide a  default session context - checkPermission", () => {
+    ///
+    it("should check execute permission on a method", () => {
         const context = sessionContext;
 
-        const someNode = addressSpace.getOwnNamespace().addVariable({
-            browseName: "SomeNode",
-            dataType: DataType.Double,
-            nodeId: "i=12",
-            userAccessLevel: "CurrentRead"
+        const someObject = addressSpace.getOwnNamespace().addObject({
+            browseName: "SomeName",
+            nodeId: "i=13"
         });
-        context.checkPermission(someNode, "CurrentRead").should.eql(true);
-        context.checkPermission(someNode, "CurrentWrite").should.eql(false);
 
+        const someMethod = addressSpace.getOwnNamespace().addMethod(someObject, {
+            browseName: "SomeNode",
+            nodeId: "i=14",
+            executable: true,
+            userExecutable: true
+        });
+        context.checkPermission(someMethod, PermissionType.Call);
     });
 });

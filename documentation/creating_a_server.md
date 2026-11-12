@@ -18,16 +18,16 @@ or under [Git Bash](http://msysgit.github.io/) cmd on Windows.
 
 ## preparation
 
-* (note: please make sure node.js is installed. Follow the instructions [here](http://nodejs.org/) ).
+* (note: please make sure node.js 22.13 or above is installed. Follow the instructions [here](http://nodejs.org/) ).
 
 
 Let's create a node project for our server.
 
 ``` shell
-    $ mkdir myserver
-    $ cd myserver
-    $ npm init                      # create a package.json
-    $ npm install node-opcua --save # add the node-opcua
+$ mkdir myserver
+$ cd myserver
+$ npm init                      # create a package.json
+$ npm install node-opcua --save # add the node-opcua
 ```
 
 
@@ -37,11 +37,18 @@ Now edit the [sample_server.js](#the-server-script "save:") script.
 
 The script will be organised around the following four steps:
 
-    _"declaration"
+```javascript
+_"declaration"
+
+
+(async ()=>{
 
     _"server instantiation"
+    _"server initialization"
 
-    _"server initialisation"
+})();
+
+```
 
 Let visit each step in order:
 
@@ -50,8 +57,7 @@ Let visit each step in order:
 The node-opcua sdk is made available to the application by this 'require' statement:
 
 ```javascript
-/*global require,setInterval,console */
-const opcua = require("node-opcua");
+const { OPCUAServer, Variant, DataType, StatusCodes} = require("node-opcua");
 ```
 
 ### server instantiation
@@ -62,7 +68,7 @@ For a simple server, you just need to specify a TCP port.
 
 ```javascript
 // Let's create an instance of OPCUAServer
-const server = new opcua.OPCUAServer({
+const server = new OPCUAServer({
     port: 4334, // the port of the listening socket of the server
     resourcePath: "/UA/MyLittleServer", // this path will be added to the endpoint resource name
     _"setting server info"
@@ -81,30 +87,59 @@ Client will have to use this URN to connect to the server.
 additional information can be set at this stage such as the server *buildInfo*.
 
 ```javascript
- buildInfo : {
+buildInfo : {
     productName: "MySampleServer1",
     buildNumber: "7658",
     buildDate: new Date(2014,5,2)
 }
 ```
 
-### server initialisation
+### protecting the private key with a passphrase
 
-Once created the server shall be initialised.
+By default, the server's private key is stored in clear on disk, under the certificate manager's PKI
+folder (`own/private/private_key.pem`). To encrypt it at rest, construct an `OPCUACertificateManager`
+explicitly and pass it as `serverCertificateManager`, with `privateKeyPassphrase` set:
+
+```javascript
+const { OPCUACertificateManager } = require("node-opcua-certificate-manager");
+
+const serverCertificateManager = new OPCUACertificateManager({
+    rootFolder: "./certificates",
+    privateKeyPassphrase: "a-strong-passphrase" // or: () => Promise<string>
+});
+
+const server = new OPCUAServer({
+    port: 4334,
+    serverCertificateManager
+});
+```
+
+An existing plaintext key is re-encrypted in place the first time `serverCertificateManager` initializes
+with a passphrase configured; an existing encrypted key requires the same passphrase, or `server.start()`
+fails closed with an explicit error. The default (no `privateKeyPassphrase`) behavior — a plaintext key —
+is unchanged.
+
+Note: the process-wide default certificate manager (used when `serverCertificateManager` is omitted) is
+always passphrase-less — passphrase protection requires constructing your own `OPCUACertificateManager` as
+shown above. The same option is available on `clientCertificateManager` for `OPCUAClient`.
+
+### server initialization
+
+Once created the server shall be initialized.
 During initialisation, the server will load its default **nodeset** and prepare the binding of all standard OPCUA variables.
 The **initialize** method is a asynchronous operation that requires a 'callback' function that will get executed
 when the initialization process is completed. the *callback* is function that contains the post_initialisation
 steps that we want to execute.
 
 ```javascript
-function post_initialize() {
-    console.log("initialized");
-    _"post initialisation"
-}
-server.initialize(post_initialize);
+await server.initialize();
+console.log("initialized");
+_"post initialization"
+
+_"start the server"
 ```
 
-#### post initialisation
+#### post initialization
 
 Once the server has been initialized, it is a good idea to extend the default server namespace with our variables.
 
@@ -114,19 +149,15 @@ variables that we want to expose. This function will be called inside the initia
 The ```addressSpace``` is used to customize the objet model that our server will expose to the external world.
 
 ```javascript
-function construct_my_address_space(server) {
 
-    const addressSpace = server.engine.addressSpace;
-    const namespace = addressSpace.getOwnNamespace();
+const addressSpace = server.engine.addressSpace;
+const namespace = addressSpace.getOwnNamespace();
 
-    // declare a new object
-    _"add a new object into the objects folder"
+// declare a new object
+_"add a new object into the objects folder"
 
-    // add some variables
-    _"add some variables"
-}
-construct_my_address_space(server);
-_"start the server"
+// add some variables
+_"add some variables"
 ```
 
 
@@ -149,16 +180,14 @@ This function returns a Variant containing the value of the variable to scan.
 let variable1 = 1;
 
 // emulate variable1 changing every 500 ms
-setInterval(function(){  variable1+=1; }, 500);
+setInterval(() => {  variable1+=1; }, 500);
 
 namespace.addVariable({
     componentOf: device,
     browseName: "MyVariable1",
     dataType: "Double",
     value: {
-        get: function () {
-            return new opcua.Variant({dataType: opcua.DataType.Double, value: variable1 });
-        }
+        get:  () => new Variant({dataType: DataType.Double, value: variable1 })
     }
 });
 ```
@@ -173,22 +202,16 @@ Let's create a more comprehensive Read-Write variable with a fancy nodeId
 let variable2 = 10.0;
 
 namespace.addVariable({
-
     componentOf: device,
-
     nodeId: "ns=1;b=1020FFAA", // some opaque NodeId in namespace 4
-
     browseName: "MyVariable2",
-
     dataType: "Double",    
-
+    minimumSamplingInterval: 1234, // we need to specify a minimumSamplingInterval when using a getter
     value: {
-        get: function () {
-            return new opcua.Variant({dataType: opcua.DataType.Double, value: variable2 });
-        },
-        set: function (variant) {
+        get: () => new Variant({dataType: DataType.Double, value: variable2 }),
+        set: (variant) => {
             variable2 = parseFloat(variant.value);
-            return opcua.StatusCodes.Good;
+            return StatusCodes.Good;
         }
     }
 });
@@ -224,7 +247,7 @@ namespace.addVariable({
     browseName: "FreeMemory",
     dataType: "Double",    
     value: {
-        get: function () {return new opcua.Variant({dataType: opcua.DataType.Double, value: available_memory() });}
+        get:  () => new Variant({dataType: DataType.Double, value: available_memory() })
     }
 });
 ```

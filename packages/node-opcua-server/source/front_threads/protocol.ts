@@ -1,0 +1,697 @@
+/**
+ * @module node-opcua-server
+ *
+ * The messages between the engine thread and the front threads, and how what they carry crosses
+ * a thread: OPC UA structures as their binary encoding (a structured clone would drop their
+ * classes), the session as the little the engine needs of it.
+ */
+
+import type { MessagePort } from "node:worker_threads";
+import type { ISessionContext } from "node-opcua-address-space";
+import type { SharedStoreDescriptor } from "node-opcua-address-space-store";
+import { decodeExpandedNodeId, encodeExpandedNodeId } from "node-opcua-basic-types";
+import { BinaryStream, BinaryStreamSizeCalculator } from "node-opcua-binary-stream";
+import type { TimestampsToReturn } from "node-opcua-data-value";
+import { DataValue, decodeDataValue, encodeDataValue, encodedDataValue } from "node-opcua-data-value";
+import { decodeExtensionObject, encodeExtensionObject } from "node-opcua-extension-object";
+import { type BaseUAObject, getStandardDataTypeFactory } from "node-opcua-factory";
+import { type NodeId, resolveNodeId } from "node-opcua-nodeid";
+import {
+    EventFieldList,
+    MessageSecurityMode,
+    MonitoredItemCreateRequest,
+    MonitoredItemNotification,
+    NotificationMessage
+} from "node-opcua-types";
+import { DataType, encodedVariant, encodeVariant } from "node-opcua-variant";
+import type { SubscriptionTransferState } from "../server_subscription.js";
+import type { ITransferSessionIdentity } from "../sessions_compatible_for_transfer.js";
+
+/** what the engine needs of a session to apply the permission rules of the store */
+export interface ContextDescriptor {
+    /** false: an in-process caller, granted everything */
+    session: boolean;
+    roles: string[];
+    securityMode: MessageSecurityMode;
+}
+
+export function describeContext(context: ISessionContext | null): ContextDescriptor {
+    if (!context?.session) {
+        return { session: false, roles: [], securityMode: MessageSecurityMode.None };
+    }
+    return {
+        session: true,
+        roles: context.getCurrentUserRoles().map((role) => role.toString()),
+        securityMode: context.session.channel?.securityMode ?? MessageSecurityMode.None
+    };
+}
+
+// the roles of a session do not change from one request to the next: parsed once
+const parsedRoles = new Map<string, NodeId>();
+function roleOf(text: string): NodeId {
+    let role = parsedRoles.get(text);
+    if (role === undefined) {
+        role = resolveNodeId(text);
+        if (parsedRoles.size < 10000) parsedRoles.set(text, role);
+    }
+    return role;
+}
+
+/** a context with what the store's permissions and services read of it, and nothing else */
+export function contextOf(descriptor: ContextDescriptor): ISessionContext | null {
+    if (!descriptor.session) {
+        return null;
+    }
+    const roles: NodeId[] = descriptor.roles.map(roleOf);
+    return {
+        session: { channel: { securityMode: descriptor.securityMode } },
+        getCurrentUserRoles: () => roles
+    } as unknown as ISessionContext;
+}
+
+/** anything with a binary encoding: the generated structures */
+interface Encodable {
+    encode(stream: BinaryStream | BinaryStreamSizeCalculator): void;
+}
+
+/**
+ * bytes of their own, of exactly this length: a slice of Buffer's shared pool would carry the
+ * whole pool across the thread, since a structured clone copies the entire backing buffer
+ */
+function exact(stream: BinaryStream, length: number): Uint8Array {
+    const buffer = stream.buffer;
+    if (buffer.byteOffset === 0 && buffer.buffer.byteLength === length) {
+        // a buffer above Buffer.poolSize / 2 is not taken from the pool: it already is bytes of
+        // its own, of exactly this length, and copying it would double a large value in flight
+        return new Uint8Array(buffer.buffer, 0, length);
+    }
+    const bytes = new Uint8Array(length);
+    bytes.set(buffer.subarray(0, length));
+    return bytes;
+}
+
+/**
+ * the buffers a message can hand over instead of having them copied: the payloads encoded for
+ * it, which nothing else holds (encodeStructure / encodeDataValues return bytes of their own)
+ */
+export function transferablesOf(payloads: unknown[]): ArrayBuffer[] {
+    const transfer: ArrayBuffer[] = [];
+    for (const payload of payloads) {
+        if (payload instanceof Uint8Array && payload.byteLength >= TRANSFER_THRESHOLD) {
+            transfer.push(payload.buffer as ArrayBuffer);
+        }
+    }
+    return transfer;
+}
+/** below this, a copy costs less than detaching the buffer */
+const TRANSFER_THRESHOLD = 64 * 1024;
+
+/**
+ * a request or a response as a secure channel carries it: the NodeId of its binary encoding, then its
+ * fields. What a front receives (encodedBodyOf) and sends (EncodedResponse) without decoding it again.
+ */
+export function encodeMessageBody(value: BaseUAObject): Uint8Array {
+    const encoding = value.schema.encodingDefaultBinary;
+    if (!encoding) throw new Error(`${value.schema.name} has no binary encoding`);
+    const size = new BinaryStreamSizeCalculator();
+    encodeExpandedNodeId(encoding, size);
+    value.encode(size);
+    const stream = new BinaryStream(size.length);
+    encodeExpandedNodeId(encoding, stream);
+    value.encode(stream);
+    return exact(stream, size.length);
+}
+
+export function decodeMessageBody<T>(bytes: Uint8Array): T {
+    const stream = new BinaryStream(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+    const value = getStandardDataTypeFactory().constructObject(decodeExpandedNodeId(stream));
+    value.decode(stream);
+    return value as T;
+}
+
+/** an OPC UA structure with its type: a request or a response, decoded back into its own class */
+export function encodeExtensionObjectBytes(value: BaseUAObject): Uint8Array {
+    const size = new BinaryStreamSizeCalculator();
+    encodeExtensionObject(value, size);
+    const stream = new BinaryStream(size.length);
+    encodeExtensionObject(value, stream);
+    return exact(stream, size.length);
+}
+
+export function decodeExtensionObjectBytes<T>(bytes: Uint8Array): T {
+    return decodeExtensionObject(new BinaryStream(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength))) as T;
+}
+
+export function encodeStructure(value: Encodable): Uint8Array {
+    const size = new BinaryStreamSizeCalculator();
+    value.encode(size);
+    const stream = new BinaryStream(size.length);
+    value.encode(stream);
+    return exact(stream, size.length);
+}
+
+export function decodeStructure<T extends { decode(stream: BinaryStream): void }>(bytes: Uint8Array, value: T): T {
+    value.decode(new BinaryStream(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)));
+    return value;
+}
+
+/**
+ * structures, one after the other, with their count first: one buffer for a whole batch. A
+ * message of one Uint8Array per item costs a structured clone per item, which for the 1000
+ * WriteValues of a batch was the largest cost of the front.
+ */
+export function encodeStructures(values: Encodable[]): Uint8Array {
+    const size = new BinaryStreamSizeCalculator();
+    size.writeUInt32(values.length);
+    for (const value of values) value.encode(size);
+    const stream = new BinaryStream(size.length);
+    stream.writeUInt32(values.length);
+    for (const value of values) value.encode(stream);
+    return exact(stream, size.length);
+}
+
+/**
+ * the structures of encodeStructures(). Each is decoded into an instance built with
+ * Object.create(prototype): its constructor would first fill every field with a default value
+ * (a NodeId, a DataValue, a Variant...) that decode() overwrites at once.
+ */
+export function decodeStructures<T extends { decode(stream: BinaryStream): void }>(bytes: Uint8Array, prototype: T): T[] {
+    const stream = new BinaryStream(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+    const count = stream.readUInt32();
+    const values: T[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+        const value = Object.create(prototype) as T;
+        value.decode(stream);
+        values[i] = value;
+    }
+    return values;
+}
+
+/**
+ * structures of encodeStructures(), each built by its constructor before it is decoded: for those
+ * whose decode() fills nested structures the constructor creates (MonitoredItemCreateRequest)
+ */
+export function decodeStructuresWith<T extends { decode(stream: BinaryStream): void }>(bytes: Uint8Array, make: () => T): T[] {
+    const stream = new BinaryStream(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+    const count = stream.readUInt32();
+    const values: T[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+        const value = make();
+        value.decode(stream);
+        values[i] = value;
+    }
+    return values;
+}
+
+/**
+ * DataValues, one after the other, with their count first and each one's byte length in front of
+ * it: a front can then hand on the bytes of a value it does not need to look into (see
+ * encodedDataValuesOf), without decoding it to find where the next one starts
+ */
+export function encodeDataValues(values: DataValue[]): Uint8Array {
+    const size = new BinaryStreamSizeCalculator();
+    size.writeUInt32(values.length);
+    const lengths: number[] = new Array(values.length);
+    for (let i = 0; i < values.length; i++) {
+        const start = size.length;
+        encodeDataValue(values[i], size);
+        lengths[i] = size.length - start;
+        size.writeUInt32(0);
+    }
+    const stream = new BinaryStream(size.length);
+    stream.writeUInt32(values.length);
+    for (let i = 0; i < values.length; i++) {
+        stream.writeUInt32(lengths[i]);
+        encodeDataValue(values[i], stream);
+    }
+    return exact(stream, size.length);
+}
+
+/**
+ * DataValues for the monitored items of another thread: each one as its fields without the value, then
+ * the encoding of its Variant, kept as it is there (EncodedVariant). A structure of a companion
+ * specification then reaches the client as it was encoded, from a thread that knows nothing of its type.
+ */
+export function encodeMonitoredValues(values: DataValue[]): Uint8Array {
+    const envelopes = values.map((dataValue) => {
+        const envelope = new DataValue(null);
+        envelope.statusCode = dataValue.statusCode;
+        envelope.sourceTimestamp = dataValue.sourceTimestamp;
+        envelope.sourcePicoseconds = dataValue.sourcePicoseconds;
+        envelope.serverTimestamp = dataValue.serverTimestamp;
+        envelope.serverPicoseconds = dataValue.serverPicoseconds;
+        return envelope;
+    });
+    const size = new BinaryStreamSizeCalculator();
+    size.writeUInt32(values.length);
+    const variantLengths: number[] = new Array(values.length);
+    for (let i = 0; i < values.length; i++) {
+        encodeDataValue(envelopes[i], size);
+        const start = size.length;
+        const value = values[i].value;
+        if (value && value.dataType !== DataType.Null) encodeVariant(value, size);
+        variantLengths[i] = size.length - start;
+        size.writeUInt32(0);
+    }
+    const stream = new BinaryStream(size.length);
+    stream.writeUInt32(values.length);
+    for (let i = 0; i < values.length; i++) {
+        encodeDataValue(envelopes[i], stream);
+        stream.writeUInt32(variantLengths[i]);
+        if (variantLengths[i] > 0) encodeVariant(values[i].value, stream);
+    }
+    return exact(stream, size.length);
+}
+
+export function decodeMonitoredValues(bytes: Uint8Array): DataValue[] {
+    const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const stream = new BinaryStream(buffer);
+    const count = stream.readUInt32();
+    const values: DataValue[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+        const dataValue = decodeDataValue(stream);
+        const length = stream.readUInt32();
+        if (length > 0) {
+            // a copy: the message's buffer is not kept with the value
+            dataValue.value = encodedVariant(new Uint8Array(buffer.subarray(stream.length, stream.length + length)));
+            stream.length += length;
+        }
+        values[i] = dataValue;
+    }
+    return values;
+}
+
+export function decodeDataValues(bytes: Uint8Array): DataValue[] {
+    const stream = new BinaryStream(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+    const count = stream.readUInt32();
+    const values: DataValue[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+        stream.readUInt32();
+        values[i] = decodeDataValue(stream);
+    }
+    return values;
+}
+
+/**
+ * the DataValues of encodeDataValues() as they are encoded: each one is decoded only if something
+ * reads one of its fields, and is otherwise written into a response as these very bytes
+ */
+export function encodedDataValuesOf(bytes: Uint8Array): DataValue[] {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const count = view.getUint32(0, true);
+    const values: DataValue[] = new Array(count);
+    let offset = 4;
+    for (let i = 0; i < count; i++) {
+        const length = view.getUint32(offset, true);
+        offset += 4;
+        values[i] = encodedDataValue(bytes.subarray(offset, offset + length));
+        offset += length;
+    }
+    return values;
+}
+
+// ---------------------------------------------------------------- engine -> front
+
+export interface FrontWorkerData {
+    /**
+     * the kind of thread: its entry module starts only there. An application may bundle the front
+     * worker with the options of its server, and session workers import that module for its hooks.
+     */
+    thread: "front";
+    descriptor: SharedStoreDescriptor;
+    /** the namespaces whose live values the store holds: the model's, and those of the node objects it mirrors */
+    storeNamespaces: number[];
+    serverModule: string;
+    serverModuleData: unknown;
+    front: number;
+    /**
+     * true: every front listens on the port of its options (SO_REUSEPORT); false, where the
+     * platform has no SO_REUSEPORT: front k listens on that port + k
+     */
+    sharedPort: boolean;
+    /** what a FrontOPCUAServer needs of the engine's ServerEngine */
+    server: EngineServerState;
+    /** a port to each session worker, where the subscription services of its sessions go */
+    sessionWorkerPorts: MessagePort[];
+}
+
+/** what a session worker starts with: the store, as a front reads it, and a port from each front */
+export interface SessionWorkerData {
+    /**
+     * see FrontWorkerData.thread An application may bundle the front
+     * worker with the options of its server, and session workers import that module for its hooks.
+     */
+    thread: "session";
+    descriptor: SharedStoreDescriptor;
+    storeNamespaces: number[];
+    server: EngineServerState;
+    /** the fronts' options module: its onCreateMonitoredItem and onDeleteMonitoredItem hooks run here */
+    serverModule: string;
+    serverModuleData: unknown;
+    frontPorts: MessagePort[];
+    index: number;
+}
+
+/** a subscription service request a front forwards to the session worker of the session */
+export type FrontToWorker =
+    /** a session as the front activated it, before its first subscription request: in order with them */
+    | { kind: "session"; record: SessionRecord; activation: SessionActivation }
+    | {
+          kind: "request";
+          /** answered with this id; never 0 */
+          id: number;
+          token: string;
+          /** the front's secure channel the request came on */
+          channel: number;
+          security: ChannelSecurityDescriptor;
+          /** the request, as an ExtensionObject's binary encoding */
+          request: Uint8Array;
+      }
+    | { kind: "channelClosed"; channel: number };
+
+/** a response for the front to send on its channel, as an ExtensionObject's binary encoding */
+/** the response to a forwarded request, encodeMessageBody(); `name` its schema's */
+export type WorkerToFront = { kind: "response"; id: number; response: Uint8Array; name: string };
+
+/** the engine-wide counts a front reads without asking, in an Int32Array the engine alone writes */
+export enum EngineCount {
+    Sessions = 0,
+    Subscriptions = 1,
+    RejectedSessions = 2,
+    RejectedRequests = 3,
+    SessionAborts = 4,
+    PublishingIntervals = 5,
+    /** the ServerState of the server */
+    ServerState = 6,
+    /** the last subscription id handed out: session workers take the next one with Atomics.add */
+    SubscriptionId = 7,
+    /** the last MonitoredItem id handed out, shared the same way: a Subscription moved to another worker keeps unique ids */
+    MonitoredItemId = 8,
+    Size = 9
+}
+
+/** what a front needs of the engine's ServerEngine to serve as the same server */
+export interface EngineServerState {
+    /** ServerCapabilities, structured-cloned: rebuilt with new ServerCapabilities() */
+    serverCapabilities: object;
+    /** the BuildInfo, as its binary encoding */
+    buildInfo: Uint8Array;
+    isAuditing: boolean;
+    /** where the Sessions get their NodeId (see OPCUAServerOptions.diagnosticsNamespaceUri) */
+    diagnosticsNamespaceIndex: number;
+    /** OPC 10000-4 5.13.7: see OPCUAServerOptions.allowAnonymousSubscriptionTransferOnUnsecuredChannel */
+    allowAnonymousSubscriptionTransferOnUnsecuredChannel: boolean;
+    /** EngineCount, kept up to date by the engine */
+    counts: SharedArrayBuffer;
+}
+
+/** the security of a session's channel, as the engine keeps it for the session's diagnostics */
+export interface ChannelSecurityDescriptor {
+    securityMode: number;
+    securityPolicy: string;
+    clientCertificate: Uint8Array | null;
+}
+
+/** what a front tells the engine of a session it created */
+export interface SessionRecord {
+    nodeId: string;
+    /** the authenticationToken, as its NodeId string: the key of the session in every message */
+    token: string;
+    sessionTimeout: number;
+    sessionName: string;
+    /** the ApplicationDescription of the client, as its binary encoding */
+    clientDescription: Uint8Array;
+    /** the EndpointDescription the session was created on, as its binary encoding */
+    endpoint: Uint8Array | null;
+    security: ChannelSecurityDescriptor;
+}
+
+/** what the engine learns of a session when it is activated */
+export interface SessionActivation {
+    token: string;
+    /** the roles the front resolved for the user (its user manager stays in the front) */
+    roles: string[];
+    /** the UserIdentityToken, as an ExtensionObject's binary encoding; null for none */
+    userIdentityToken: Uint8Array | null;
+    localeIds: string[];
+    security: ChannelSecurityDescriptor;
+}
+
+/** a session as it moves from one front to another: what the new front needs to go on with it */
+export interface SessionState {
+    record: SessionRecord;
+    activation: SessionActivation | null;
+    /** the last server nonce, which the client signs in its next ActivateSession */
+    nonce: Uint8Array | null;
+    /** the session worker that hosts its subscriptions */
+    worker: number;
+}
+
+/** a Subscription on its way to another session worker (SubscriptionTransferState, its structures encoded) */
+export interface TransferredSubscription {
+    id: number;
+    publishingInterval: number;
+    lifeTimeCount: number;
+    maxKeepAliveCount: number;
+    maxNotificationsPerPublish: number;
+    publishingEnabled: boolean;
+    priority: number;
+    nextSequenceNumber: number;
+    /** the NotificationMessages not acknowledged yet, encodeStructures() of them */
+    sentNotificationMessages: Uint8Array;
+    /** the MonitoredItemCreateRequests of its items, encodeStructures() of them, in the order of items */
+    requests: Uint8Array;
+    /** its data changes not published yet (MonitoredItemNotifications) and the items they are of */
+    pendingData: Uint8Array;
+    pendingDataItems: number[];
+    /** its events not published yet (EventFieldLists) and the items they are of */
+    pendingEvents: Uint8Array;
+    pendingEventItems: number[];
+    items: { monitoredItemId: number; timestampsToReturn: number; linkedItems: number[] }[];
+}
+
+export function encodeTransferState(state: SubscriptionTransferState): TransferredSubscription {
+    const pending = state.pendingNotifications ?? [];
+    const data = pending.filter((p) => p.notification instanceof MonitoredItemNotification);
+    const events = pending.filter((p) => p.notification instanceof EventFieldList);
+    return {
+        pendingData: encodeStructures(data.map((p) => p.notification)),
+        pendingDataItems: data.map((p) => p.monitoredItemId),
+        pendingEvents: encodeStructures(events.map((p) => p.notification)),
+        pendingEventItems: events.map((p) => p.monitoredItemId),
+        id: state.id,
+        publishingInterval: state.publishingInterval,
+        lifeTimeCount: state.lifeTimeCount,
+        maxKeepAliveCount: state.maxKeepAliveCount,
+        maxNotificationsPerPublish: state.maxNotificationsPerPublish,
+        publishingEnabled: state.publishingEnabled,
+        priority: state.priority,
+        nextSequenceNumber: state.nextSequenceNumber,
+        sentNotificationMessages: encodeStructures(state.sentNotificationMessages),
+        requests: encodeStructures(state.monitoredItems.map((item) => item.request)),
+        items: state.monitoredItems.map((item) => ({
+            monitoredItemId: item.monitoredItemId,
+            timestampsToReturn: item.timestampsToReturn,
+            linkedItems: item.linkedItems
+        }))
+    };
+}
+
+export function decodeTransferState(transferred: TransferredSubscription): SubscriptionTransferState {
+    const requests = decodeStructuresWith(transferred.requests, () => new MonitoredItemCreateRequest());
+    return {
+        id: transferred.id,
+        publishingInterval: transferred.publishingInterval,
+        lifeTimeCount: transferred.lifeTimeCount,
+        maxKeepAliveCount: transferred.maxKeepAliveCount,
+        maxNotificationsPerPublish: transferred.maxNotificationsPerPublish,
+        publishingEnabled: transferred.publishingEnabled,
+        priority: transferred.priority,
+        nextSequenceNumber: transferred.nextSequenceNumber,
+        sentNotificationMessages: decodeStructuresWith(transferred.sentNotificationMessages, () => new NotificationMessage()),
+        pendingNotifications: [
+            ...decodeStructuresWith(transferred.pendingData, () => new MonitoredItemNotification()).map((notification, k) => ({
+                monitoredItemId: transferred.pendingDataItems[k],
+                notification
+            })),
+            ...decodeStructuresWith(transferred.pendingEvents, () => new EventFieldList()).map((notification, k) => ({
+                monitoredItemId: transferred.pendingEventItems[k],
+                notification
+            }))
+        ],
+        monitoredItems: transferred.items.map((item, k) => ({
+            monitoredItemId: item.monitoredItemId,
+            timestampsToReturn: item.timestampsToReturn as TimestampsToReturn,
+            linkedItems: item.linkedItems,
+            request: requests[k]
+        }))
+    };
+}
+
+/** the services a front forwards to the engine's ServerEngine as they are */
+export type ServiceKind = "read" | "write" | "browse" | "translate" | "call" | "historyRead";
+
+/**
+ * what a front needs to know of a node to create a monitored item on it, without asking again:
+ * what does not depend on the session. index and generation tell the node from the next one
+ * given its index once it is deleted.
+ */
+export interface NodeDescription {
+    index: number;
+    generation: number;
+    nodeClass: number;
+    namespaceIndex: number;
+    name: string;
+    /** the DataType of a Variable, as a NodeId string */
+    dataType: string | null;
+    isNumber: boolean;
+    /** the low and high of its EURange property, for a percent deadband, when described */
+    euRange: [number, number] | null;
+    /** the EURange property itself, which a front watches while a percent deadband uses it */
+    euRangeNode: { nodeId: string; index: number; generation: number } | null;
+}
+
+export interface DescribeReply {
+    nodes: (NodeDescription | null)[];
+    /** the attribute of each item as the session reads it; an empty DataValue for the Values (sampled later) */
+    attributes: Uint8Array;
+}
+
+export interface ValueReply {
+    value: Uint8Array;
+    /** the version word of the value when it was read; -1 when the node is gone */
+    version: number;
+}
+
+export type EngineToFront =
+    | { kind: "replies"; ids: number[]; payloads: unknown[] }
+    /** values written since the last message, for the nodes this front watches, in the order of the writes */
+    | { kind: "changes"; indexes: number[]; versions: number[]; values: Uint8Array }
+    /** watched nodes that were deleted */
+    | { kind: "disposed"; indexes: number[] }
+    | { kind: "descriptor"; descriptor: SharedStoreDescriptor }
+    /** the engine closed a session of this front (timeout, room made for a new one, another front took it) */
+    | { kind: "sessionClosed"; token: string; reason: string }
+    /** to a session worker: values written to node objects it watches, DataValues in the order of the nodes */
+    | { kind: "objectChanges"; nodeIds: string[]; values: Uint8Array }
+    /** the fields of events that passed the filter of watchEvents ids, as EventFieldLists (clientHandle 0) */
+    | { kind: "events"; ids: number[]; fields: Uint8Array }
+    /** to a session worker: the engine closed a session it hosts the subscriptions of */
+    | { kind: "workerSessionClosed"; token: string; deleteSubscriptions: boolean }
+    /** to a session worker: give subscription subscriptionId up to another worker, if it has it (subscriptionExported) */
+    | { kind: "exportSubscription"; id: number; subscriptionId: number; identity: ITransferSessionIdentity }
+    /**
+     * another front takes this session over: answer with its state (sessionReleased) and set it aside,
+     * still attached, until the engine says whether the other front activated it (forgetSession) or not
+     * (restoreSession)
+     */
+    | { kind: "releaseSession"; id: number; token: string }
+    /** the session set aside by releaseSession was activated on another front: it is no longer this front's */
+    | { kind: "forgetSession"; token: string }
+    /** the ActivateSession that took the session set aside was refused: this front goes on with it */
+    | { kind: "restoreSession"; token: string }
+    /**
+     * to a session worker: a Server method about a Subscription of session `token` (subscription_methods.ts), the
+     * engine's Call service having checked its arguments and permissions; `request` is a CallMethodRequest
+     * (subscriptionMethodCalled)
+     */
+    | { kind: "callSubscriptionMethod"; id: number; token: string; request: Uint8Array }
+    | { kind: "stop" };
+
+// ---------------------------------------------------------------- front -> engine
+
+export type FrontRequest =
+    /** what the monitored items of a session worker need of the nodes of the store (a DescribeReply) */
+    | { kind: "describe"; context: ContextDescriptor; items: { nodeId: string; attributeId: number }[] }
+    /** the value of a node of the store, as the engine reads it for the session (a ValueReply) */
+    | { kind: "value"; context: ContextDescriptor; index: number; generation: number }
+    /** room for one more session (true), made by closing the oldest not activated if needed; held until sessionCreated */
+    | { kind: "admitSession" }
+    /** the room admitSession made is not used: the session closed before the engine heard of it */
+    | { kind: "cancelAdmission" }
+    /** the ActivateSession that took this session from another front was refused: it goes back there (answered once it is) */
+    | { kind: "returnSession"; token: string }
+    /** answered with the index of the session worker that hosts the session's subscriptions */
+    | { kind: "sessionCreated"; session: SessionRecord }
+    | { kind: "sessionActivated"; activation: SessionActivation }
+    | {
+          kind: "closeSession";
+          token: string;
+          deleteSubscriptions: boolean;
+          reason: "Timeout" | "Terminated" | "CloseSession" | "Forcing";
+      }
+    /** a session another front holds, for this front to go on with (ActivateSession on a new channel): its SessionState, or null */
+    | { kind: "takeSession"; token: string }
+    /**
+     * TransferSubscriptions to a session of a session worker, of a subscription that worker does not
+     * hold: the engine asks the others. Answered with the subscription, a refusal (a StatusCode value) or null
+     */
+    | { kind: "takeSubscription"; subscriptionId: number; identity: ITransferSessionIdentity }
+    /** a service of the engine's ServerEngine, its request as its binary encoding, run in the context of the session */
+    | { kind: "service"; service: ServiceKind; token: string | null; request: Uint8Array }
+    /** a session worker watches a node object (namespace 0): the engine pushes the values written to it (objectChanges) */
+    | { kind: "watchObject"; nodeId: string }
+    /**
+     * the events of a node, filtered by the engine for an item: its EventFilter as its binary encoding;
+     * the fields of the events it lets through come back in "events" messages under this id
+     */
+    | {
+          kind: "watchEvents";
+          id: number;
+          nodeId: string;
+          context: ContextDescriptor;
+          /** the session of the item: the engine filters each event with its roles of the moment */
+          token: string | null;
+          filter: Uint8Array;
+          /** the item's, which a ConditionRefresh names */
+          subscriptionId: number;
+          monitoredItemId: number;
+      }
+    | { kind: "unwatchEvents"; id: number }
+    /** the EventFilterResult of an EventFilter (its binary encoding), checked against the event types of the engine */
+    | { kind: "checkEventFilter"; filter: Uint8Array }
+    | { kind: "unwatchObject"; nodeId: string }
+    /** an event the front raises on the Server object: its type, and each field as an encoded Variant */
+    | { kind: "raiseEvent"; eventType: string; fields: Record<string, Uint8Array> };
+
+/** start (1) or stop (0) watching a node: index and generation, three numbers per operation, in order */
+export const WATCH = 1;
+export const UNWATCH = 0;
+
+export type FrontToEngine =
+    | { kind: "requests"; ids: number[]; requests: FrontRequest[] }
+    | { kind: "watches"; operations: number[] }
+    /** the last "changes" message was delivered: the engine may send the next one */
+    | { kind: "changesDone" }
+    /**
+     * values the front wrote into the store itself (WRITTEN_FIELDS numbers each) and, one per value, the
+     * encoding of one written as bytes (null for a number): the engine tells their listeners
+     */
+    | { kind: "written"; written: number[]; encodings: (Uint8Array | null)[] }
+    /**
+     * what the sessions of the front did in a turn of the event loop: the sessions seen (their
+     * watchdog), the service counters (token, counter name or "" for the total, 1 for an error), the
+     * sessions and the requests refused
+     */
+    | {
+          kind: "activity";
+          seen: string[];
+          counters: [string, string, number][];
+          rejected: number;
+          securityRejected: number;
+          rejectedRequests: number;
+      }
+    /** a session worker's answer to exportSubscription: the subscription, a refusal (a StatusCode value), or null when it has none */
+    | { kind: "subscriptionExported"; id: number; result: TransferredSubscription | number | null }
+    /**
+     * the Subscriptions and MonitoredItems of the sessions of a session worker, as they come and go:
+     * [session token, subscription id, item id (-1 for the Subscription itself), 1 added / 0 removed]
+     */
+    | { kind: "subscriptionChanges"; changes: [string, number, number, number][] }
+    /** a session worker's answer to callSubscriptionMethod: a CallMethodResult */
+    | { kind: "subscriptionMethodCalled"; id: number; result: Uint8Array }
+    /** the state of a session another front takes over (releaseSession); null when this front no longer has it */
+    | { kind: "sessionReleased"; id: number; state: SessionState | null }
+    | { kind: "ready"; endpointUrl: string }
+    | { kind: "failed"; message: string }
+    | { kind: "stopped" };

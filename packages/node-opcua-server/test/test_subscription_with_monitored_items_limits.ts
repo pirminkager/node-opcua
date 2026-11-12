@@ -1,0 +1,201 @@
+import "should";
+import { type AddressSpace, type Namespace, SessionContext } from "node-opcua-address-space";
+import { AttributeIds } from "node-opcua-basic-types";
+import { DataValue, TimestampsToReturn } from "node-opcua-data-value";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { coerceNodeId, type NodeId } from "node-opcua-nodeid";
+import { nodesets } from "node-opcua-nodesets";
+import { DeadbandType } from "node-opcua-service-subscription";
+import { StatusCodes } from "node-opcua-status-code";
+import { DataChangeFilter, DataChangeTrigger, MonitoredItemCreateRequest, MonitoringMode } from "node-opcua-types";
+import { DataType } from "node-opcua-variant";
+import sinon from "sinon";
+import { ServerEngine } from "../source/server_engine.js";
+import { Subscription } from "../source/server_subscription.js";
+import { getFakePublishEngine } from "./helper_fake_publish_engine.js";
+
+const fake_publish_engine = getFakePublishEngine();
+
+describe("SM3 - Subscriptions and MonitoredItems limits", function (this: Mocha.Suite) {
+    let addressSpace: AddressSpace;
+    let namespace: Namespace;
+
+    let engine: ServerEngine;
+
+    before((done: () => void) => {
+        engine = new ServerEngine({
+            applicationUri: "",
+            serverCapabilities: {
+                maxMonitoredItems: 10,
+                maxMonitoredItemsPerSubscription: 6
+            }
+        });
+
+        engine.initialize({ nodeset_filename: nodesets.standard }, () => {
+            if (!engine.addressSpace) {
+                throw new Error("addressSpace is null");
+            }
+            addressSpace = engine.addressSpace;
+            namespace = addressSpace.getOwnNamespace();
+
+            function addVar(typeName: string, value: unknown) {
+                namespace.index.should.eql(1);
+
+                namespace.addVariable({
+                    organizedBy: "RootFolder",
+                    nodeId: `s=Static_${typeName}`,
+                    browseName: `Static_${typeName}`,
+                    dataType: typeName,
+                    value: { dataType: (DataType as unknown as Record<string, number>)[typeName], value: value }
+                });
+            }
+
+            addVar("LocalizedText", { text: "Hello" });
+            addVar("ByteString", Buffer.from("AZERTY"));
+            addVar("SByte", 0);
+            addVar("Int16", 0);
+            addVar("Int32", 0);
+            addVar("Int64", 0);
+            addVar("Byte", 0);
+            addVar("UInt16", 0);
+            addVar("UInt32", 0);
+            addVar("UInt64", 0);
+            //xx            addVar("Duration"     , 0);
+            addVar("Float", 0);
+            addVar("Double", 0);
+
+            done();
+        });
+    });
+    after(async () => {
+        if (engine) {
+            await engine.shutdown();
+            engine.dispose();
+        }
+    });
+
+    let dataSourceFrozen = false;
+
+    function _freeze_data_source() {
+        dataSourceFrozen = true;
+    }
+
+    function unfreeze_data_source() {
+        dataSourceFrozen = false;
+    }
+
+    function install_spying_samplingFunc() {
+        unfreeze_data_source();
+        let sample_value = 0;
+        const spy_samplingEventCall = sinon.spy((_sessionContext, _oldValue, callback) => {
+            if (!dataSourceFrozen) {
+                sample_value++;
+            }
+            const dataValue = new DataValue({ value: { dataType: DataType.UInt32, value: sample_value } });
+            callback(null, dataValue);
+        });
+        return spy_samplingEventCall;
+    }
+
+    const globalCounter = {
+        totalMonitoredItemCount: 0
+    };
+
+    function makeSubscription() {
+        const subscription = new Subscription({
+            publishingInterval: 1000,
+            maxKeepAliveCount: 20,
+            publishEngine: fake_publish_engine,
+            globalCounter,
+            serverCapabilities: engine.serverCapabilities
+        });
+
+        (subscription as unknown as { $session: { nodeId: NodeId; sessionContext: SessionContext } }).$session = {
+            nodeId: coerceNodeId("i=5;s=tmp"),
+            sessionContext: SessionContext.defaultContext
+        };
+        subscription.on("monitoredItem", (monitoredItem) => {
+            monitoredItem.samplingFunc = install_spying_samplingFunc();
+        });
+        return subscription;
+    }
+    async function test_with_nodeId(subscription: Subscription, nodeId: NodeId) {
+        const monitoredItemCreateRequest = new MonitoredItemCreateRequest({
+            itemToMonitor: {
+                nodeId: nodeId,
+                attributeId: AttributeIds.Value
+            },
+            monitoringMode: MonitoringMode.Reporting,
+            requestedParameters: {
+                queueSize: 10,
+                samplingInterval: 100,
+                filter: new DataChangeFilter({
+                    trigger: DataChangeTrigger.Status,
+                    deadbandType: DeadbandType.None
+                })
+            }
+        });
+        const createResult = await subscription.createMonitoredItem(
+            addressSpace,
+            TimestampsToReturn.Both,
+            monitoredItemCreateRequest
+        );
+        return createResult.statusCode;
+    }
+    const namespaceSimulationIndex = 1;
+    const nodeId = coerceNodeId("s=Static_Int16", namespaceSimulationIndex);
+
+    it("SM3-A - it should refuse monitored Items if maxMonitoredItemsPerSubscription is reached ", async () => {
+        const subscription = makeSubscription();
+        try {
+            globalCounter.totalMonitoredItemCount.should.eql(0);
+            (await test_with_nodeId(subscription, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription, nodeId)).should.eql(StatusCodes.Good);
+            globalCounter.totalMonitoredItemCount.should.eql(6);
+            (await test_with_nodeId(subscription, nodeId)).should.eql(StatusCodes.BadTooManyMonitoredItems);
+            globalCounter.totalMonitoredItemCount.should.eql(6);
+        } finally {
+            subscription.terminate();
+            subscription.dispose();
+        }
+        subscription.monitoredItemCount.should.eql(0);
+        globalCounter.totalMonitoredItemCount.should.eql(0);
+    });
+    it("SM3-B - it should refuse monitored Items if maxMonitoredItems is reached ", async () => {
+        const subscription1 = makeSubscription();
+        const subscription2 = makeSubscription();
+
+        try {
+            (await test_with_nodeId(subscription1, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription1, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription1, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription1, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription1, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription1, nodeId)).should.eql(StatusCodes.Good);
+
+            globalCounter.totalMonitoredItemCount.should.eql(6);
+
+            (await test_with_nodeId(subscription2, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription2, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription2, nodeId)).should.eql(StatusCodes.Good);
+            (await test_with_nodeId(subscription2, nodeId)).should.eql(StatusCodes.Good);
+            globalCounter.totalMonitoredItemCount.should.eql(10);
+            (await test_with_nodeId(subscription2, nodeId)).should.eql(StatusCodes.BadTooManyMonitoredItems);
+            (await test_with_nodeId(subscription2, nodeId)).should.eql(StatusCodes.BadTooManyMonitoredItems);
+            globalCounter.totalMonitoredItemCount.should.eql(10);
+            subscription1.terminate();
+            subscription1.dispose();
+            subscription1.monitoredItemCount.should.eql(0);
+            globalCounter.totalMonitoredItemCount.should.eql(4);
+        } finally {
+            subscription2.terminate();
+            subscription2.dispose();
+        }
+        subscription2.monitoredItemCount.should.eql(0);
+        globalCounter.totalMonitoredItemCount.should.eql(0);
+    });
+});

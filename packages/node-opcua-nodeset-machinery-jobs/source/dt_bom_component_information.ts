@@ -1,0 +1,25 @@
+import type { EUInformation } from "node-opcua-data-access";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { DTStructure } from "node-opcua-nodeset-ua/dist/dt_structure.js";
+
+import type { DTOutputInformation } from "./dt_output_information.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |           |                                                            |
+ * |-----------|------------------------------------------------------------|
+ * | namespace |http://opcfoundation.org/UA/Machinery/Jobs/                 |
+ * | nodeClass |DataType                                                    |
+ * | name      |BOMComponentInformationDataType                             |
+ * | isAbstract|false                                                       |
+ */
+export interface DTBOMComponentInformation extends DTStructure {
+  /** Identification of the output.*/
+  identification: DTOutputInformation; // ExtensionObject ns=10;i=3012
+  /** Quantity defines the amount of material. This quantity can be specified in different ways, e.g. weight or number.*/
+  quantity: number; // Double ns=0;i=11
+  /** The engineering unit of the quantity.*/
+  engineeringUnits: EUInformation; // ExtensionObject ns=0;i=887
+}
+export interface UDTBOMComponentInformation extends ExtensionObject, DTBOMComponentInformation {};

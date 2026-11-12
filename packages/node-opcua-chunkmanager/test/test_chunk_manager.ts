@@ -1,0 +1,702 @@
+import { assert } from "node-opcua-assert";
+import { hexDump } from "node-opcua-debug";
+import should from "should";
+import { ChunkManager, Mode } from "../dist/index.js";
+
+function make_packet(packet_length: number) {
+    const buf = Buffer.allocUnsafe(packet_length);
+    buf.length.should.eql(packet_length);
+    for (let i = 0; i < buf.length; i++) {
+        buf.writeUInt8(i, i % 256);
+    }
+    return buf;
+}
+
+const doDebug = false;
+
+function computeFakeSignature(this: ChunkManager, _section_to_sign: Buffer) {
+    const signature = Buffer.allocUnsafe(4);
+    for (let i = 0; i < signature.length; i++) {
+        signature.writeUInt8(0xcc, i);
+    }
+    return signature;
+}
+
+function writeFakeHeader(this: ChunkManager, block: Buffer, _isLast: boolean, _total_length: number) {
+    for (let i = 0; i < this.headerSize; i++) {
+        block.writeUInt8(0xaa, i);
+    }
+}
+
+function writeFakeSequenceHeader(this: ChunkManager, block: Buffer) {
+    for (let i = 0; i < this.sequenceHeaderSize; i++) {
+        block.writeUInt8(0xbb, i);
+    }
+}
+
+function fake_encrypt_block(this: ChunkManager, block: Buffer) {
+    assert(this.plainBlockSize + 2 === this.cipherBlockSize);
+    assert(this.plainBlockSize === block.length);
+
+    const encrypted_block = Buffer.alloc(block.length + 2);
+    encrypted_block.writeUInt8(0xde, 0);
+    block.copy(encrypted_block, 1, 0, block.length);
+    encrypted_block.writeUInt8(0xdf, block.length + 1);
+    return encrypted_block;
+}
+
+function fake_encrypt_buffer(this: ChunkManager, buffer: Buffer) {
+    const encrypt_block = fake_encrypt_block;
+
+    assert(typeof encrypt_block === "function");
+
+    const nbBlocks = Math.ceil(buffer.length / this.plainBlockSize);
+
+    const outputBuffer = Buffer.alloc(nbBlocks * this.cipherBlockSize);
+
+    for (let i = 0; i < nbBlocks; i++) {
+        const currentBlock = buffer.subarray(this.plainBlockSize * i, this.plainBlockSize * (i + 1));
+
+        const encrypted_chunk = encrypt_block.call(this, currentBlock);
+
+        assert(encrypted_chunk.length === this.cipherBlockSize);
+        encrypted_chunk.copy(outputBuffer, i * this.cipherBlockSize);
+    }
+    return outputBuffer;
+}
+
+function no_encrypt_block(this: ChunkManager, block: Buffer): Buffer {
+    assert(this.plainBlockSize === this.cipherBlockSize);
+    return block;
+}
+
+function make_hex_block(hexString: string) {
+    return Buffer.from(hexString.split(" ").join(""), "hex");
+}
+
+describe("Chunk manager - no header - no signature - no encryption", () => {
+    it("should decompose a large single write in small chunks", () => {
+        const chunkManager = new ChunkManager(Mode.None, {
+            chunkSize: 48,
+            sequenceHeaderSize: 0,
+            signatureLength: 0,
+            cipherBlockSize: 0,
+            plainBlockSize: 0,
+            headerSize: 0
+        });
+
+        let chunk_counter = 0;
+        chunkManager.on("chunk", (chunk) => {
+            if (chunk_counter < 2) {
+                // all packets shall be 48 byte long, except last
+                chunk.length.should.equal(48);
+            } else {
+                // last packet is smaller
+                chunk.length.should.equal(12);
+            }
+            if (doDebug) {
+                console.log(` chunk ${chunk_counter} ${chunk.toString("hex")}`);
+            }
+            chunk_counter += 1;
+        });
+
+        // create a large buffer ( 2.3 time bigger than chunksize)
+        const n = 48 * 2 + 12;
+        const buf = make_packet(n);
+
+        // write this single buffer
+        chunkManager.write(buf, buf.length);
+        chunkManager.end();
+
+        chunk_counter.should.equal(3);
+    });
+
+    it("should decompose many small writes in small chunks", () => {
+        const chunkManager = new ChunkManager(Mode.None, {
+            chunkSize: 48,
+            sequenceHeaderSize: 0,
+            signatureLength: 0,
+            cipherBlockSize: 0,
+            plainBlockSize: 0,
+            headerSize: 0
+        });
+
+        chunkManager.chunkSize.should.equal(48);
+        chunkManager.maxBodySize.should.equal(48);
+
+        let chunk_counter = 0;
+        chunkManager.on("chunk", (chunk) => {
+            // console.log(" chunk "+ chunk_counter + " " + chunk.toString("hex"));
+            if (chunk_counter < 2) {
+                // all packets shall be 48 byte long, except last
+                chunk.length.should.equal(48);
+            } else {
+                // last packet is smaller
+                chunk.length.should.equal(12);
+            }
+            chunk_counter += 1;
+        });
+
+        // feed chunk-manager on byte at a time
+        const n = 48 * 2 + 12;
+        const buf = Buffer.alloc(1);
+        for (let i = 0; i < n; i += 1) {
+            buf.writeInt8(i, 0);
+            chunkManager.write(buf, 1);
+        }
+        // write this single buffer
+        chunkManager.end();
+        chunk_counter.should.equal(3);
+    });
+});
+
+function perform_test(
+    chunkManager: ChunkManager,
+    packet_length: number,
+    expected_chunk_lengths: (number | string)[],
+    done: (err?: Error) => void
+) {
+    let expected_chunks: Buffer[] = [];
+    if (typeof expected_chunk_lengths[0] === "string") {
+        // a string first element means the caller passed hex-block strings for every entry
+        expected_chunks = (expected_chunk_lengths as string[]).map(make_hex_block);
+        expected_chunk_lengths = expected_chunks.map((b) => b.length);
+    }
+    let chunk_counter = 0;
+
+    chunkManager.on("chunk", (chunk, is_last) => {
+        doDebug && console.log("chunk = ", chunk.toString("hex"));
+        should.exist(chunk);
+
+        chunk_counter.should.not.be.greaterThan(expected_chunk_lengths.length);
+
+        chunk.length.should.eql(expected_chunk_lengths[chunk_counter], ` testing chunk ${chunk_counter}`);
+
+        if (expected_chunks && expected_chunks.length > 0) {
+            if (doDebug) {
+                console.log(hexDump(chunk));
+                console.log(hexDump(expected_chunks[chunk_counter]));
+            }
+            chunk.toString("hex").should.equal(expected_chunks[chunk_counter].toString("hex"));
+        }
+        chunk_counter += 1;
+        if (chunk_counter === expected_chunk_lengths.length) {
+            is_last.should.equal(true);
+            done();
+        } else {
+            is_last.should.equal(false);
+        }
+    });
+
+    const buf = make_packet(packet_length);
+
+    chunkManager.write(buf);
+    chunkManager.end();
+}
+
+describe("Chunk Manager (chunk size 32 bytes, sequenceHeaderSize: 8 bytes)", () => {
+    let chunkManager: ChunkManager;
+
+    beforeEach(() => {
+        chunkManager = new ChunkManager(Mode.None, {
+            chunkSize: 32,
+
+            sequenceHeaderSize: 8,
+            writeSequenceHeaderFunc: writeFakeSequenceHeader,
+
+            headerSize: 0,
+            writeHeaderFunc: undefined,
+
+            cipherBlockSize: 0,
+            plainBlockSize: 0,
+            encryptBufferFunc: undefined,
+
+            signatureLength: 0,
+            signBufferFunc: undefined
+        });
+    });
+
+    it("should transform a 32 bytes message into a chunk of 32 bytes and 16 bytes", (done) => {
+        // block 1 : [ 0  +  8 +  24 ] = 32
+        // block 2 : [ 0  +  8 +   8 ] = 16
+        //                      ------
+        //                        32
+        perform_test(chunkManager, 32, [32, 16], done);
+    });
+    it("should transform a 33 bytes message into a chunk of 32 bytes and 17 bytes", (done) => {
+        // block 1 : [ 0  +  8 +  24 ] = 32
+        // block 2 : [ 0  +  8 +   9 ] = 17
+        //                      ------
+        //                        33
+        perform_test(chunkManager, 33, [32, 17], done);
+    });
+});
+describe("Sign - Chunk Manager (chunk size 32 bytes, sequenceHeaderSize: 8 bytes ,signatureLength: 4 )", () => {
+    let chunkManager: ChunkManager;
+
+    beforeEach(() => {
+        chunkManager = new ChunkManager(Mode.Sign, {
+            chunkSize: 32,
+
+            headerSize: 0,
+            writeHeaderFunc: undefined,
+
+            sequenceHeaderSize: 8,
+            writeSequenceHeaderFunc: writeFakeSequenceHeader,
+
+            signatureLength: 4,
+            signBufferFunc: computeFakeSignature,
+
+            cipherBlockSize: 0,
+            plainBlockSize: 0,
+            encryptBufferFunc: undefined
+        });
+    });
+
+    it("should transform a 32 bytes message into a chunk of 32 bytes and 24 bytes", (done) => {
+        // C1 = [ 8 + 20 + 4] = 32
+        // C2 = [ 8 + 12 + 4] = 24
+        //           ----
+        //            32
+        perform_test(chunkManager, 32, [32, 24], done);
+    });
+
+    it("should transform a 33 bytes message into a chunk of 32 bytes and 25 bytes", (done) => {
+        // C1 = [ 8 + 20 + 4] = 32
+        // C2 = [ 8 + 13 + 4] = 25
+        //           ----
+        //            33
+        perform_test(chunkManager, 33, [32, 25], done);
+    });
+});
+
+describe("Sign&Encrypt: Chunk Manager Padding (chunk size 32 bytes, plainBlockSize 8 bytes ,cipherBlockSize 8 bytes )\n", () => {
+    let chunkManager: ChunkManager;
+
+    beforeEach(() => {
+        chunkManager = new ChunkManager(Mode.SignAndEncrypt, {
+            chunkSize: 32,
+
+            plainBlockSize: 8,
+            cipherBlockSize: 8,
+            encryptBufferFunc: no_encrypt_block,
+
+            headerSize: 4,
+            writeHeaderFunc: writeFakeHeader,
+
+            sequenceHeaderSize: 2,
+            writeSequenceHeaderFunc: writeFakeSequenceHeader,
+
+            signatureLength: 4,
+            signBufferFunc: computeFakeSignature
+        });
+        chunkManager.chunkSize.should.equal(32);
+        chunkManager.maxBodySize.should.equal(17);
+        // chunkManager.signBufferFunc.should.equal(computeFakeSignature);
+    });
+
+    it("should transform a  1 bytes message into a single 12 bytes chunk", (done) => {
+        //
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  1            | 1 +  0      |  4    |=> 4 +  ( 2+ 1 + (1 + 0) + 4 ) = 4 + 8
+        // +-------+---------------+---------------+-------------+-------+
+        perform_test(chunkManager, 1, [12], done);
+    });
+
+    it("should transform a  2 bytes message into a single 20 bytes chunk", (done) => {
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  2            | 1 + 7       |  4    | => 4 +  ( 2+ 2 + (1 + 7) + 4 ) = 4 + 16
+        // +-------+---------------+---------------+-------------+-------+
+        perform_test(chunkManager, 2, [20], done);
+    });
+
+    it("should transform a 10 bytes message into a single 28 bytes chunk", (done) => {
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  10            | 1 + 7       |  4    |
+        // +-------+---------------+---------------+-------------+-------+
+        //           ( 2 + 4 + 2 + 1+[p=7] ) % 8 = 0 !
+        perform_test(chunkManager, 10, [28], done);
+    });
+
+    it("should transform a 32 bytes message into two 28 bytes chunks", (done) => {
+        //
+        // 1234567890123456890123456789012
+        //       12345678901234567
+        // HHHHSSDDDDDDDDDDDDDDDDDPSSSS
+        //     --------++++++++--------
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  17           | 1 + 0       |  4    | => 4 +  ( 2+ 17 + 1 + 0 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        // |   4   |   2           |  15           | 1 + 2       |  4    | => 4 +  ( 2+ 15 + 1 + 2 + 4)  = 28
+        // +-------+---------------+---------------+-------------+-------+
+        //                            32
+        perform_test(chunkManager, 32, [28, 28], done);
+    });
+
+    it("should transform a 64 bytes message into four 28 bytes chunks ", (done) => {
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  17           | 1 + 0       |  4    | => 4 +  ( 2+ 17 + 1 + 0 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        // |   4   |   2           |  17           | 1 + 0       |  4    | => 4 +  ( 2+ 17 + 1 + 0 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        // |   4   |   2           |  17           | 1 + 0       |  4    | => 4 +  ( 2+ 17 + 1 + 0 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        // |   4   |   2           |  13           | 1 + 0       |  4    | => 4 +  ( 2+ 15 + 1 + 2 + 4)  = 28
+        // +-------+---------------+---------------+-------------+-------+
+        //                            64
+        perform_test(chunkManager, 64, [28, 28, 28, 28], done);
+    });
+
+    it("should transform a 16 bytes message into a single chunk ", (done) => {
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  16           | 1 + 1       |  4    | => 4 +  ( 2+ 16 + 1 + 1 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        perform_test(chunkManager, 16, [28], done);
+    });
+
+    it("should transform a 17 bytes message into a single chunk ", (done) => {
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  17           | 1 + 0       |  4    | => 4 +  ( 2+ 17 + 1 + 0 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        perform_test(chunkManager, 17, [28], done);
+    });
+
+    it("should transform a 35 bytes message into a  chunk of 32 bytes followed by a chunk of 8 bytes", (done) => {
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   4   |   2           |  17           | 1 + 0       |  4    | => 4 +  ( 2+ 17 + 1 + 0 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        // |   4   |   2           |  17           | 1 + 0       |  4    | => 4 +  ( 2+ 17 + 1 + 0 + 4 ) = 4 + 24 = 28
+        // +-------+---------------+---------------+-------------+-------+                (%8=0!)
+        // |   4   |   2           |  1            | 1 +  0      |  4    |=> 4 +  ( 2+ 1 + (1 + 0) + 4 ) = 4 + 8  = 12
+        // +-------+---------------+---------------+-------------+-------+
+        perform_test(chunkManager, 35, [28, 28, 12], done);
+    });
+});
+
+describe("Chunk Manager Padding (chunk size 32 bytes, plainBlockSize 6 bytes ,cipherBlockSize 8 bytes )", () => {
+    let chunkManager: ChunkManager;
+
+    beforeEach(() => {
+        chunkManager = new ChunkManager(Mode.SignAndEncrypt, {
+            chunkSize: 64,
+
+            headerSize: 8,
+            writeHeaderFunc: writeFakeHeader,
+
+            sequenceHeaderSize: 8,
+            writeSequenceHeaderFunc: writeFakeSequenceHeader,
+
+            plainBlockSize: 6,
+            cipherBlockSize: 8,
+            encryptBufferFunc: fake_encrypt_buffer,
+
+            signatureLength: 4,
+            signBufferFunc: computeFakeSignature
+        });
+        chunkManager.chunkSize.should.equal(64);
+        chunkManager.maxBodySize.should.equal(29);
+    });
+    it("should transform a 1 byte message into a single chunk", (done) => {
+        // +-------+---------------+---------------+-------------+-------+
+        // |Header |SequenceHeader | data          | paddingByte | sign  |
+        // +-------+---------------+---------------+-------------+-------+
+        // |   8   |   8           |  1            | 1 +  0      |  4    |=> 8 +  ( 8 + 1 + (1 + 4) + 4 ) = 8 + 3*6
+        // |       |               |               |             |       |   8 + 3*8 = 32
+        // +-------+---------------+---------------+-------------+-------+
+        const expected = [
+            //0102030405060708 0910111213141516 17 1819202122 23242526
+            //0102030405060708 0102030405060708 01 0102030405 01020304
+            //aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb dd 0404040404 cccccccc"
+            //0102030405060708091011121314151617181920212223242526272829303132
+            "aaaaaaaaaaaaaaaaDEbbbbbbbbbbbbDFDEbbbb00040404DFDE0404ccccccccDF"
+        ];
+        perform_test(chunkManager, 1, expected, done);
+    });
+    it("should transform a 2 byte message into a single chunk", (done) => {
+        const expected = ["aaaaaaaaaaaaaaaaDEbbbbbbbbbbbbDFDEbbbb00010303DFDE0303ccccccccDF"];
+        perform_test(chunkManager, 2, expected, done);
+    });
+    it("should transform a 3 byte message into a single chunk", (done) => {
+        const expected = ["aaaaaaaaaaaaaaaaDEbbbbbbbbbbbbDFDEbbbb00010202DFDE0202ccccccccDF"];
+        perform_test(chunkManager, 3, expected, done);
+    });
+    it("should transform a 4 byte message into a single chunk", (done) => {
+        const expected = ["aaaaaaaaaaaaaaaaDEbbbbbbbbbbbbDFDEbbbb00010203DFDE0101ccccccccDF"];
+        perform_test(chunkManager, 4, expected, done);
+    });
+    it("should transform a 5 byte message into a single chunk", (done) => {
+        const expected = ["aaaaaaaaaaaaaaaaDEbbbbbbbbbbbbDFDEbbbb00010203DFDE0400ccccccccDF"];
+        perform_test(chunkManager, 5, expected, done);
+    });
+    it("should transform a 6 byte message into a single chunk", (done) => {
+        const expected = ["aaaaaaaaaaaaaaaaDEbbbbbbbbbbbbDFDEbbbb00010203DFDE040505050505DFDE0505ccccccccDF"];
+        perform_test(chunkManager, 6, expected, done);
+    });
+    it("should transform a 29 byte message into a single chunk", (done) => {
+        const expected = [
+            "aaaaaaaaaaaaaaaa" +
+                "DEbbbbbbbbbbbbDF" +
+                "DEbbbb00010203DF" +
+                "DE040506070809DF" +
+                "DE0A0B0C0D0E0FDF" +
+                "DE101112131415DF" +
+                "DE161718191A1BDF" +
+                "DE1C00ccccccccDF"
+        ];
+        perform_test(chunkManager, 29, expected, done);
+    });
+
+    it("should transform a 30 byte message into a single chunk", (done) => {
+        const expected = [
+            "aaaaaaaaaaaaaaaa" +
+                "DEbbbbbbbbbbbbDF" +
+                "DEbbbb00010203DF" +
+                "DE040506070809DF" +
+                "DE0A0B0C0D0E0FDF" +
+                "DE101112131415DF" +
+                "DE161718191A1BDF" +
+                "DE1C00ccccccccDF",
+            "aaaaaaaaaaaaaaaa" + "DEbbbbbbbbbbbbDF" + "DEbbbb1d040404DF" + "DE0404ccccccccDF"
+        ];
+        perform_test(chunkManager, 30, expected, done);
+    });
+});
+
+describe("ChunkManager chunk buffer sizing without encryption", () => {
+    function patterned(length: number, seed = 0): Buffer {
+        const buffer = Buffer.alloc(length);
+        for (let i = 0; i < length; i++) {
+            buffer[i] = (i + seed) % 251;
+        }
+        return buffer;
+    }
+
+    function signedManager(chunkSize: number): ChunkManager {
+        return new ChunkManager(Mode.Sign, {
+            chunkSize,
+            headerSize: 8,
+            sequenceHeaderSize: 8,
+            signatureLength: 4,
+            cipherBlockSize: 0,
+            plainBlockSize: 0,
+            signBufferFunc: computeFakeSignature,
+            writeHeaderFunc: writeFakeHeader,
+            writeSequenceHeaderFunc: writeFakeSequenceHeader
+        });
+    }
+
+    function collect(chunkManager: ChunkManager): Buffer[] {
+        const chunks: Buffer[] = [];
+        chunkManager.on("chunk", (chunk: Buffer) => chunks.push(chunk));
+        return chunks;
+    }
+
+    /**
+     * the sizes asked of Buffer.allocUnsafe while `action` runs. The ArrayBuffer behind a chunk
+     * says nothing: a small buffer is carved out of Node's pool, whose size depends on the runtime.
+     */
+    function allocatedSizes(action: () => void): number[] {
+        const sizes: number[] = [];
+        const allocUnsafe = Buffer.allocUnsafe;
+        Buffer.allocUnsafe = (size: number) => {
+            sizes.push(size);
+            return allocUnsafe(size);
+        };
+        try {
+            action();
+        } finally {
+            Buffer.allocUnsafe = allocUnsafe;
+        }
+        return sizes;
+    }
+
+    it("a small message does not allocate a chunkSize buffer", () => {
+        const chunkManager = signedManager(65536);
+        const chunks = collect(chunkManager);
+        const body = patterned(5000);
+
+        const sizes = allocatedSizes(() => {
+            chunkManager.write(body, body.length);
+            chunkManager.end();
+        });
+
+        should(chunks.length).eql(1);
+        should(chunks[0].length).eql(8 + 8 + 5000 + 4);
+        // the chunk, sized to the message, and nothing larger (the signature is allocated too)
+        should(Math.max(...sizes)).eql(8 + 8 + 5000 + 4);
+        should(chunks[0].subarray(16, 16 + 5000).equals(body)).eql(true);
+        should(chunks[0].subarray(16 + 5000).toString("hex")).eql("cccccccc");
+    });
+
+    it("grows the chunk when a message is written in several pieces", () => {
+        const chunkManager = signedManager(65536);
+        const chunks = collect(chunkManager);
+        const pieces = [patterned(100, 1), patterned(5000, 2), patterned(20000, 3)];
+
+        for (const piece of pieces) {
+            chunkManager.write(piece, piece.length);
+        }
+        chunkManager.end();
+
+        should(chunks.length).eql(1);
+        should(chunks[0].length).eql(8 + 8 + 25100 + 4);
+        should(chunks[0].subarray(16, 16 + 25100).equals(Buffer.concat(pieces))).eql(true);
+        should(chunks[0].subarray(0, 8).toString("hex")).eql("aaaaaaaaaaaaaaaa");
+        should(chunks[0].subarray(8, 16).toString("hex")).eql("bbbbbbbbbbbbbbbb");
+    });
+
+    it("still splits a message that does not fit in one chunk", () => {
+        const chunkManager = signedManager(8192);
+        const chunks = collect(chunkManager);
+        const body = patterned(20000);
+
+        chunkManager.write(body, 100);
+        chunkManager.write(body.subarray(100), body.length - 100);
+        chunkManager.end();
+
+        const maxBody = 8192 - 8 - 8 - 4;
+        should(chunks.length).eql(Math.ceil(20000 / maxBody));
+        const reassembled = Buffer.concat(chunks.map((chunk) => chunk.subarray(16, chunk.length - 4)));
+        should(reassembled.equals(body)).eql(true);
+        for (const chunk of chunks) {
+            should(chunk.length).be.belowOrEqual(8192);
+        }
+    });
+});
+
+describe("ChunkManager chunk buffer sizing with symmetric encryption", () => {
+    // header 8 | sequence header 8 | body | padding byte | padding | signature 4, the encrypted area
+    // (sequence header to signature) a multiple of the 16-byte block; encryption keeps the size, as AES does
+    const headerSize = 8;
+    const sequenceHeaderSize = 8;
+    const signatureLength = 4;
+    const block = 16;
+
+    function patterned(length: number, seed = 0): Buffer {
+        const buffer = Buffer.alloc(length);
+        for (let i = 0; i < length; i++) {
+            buffer[i] = (i + seed) % 251;
+        }
+        return buffer;
+    }
+
+    function encryptingManager(chunkSize: number): ChunkManager {
+        return new ChunkManager(Mode.SignAndEncrypt, {
+            chunkSize,
+            headerSize,
+            sequenceHeaderSize,
+            signatureLength,
+            cipherBlockSize: block,
+            plainBlockSize: block,
+            encryptBufferFunc: no_encrypt_block,
+            signBufferFunc: computeFakeSignature,
+            writeHeaderFunc: writeFakeHeader,
+            writeSequenceHeaderFunc: writeFakeSequenceHeader
+        });
+    }
+
+    function collect(chunkManager: ChunkManager): Buffer[] {
+        const chunks: Buffer[] = [];
+        chunkManager.on("chunk", (chunk: Buffer) => chunks.push(chunk));
+        return chunks;
+    }
+
+    function allocatedSizes(action: () => void): number[] {
+        const sizes: number[] = [];
+        const allocUnsafe = Buffer.allocUnsafe;
+        Buffer.allocUnsafe = (size: number) => {
+            sizes.push(size);
+            return allocUnsafe(size);
+        };
+        try {
+            action();
+        } finally {
+            Buffer.allocUnsafe = allocUnsafe;
+        }
+        return sizes;
+    }
+
+    /** the body of a chunk laid out as above, its padding checked */
+    function bodyOf(chunk: Buffer): Buffer {
+        const paddingByte = chunk[chunk.length - signatureLength - 1];
+        const bodyEnd = chunk.length - signatureLength - 1 - paddingByte;
+        const padding = chunk.subarray(bodyEnd, chunk.length - signatureLength);
+        should(padding.every((value) => value === paddingByte)).eql(true, "every padding byte holds the padding count");
+        should((chunk.length - headerSize) % block).eql(0, "the encrypted area is whole blocks");
+        should(chunk.subarray(chunk.length - signatureLength).toString("hex")).eql("cccccccc");
+        return chunk.subarray(headerSize + sequenceHeaderSize, bodyEnd);
+    }
+
+    for (const [bodyLength, padding] of [
+        [100, 15],
+        [3, 0],
+        [4, 15],
+        [5000, 11]
+    ]) {
+        it(`a ${bodyLength}-byte message (${padding} padding bytes) does not allocate a chunkSize buffer`, () => {
+            const chunkManager = encryptingManager(65536);
+            const chunks = collect(chunkManager);
+            const body = patterned(bodyLength);
+
+            const sizes = allocatedSizes(() => {
+                chunkManager.write(body, body.length);
+                chunkManager.end();
+            });
+
+            should(chunks.length).eql(1);
+            should(chunks[0].length).eql(headerSize + sequenceHeaderSize + bodyLength + 1 + padding + signatureLength);
+            // the chunk, sized to the message and its padding, and nothing larger
+            should(Math.max(...sizes)).be.belowOrEqual(headerSize + sequenceHeaderSize + bodyLength + block + 2 + signatureLength);
+            should(bodyOf(chunks[0]).equals(body)).eql(true);
+        });
+    }
+
+    it("grows the chunk when a message is written in several pieces", () => {
+        const chunkManager = encryptingManager(65536);
+        const chunks = collect(chunkManager);
+        const pieces = [patterned(100, 1), patterned(5000, 2), patterned(20000, 3)];
+
+        const sizes = allocatedSizes(() => {
+            for (const piece of pieces) {
+                chunkManager.write(piece, piece.length);
+            }
+            chunkManager.end();
+        });
+
+        should(chunks.length).eql(1);
+        should(bodyOf(chunks[0]).equals(Buffer.concat(pieces))).eql(true);
+        should(Math.max(...sizes)).be.below(65536);
+    });
+
+    it("still splits a message that does not fit in one chunk", () => {
+        const chunkManager = encryptingManager(8192);
+        const chunks = collect(chunkManager);
+        const body = patterned(20000);
+
+        chunkManager.write(body, 100);
+        chunkManager.write(body.subarray(100), body.length - 100);
+        chunkManager.end();
+
+        should(chunks.length).eql(Math.ceil(20000 / chunkManager.maxBodySize));
+        for (const chunk of chunks) {
+            should(chunk.length).be.belowOrEqual(8192);
+        }
+        should(Buffer.concat(chunks.map(bodyOf)).equals(body)).eql(true);
+    });
+});

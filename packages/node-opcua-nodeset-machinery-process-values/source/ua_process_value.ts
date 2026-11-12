@@ -1,0 +1,93 @@
+import type { UAMethod, UAProperty } from "node-opcua-address-space-base";
+import type { UInt16 } from "node-opcua-basic-types";
+import type { EUInformation } from "node-opcua-data-access";
+import type { UAAnalogSignal, UAAnalogSignal_Base } from "node-opcua-nodeset-padim/dist/ua_analog_signal.js";
+import type { UAAnalogSignalVariable } from "node-opcua-nodeset-padim/dist/ua_analog_signal_variable.js";
+import type { DTRange } from "node-opcua-nodeset-ua/dist/dt_range.js";
+import type { UAAnalogUnit } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { UAAnalogUnitRange } from "node-opcua-nodeset-ua/dist/ua_analog_unit_range.js";
+import type { UAExclusiveDeviationAlarm } from "node-opcua-nodeset-ua/dist/ua_exclusive_deviation_alarm.js";
+import type { UAExclusiveLimitAlarm } from "node-opcua-nodeset-ua/dist/ua_exclusive_limit_alarm.js";
+import type { UAMultiStateValueDiscrete } from "node-opcua-nodeset-ua/dist/ua_multi_state_value_discrete.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { UAProcessValueSetpointVariable } from "./ua_process_value_setpoint_variable.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAProcessValue_analogSignal<T, DT extends DataType> extends Omit<UAAnalogSignalVariable<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+      /**
+       * highHighLimit
+       * Defines the absolute high high limit
+       */
+      highHighLimit?: UAAnalogUnit<any, any>;
+      /**
+       * highLimit
+       * Defines the absolute high limit
+       */
+      highLimit?: UAAnalogUnit<any, any>;
+      /**
+       * lowLimit
+       * Defines the absolute low limit
+       */
+      lowLimit?: UAAnalogUnit<any, any>;
+      /**
+       * lowLowLimit
+       * Defines the absolute low low limit
+       */
+      lowLowLimit?: UAAnalogUnit<any, any>;
+      /**
+       * percentageValue
+       * Provides the process value in percentage.
+       */
+      percentageValue?: UAAnalogUnitRange<number, DataType.Double>;
+}
+/**
+ * Represents a process value
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Machinery/ProcessValues/        |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ProcessValueType i=1003                                     |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAProcessValue_Base extends UAAnalogSignal_Base {
+    /**
+     * alarmSuppression
+     * Indicates if alarms based on the Status shall be
+     * suppressed.
+     */
+    alarmSuppression?: UAMultiStateValueDiscrete<UInt16, DataType.UInt16>;
+    /**
+     * analogSignal
+     * The process value.
+     */
+    analogSignal: UAProcessValue_analogSignal<any, any>;
+    /**
+     * deviationAlarm
+     * Becomes active, when the process values derivates
+     * from the ProcessValueSetpoint.
+     */
+    deviationAlarm?: UAExclusiveDeviationAlarm;
+    /**
+     * limitAlarm
+     * Becomes active, when absolute limits are reached.
+     */
+    limitAlarm?: UAExclusiveLimitAlarm;
+    /**
+     * processValueSetpoint
+     * The desired value, may or may not be controlled
+     * by the server.
+     */
+    processValueSetpoint?: UAProcessValueSetpointVariable<any, any>;
+    /**
+     * status
+     * Indicates if a limit has been reached.
+     */
+    status?: UAMultiStateValueDiscrete<UInt16, DataType.UInt16>;
+    zeroPointAdjustment?: UAMethod;
+}
+export interface UAProcessValue extends Omit<UAAnalogSignal, "analogSignal"|"zeroPointAdjustment">, UAProcessValue_Base {}

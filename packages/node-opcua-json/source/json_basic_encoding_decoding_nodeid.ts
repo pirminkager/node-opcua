@@ -1,0 +1,411 @@
+/**
+ * ==========================================================================
+ * Copyright (c) 2021-2026 Sterfive - etienne.rossignon@sterfive.com
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ * ==========================================================================
+ */
+import { coerceNodeId, ExpandedNodeId, NodeId, NodeIdType } from "node-opcua-nodeid"; // -nodeid";
+import type { ExtensionObjectBuilder } from "./json_basic_encoding_body_functor.js";
+import { JsonEncodingScheme } from "./json_encoding_scheme.js";
+import { OPCUA_NAMESPACE_URI } from "./json_opcua_namespace.js";
+
+// from https://reference.opcfoundation.org/Core/Part6/v105/docs/5.4
+
+// NodeId values shall be encoded as a JSON string using the format defined in
+// https://reference.opcfoundation.org/Core/Part6/v105/docs/5.1.12#_Ref122651839
+// .
+//  NodeIds in NamespaceIndex 0 use the <identifier> form.
+//  All other NodeIds use the <namespace-uri> form.
+//
+// The first abnormal state occurs when the encoder cannot map a NamespaceIndex to a NamespaceUri.
+// In this case, the encoder shall encode the NamespaceIndex using the <namespace-index > form.
+// The decoder shall pass this NamespaceIndex to the application.
+//
+// The second abnormal state occurs when the decoder cannot convert a NamespaceUri to a NamespaceIndex.
+// If this occurs the decoder shall set the NamespaceIndex to 0, the IdType to String and the
+// Identifier to the JSON string.
+export interface NodeIdJSON104 {
+    IdType?: 0 | 1 | 2 | 3;
+    Id: number | string;
+    Namespace?: number | string;
+    /** ExpandedNodeId only: the ServerIndex, omitted when 0 (Part 6 1.04 clause 5.4.2.11) */
+    ServerUri?: number;
+}
+export type NodeIdJSON105 = string;
+export type NodeIdJSON = NodeIdJSON104 | NodeIdJSON105;
+
+const nodeIdValueToJson = (value: NodeId): string | number => {
+    switch (value.identifierType) {
+        case NodeIdType.NUMERIC:
+            return value.value as number;
+        case NodeIdType.STRING:
+            return value.value as string;
+        case NodeIdType.GUID:
+            return value.value as string;
+        case NodeIdType.BYTESTRING:
+            return (value.value as Buffer).toString("base64");
+        default:
+            throw new Error(`Unknown NodeId identifier type: ${value.identifierType}`);
+    }
+};
+
+const nodeIdValueToString = (value: NodeId): string => {
+    switch (value.identifierType) {
+        case NodeIdType.NUMERIC:
+            return `i=${value.value as number}`;
+
+        case NodeIdType.STRING:
+            return `s=${value.value as string}`;
+
+        case NodeIdType.GUID:
+            return `g=${value.value as string}`;
+        case NodeIdType.BYTESTRING:
+            return `b=${(value.value as Buffer).toString("base64")}`;
+        default:
+            throw new Error(`Unknown NodeId identifier type: ${value.identifierType}`);
+    }
+};
+/**
+ *
+ * IdType	   The IdentifierType encoded as a JSON number.
+ *             Allowed values are:
+ *               0 - UInt32 Identifier encoded as a JSON number.
+ *               1 - A String Identifier encoded as a JSON string.
+ *               2 - A Guid Identifier.
+ *               3 - A ByteString Identifier
+ *
+ *             This field is omitted for UInt32 identifiers.
+ *
+ *  Id         The Identifier.
+ *             The value of the id field specifies the encoding of this field.
+ *
+ *  Namespace	The NamespaceIndex for the NodeId.
+ *              The field is encoded as a JSON number for the reversible encoding.
+ *              The field is omitted if the NamespaceIndex equals 0.
+ *              For the non-reversible encoding, the field is the NamespaceUri associated with the NamespaceIndex,
+ *              encoded as a JSON string.
+ *  A NamespaceIndex of 1 is always encoded as a JSON number.
+ */
+
+export function opcuaJsonEncodeNodeId104(
+    value: NodeId,
+    scheme = JsonEncodingScheme.DeprecatedReversible,
+    namespaceArray?: string[]
+): NodeIdJSON104 {
+    const nodeIdIdentifierTypeToJSON = () => {
+        switch (value.identifierType) {
+            case NodeIdType.NUMERIC:
+                return 0;
+            case NodeIdType.STRING:
+                return 1;
+            case NodeIdType.GUID:
+                return 2;
+            default:
+                return 3;
+        }
+    };
+    const IdType = nodeIdIdentifierTypeToJSON();
+
+    const Id = nodeIdValueToJson(value);
+
+    const pojo: NodeIdJSON = { Id };
+    if (IdType !== 0) {
+        pojo.IdType = IdType as 1 | 2 | 3;
+    }
+    if (value.namespace === 0) {
+        return pojo;
+    }
+    const reversible = !(scheme === JsonEncodingScheme.DeprecatedNonReversible);
+
+    if (value.namespace === 1 || reversible || !namespaceArray) {
+        pojo.Namespace = value.namespace;
+        return pojo;
+    }
+    pojo.Namespace = namespaceArray[value.namespace];
+    return pojo;
+}
+
+export function opcuaJsonEncodeNodeIdAsString(value: NodeId, namespaceArray: string[]): string {
+    const namespace = namespaceArray ? namespaceArray[value.namespace] : undefined;
+    if (namespace) {
+        if (namespace === OPCUA_NAMESPACE_URI) {
+            return `${nodeIdValueToString(value)}`;
+        }
+        const encodedNamespace = opcuaEncodeURIComponent(namespace);
+        return `nsu=${encodedNamespace};${nodeIdValueToString(value)}`;
+    } else {
+        if (value.namespace === 0) {
+            return nodeIdValueToString(value);
+        }
+        // If the namespace is not found, we assume it is a new namespace
+        return `ns=${value.namespace};${nodeIdValueToString(value)}`;
+    }
+}
+export function opcuaJsonEncodeExpandedNodeIdAsString(value: ExpandedNodeId, namespaceArray: string[]): string {
+    // the NamespaceUri of an ExpandedNodeId names its namespace (nsu=); svu= is the URI of a
+    // server, which is only known through a ServerArray this encoder does not have
+    let result: string;
+    if (value.namespaceUri && value.namespaceUri !== OPCUA_NAMESPACE_URI) {
+        result = `nsu=${opcuaEncodeURIComponent(value.namespaceUri)};${nodeIdValueToString(value)}`;
+    } else if (value.namespaceUri) {
+        result = nodeIdValueToString(value);
+    } else {
+        // the NamespaceIndex of a remote node refers to the remote server's namespace table, which
+        // is not the local one: it stays an index (OPC 10000-4 7.16, OPC 10000-6 5.4.2.10)
+        result = opcuaJsonEncodeNodeIdAsString(value, value.serverIndex !== 0 ? [] : namespaceArray);
+    }
+    if (value.serverIndex !== 0) {
+        result = `svr=${value.serverIndex};${result}`;
+    }
+    return result;
+}
+
+export function opcuaJsonEncodeNodeId105(
+    value: NodeId,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): NodeIdJSON105 | undefined {
+    if (value.namespace === 0 && value.identifierType === NodeIdType.NUMERIC && value.value === 0) {
+        if (scheme === JsonEncodingScheme.Compact) {
+            return undefined;
+        }
+    }
+
+    return opcuaJsonEncodeNodeIdAsString(value, namespaceArray || []);
+}
+
+export function opcuaJsonEncodeExpandedNodeId105(
+    value: ExpandedNodeId,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): NodeIdJSON105 | undefined {
+    if (value.namespace === 0 && value.identifierType === NodeIdType.NUMERIC && value.value === 0 && value.serverIndex === 0) {
+        if (scheme === JsonEncodingScheme.Compact) {
+            return undefined;
+        }
+    }
+    return opcuaJsonEncodeExpandedNodeIdAsString(value, namespaceArray || []);
+}
+
+export function opcuaJsonEncodeNodeId(
+    value: NodeId,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): NodeIdJSON | undefined {
+    switch (scheme) {
+        case JsonEncodingScheme.DeprecatedReversible:
+            return opcuaJsonEncodeNodeId104(value, scheme, namespaceArray);
+        case JsonEncodingScheme.DeprecatedNonReversible:
+            return opcuaJsonEncodeNodeId104(value, scheme, namespaceArray);
+        case JsonEncodingScheme.Compact:
+            return opcuaJsonEncodeNodeId105(value, scheme, namespaceArray);
+        case JsonEncodingScheme.Verbose:
+            return opcuaJsonEncodeNodeId105(value, scheme, namespaceArray);
+        default:
+            throw new Error(`Invalid JsonEncodingScheme: ${scheme}`);
+    }
+}
+export function opcuaJsonEncodeExpandedNodeId(
+    value: ExpandedNodeId,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): NodeIdJSON | undefined {
+    switch (scheme) {
+        case JsonEncodingScheme.DeprecatedReversible:
+        case JsonEncodingScheme.DeprecatedNonReversible:
+            return opcuaJsonEncodeExpandedNodeId104(value, scheme, namespaceArray);
+        case JsonEncodingScheme.Compact:
+        case JsonEncodingScheme.Verbose:
+            return opcuaJsonEncodeExpandedNodeId105(value, scheme, namespaceArray);
+        default:
+            throw new Error(`Invalid JsonEncodingScheme: ${scheme}`);
+    }
+}
+
+/**
+ * Part 6 1.04 clause 5.4.2.11: an ExpandedNodeId is the NodeId object plus a ServerUri field
+ * carrying the ServerIndex, omitted when 0. A NamespaceUri set on the ExpandedNodeId wins over
+ * the index in the non-reversible form, where the namespace is written as a URI anyway.
+ */
+export function opcuaJsonEncodeExpandedNodeId104(
+    value: ExpandedNodeId,
+    scheme: JsonEncodingScheme,
+    namespaceArray?: string[]
+): NodeIdJSON104 {
+    // a remote node's NamespaceIndex is not in the local table: it stays a number
+    const pojo = opcuaJsonEncodeNodeId104(value, scheme, value.serverIndex !== 0 ? undefined : namespaceArray);
+    if (value.namespaceUri) {
+        // 1.04 Table 24, Annex H.3: a NamespaceUri that is specified is written as a JSON string,
+        // in the reversible form too
+        pojo.Namespace = value.namespaceUri;
+    }
+    if (value.serverIndex !== 0) {
+        pojo.ServerUri = value.serverIndex;
+    }
+    return pojo;
+}
+
+export function opcuaEncodeURIComponent(value: string): string {
+    return value.replace(/;/g, (match) => {
+        // Encode semicolon as %3B
+        return encodeURIComponent(match);
+    });
+}
+export function opcuaDecodeURIComponent(value: string): string {
+    return value.replace(/%3B/g, (match) => {
+        // Decode %3B back to semicolon
+        return decodeURIComponent(match);
+    });
+}
+
+function makeNodeIdFromString(identifierType: string, identifierValue: string, namespaceIndex: number, text: string): NodeId {
+    switch (identifierType) {
+        case "i=":
+            return new NodeId(NodeIdType.NUMERIC, parseInt(identifierValue, 10), namespaceIndex);
+        case "s=":
+            return new NodeId(NodeIdType.STRING, identifierValue, namespaceIndex);
+        case "g=":
+            return new NodeId(NodeIdType.GUID, identifierValue, namespaceIndex);
+        case "b=":
+            return new NodeId(NodeIdType.BYTESTRING, Buffer.from(identifierValue, "base64"), namespaceIndex);
+        default:
+            throw new Error(`Invalid NodeId format: ${text}`);
+    }
+}
+
+/**
+ * The NamespaceIndex of a NamespaceUri, or -1 when it cannot be mapped.
+ * The OPC UA namespace is index 0 whatever the table says.
+ */
+function namespaceUriToIndex(namespaceUri: string, namespaceArray?: string[]): number {
+    if (namespaceUri === OPCUA_NAMESPACE_URI) {
+        return 0;
+    }
+    return namespaceArray ? namespaceArray.indexOf(namespaceUri) : -1;
+}
+
+interface ParsedNodeIdString {
+    /** the NamespaceUri of the nsu= form, percent-decoded */
+    namespaceUri?: string;
+    identifierType: string;
+    identifierValue: string;
+}
+function parseNodeIdString(nodeIdAsString: string): ParsedNodeIdString | null {
+    //nsu=tag:acme.com,2023:schemas:data#off%3B;b=M/RbKBsRVkePCePcx24oRA==
+    const match = nodeIdAsString.match(/^(nsu=([^;]+);)?(g=|s=|i=|b=)(.*)$/);
+    if (!match) {
+        return null;
+    }
+    // A URI which has the RFC 3986 Percent - Encoding applied to it.
+    //   Any ‘;’ in the URI shall be percent encoded.
+    const namespaceUri = match[2] ? opcuaDecodeURIComponent(match[2]) : undefined;
+    return { namespaceUri, identifierType: match[3], identifierValue: match[4] };
+}
+
+function coerceNodeIdEx(nodeIdAsString: string, namespaceArray?: string[]): NodeId {
+    const parsed = parseNodeIdString(nodeIdAsString);
+    if (parsed) {
+        const namespaceIndex = parsed.namespaceUri ? namespaceUriToIndex(parsed.namespaceUri, namespaceArray) : 0;
+        if (namespaceIndex < 0) {
+            // second abnormal state of 1.05 clause 5.4.2.10: NamespaceIndex 0, IdType String,
+            // and the JSON string as Identifier, so the node is not mistaken for one of namespace 0
+            return new NodeId(NodeIdType.STRING, nodeIdAsString, 0);
+        }
+        return makeNodeIdFromString(parsed.identifierType, parsed.identifierValue, namespaceIndex, nodeIdAsString);
+    }
+    // Fallback to coerceNodeId
+    return coerceNodeId(nodeIdAsString);
+}
+export function opcuaJsonDecodeNodeId(
+    pojoOrString: NodeIdJSON | undefined,
+    _builder?: ExtensionObjectBuilder | undefined,
+    namespaceArray?: string[]
+): NodeId {
+    if (pojoOrString === null || pojoOrString === undefined) {
+        throw new Error("opcuaJsonDecodeNodeId: pojoOrString cannot be null or undefined");
+    }
+    if (typeof pojoOrString === "string") {
+        return coerceNodeIdEx(pojoOrString, namespaceArray);
+    }
+    const pojo = pojoOrString as NodeIdJSON104;
+    const identifierType: NodeIdType = (() => {
+        if (!pojo.IdType) {
+            return NodeIdType.NUMERIC;
+        }
+        switch (pojo.IdType) {
+            case 2:
+                return NodeIdType.GUID;
+            case 3:
+                return NodeIdType.BYTESTRING;
+            default:
+                return NodeIdType.STRING;
+        }
+    })();
+
+    const namespace: number = (() => {
+        if (!pojo.Namespace) return 0;
+        if (typeof pojo.Namespace === "number") {
+            return pojo.Namespace;
+        }
+        const NAMESPACE_NOT_FOUND = 0xffff;
+        if (!namespaceArray) {
+            return NAMESPACE_NOT_FOUND;
+        }
+        const index = namespaceArray.indexOf(pojo.Namespace);
+        if (index < 0) {
+            return NAMESPACE_NOT_FOUND;
+        }
+        return index;
+    })();
+
+    const value: string | number | Buffer = (() => {
+        switch (identifierType) {
+            case NodeIdType.NUMERIC:
+                return typeof pojo.Id === "string" ? parseInt(pojo.Id, 10) : (pojo.Id as number | 0);
+            case NodeIdType.BYTESTRING:
+                return Buffer.from(pojo.Id as string, "base64");
+            default:
+                return pojo.Id;
+        }
+    })();
+
+    return new NodeId(identifierType, value, namespace);
+}
+
+export function opcuaJsonDecodeExpandedNodeId(
+    pojoOrString: NodeIdJSON | undefined,
+    builder?: ExtensionObjectBuilder | undefined,
+    namespaceArray?: string[]
+): ExpandedNodeId {
+    if (typeof pojoOrString === "string") {
+        // 1.05 clause 5.4.2.11: with a ServerIndex of 0, a NamespaceUri that cannot be mapped
+        // to an index is kept in the NamespaceUri field of the ExpandedNodeId
+        const parsed = parseNodeIdString(pojoOrString);
+        if (parsed?.namespaceUri && namespaceUriToIndex(parsed.namespaceUri, namespaceArray) < 0) {
+            const nodeId = makeNodeIdFromString(parsed.identifierType, parsed.identifierValue, 0, pojoOrString);
+            return ExpandedNodeId.fromNodeId(nodeId, parsed.namespaceUri, 0);
+        }
+    }
+    const nodeId = opcuaJsonDecodeNodeId(pojoOrString, builder, namespaceArray);
+    // the 1.05 string form carries svr=/svu=, which coerceNodeId does not parse; the 1.04 object
+    // form carries ServerUri as the ServerIndex
+    const serverIndex = typeof pojoOrString === "object" && pojoOrString ? (pojoOrString.ServerUri ?? 0) : 0;
+    return ExpandedNodeId.fromNodeId(nodeId, undefined, serverIndex);
+}

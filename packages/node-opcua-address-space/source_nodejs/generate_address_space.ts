@@ -1,0 +1,274 @@
+import fs from "node:fs";
+import path from "node:path";
+import { promisify } from "node:util";
+import zlib, { gunzip, gzip as gzipCb } from "node:zlib";
+import type { IAddressSpace } from "node-opcua-address-space-base";
+import { checkDebugFlag, make_debugLog, make_errorLog } from "node-opcua-debug";
+import {
+    type CompactAddressSpace,
+    compactRecordConsumer,
+    generateAddressSpaceRaw,
+    type NamedNodesetSource,
+    NODESET2_XML_FORMAT,
+    type NodeSetLoaderOptions,
+    type NodesetSource,
+    type NodesetToImageOptions,
+    nodesetImageProblem,
+    nodesetToImage as nodesetToImageRaw,
+    openNodesetSource,
+    readNodesetImageInfo,
+    type StoreRecordApplierOptions,
+    setImageDeflater,
+    setImageInflater,
+    sha256Hex,
+    xmlNodesetRecords
+} from "../dist/api/index.js";
+import { FileNodesetImageStore } from "./nodeset_image_file_store.js";
+
+// an image given whole inflates through zlib here: a third of the cost of DecompressionStream on
+// a 200 KB image, and in the thread pool, so that the XML hash runs alongside
+const gunzipAsync = promisify(gunzip);
+setImageInflater(async (image) => (await gunzipAsync(image)).toString("utf8"));
+
+// and out through zlib at level 9: CompressionStream has no level to ask for, and an image is
+// written once and read many times, so the extra work at build time is free at load time
+const gzipAsync = promisify(gzipCb);
+setImageDeflater(async (text) => new Uint8Array(await gzipAsync(Buffer.from(text, "utf8"), { level: 9 })));
+
+const _doDebug = checkDebugFlag("generate_address_space");
+const debugLog = make_debugLog("generate_address_space");
+const errorLog = make_errorLog("generate_address_space");
+
+function checkNodeSet2XmlFileExists(xmlFile: string): void {
+    /* c8 ignore next */
+    if (!fs.existsSync(xmlFile)) {
+        const msg = `[NODE-OPCUA-E02] generateAddressSpace : cannot find nodeset2 xml file at ${xmlFile}`;
+        errorLog(msg);
+        throw new Error(msg);
+    }
+}
+
+export async function readNodeSet2XmlFile(xmlFile: string): Promise<string> {
+    checkNodeSet2XmlFileExists(xmlFile);
+    if (_doDebug) {
+        debugLog(" parsing ", xmlFile);
+    }
+    const xmlData = await fs.promises.readFile(xmlFile, "utf-8");
+    return xmlData;
+}
+
+/** the chunk size of a nodeset file stream: a few dozen chunks for the standard nodeset */
+const FILE_CHUNK_SIZE = 256 * 1024;
+
+/**
+ * a NodeSet2 file as a source the loader reads in chunks, opened when the loader gets to it
+ */
+export function nodesetSourceFromFile(xmlFile: string): NamedNodesetSource {
+    return {
+        name: xmlFile,
+        source: () => {
+            checkNodeSet2XmlFileExists(xmlFile);
+            if (_doDebug) {
+                debugLog(" parsing ", xmlFile);
+            }
+            return fs.createReadStream(xmlFile, { highWaterMark: FILE_CHUNK_SIZE });
+        }
+    };
+}
+
+/**
+ * a gzip-compressed NodeSet2 file (`<name>.xml.gz`), inflated on the way, opened when the loader
+ * gets to it
+ */
+export function nodesetSourceFromGzipFile(gzipFile: string): NamedNodesetSource {
+    return {
+        name: gzipFile,
+        source: () => {
+            checkNodeSet2XmlFileExists(gzipFile);
+            return fs.createReadStream(gzipFile, { highWaterMark: FILE_CHUNK_SIZE }).pipe(zlib.createGunzip());
+        }
+    };
+}
+
+/**
+ * a NodeSet2 file read whole: what an image store needs, since the digest of the bytes is the
+ * key and a stream can only be hashed once it has been parsed
+ */
+export function nodesetSourceFromFileWhole(xmlFile: string): NamedNodesetSource {
+    checkNodeSet2XmlFileExists(xmlFile);
+    return { name: xmlFile, source: () => [new Uint8Array(fs.readFileSync(xmlFile))] };
+}
+
+/** the image that sits next to a NodeSet2 file: <name>.ndjson.gz */
+export function siblingImageFileOf(xmlFile: string): string {
+    return xmlFile.replace(/\.xml$/i, ".ndjson.gz");
+}
+
+/**
+ * the sibling store: when `<file>.ndjson.gz` sits next to `<file>.xml` and its trailer digest is
+ * the SHA-256 of the XML bytes, the image is what the loader gets; otherwise the XML is. The
+ * digest check is not cached: an XML edited in place next to a stale image loads from the XML.
+ * Nothing is written here; writing images is the opt-in `imageStore`.
+ * Returns the source to load, and which path was taken for the debug log.
+ *
+ * `trustByLength` trades that guarantee for the cost of it. Validating an image means reading
+ * and hashing the whole XML — about 30 ms of the ~110 ms it takes to replay the standard
+ * nodeset, spent proving that a file nobody edited has not changed. With it, the recorded
+ * source length against the file size is the whole check, and the XML is never read at all.
+ * Every structural check on the image still runs; only the content digest is skipped.
+ *
+ * The risk it accepts is precise: an XML edited in place to exactly the same byte length, beside
+ * an image built from the earlier content, is replayed from the stale image. For the nodesets a
+ * package ships that cannot happen; for a file being edited it can, which is why this is off by
+ * default and why a loader that watches user files should leave it off.
+ */
+async function siblingOrXml(
+    xmlFile: string,
+    trustByLength = false
+): Promise<{ source: NamedNodesetSource; path: "image" | "xml"; reason?: string }> {
+    checkNodeSet2XmlFileExists(xmlFile);
+    // the XML is read only when it is going to be parsed or hashed; the image decision starts
+    // with what costs nothing: its size
+    let xmlBytes: Promise<Uint8Array> | undefined;
+    const readXml = () => {
+        xmlBytes = xmlBytes || fs.promises.readFile(xmlFile).then((buffer) => new Uint8Array(buffer));
+        return xmlBytes;
+    };
+    const asXml = async (reason?: string) => {
+        const xml = await readXml();
+        return { source: { name: xmlFile, source: () => [xml] } as NamedNodesetSource, path: "xml" as const, reason };
+    };
+    const imageFile = siblingImageFileOf(xmlFile);
+    let image: Uint8Array;
+    try {
+        image = new Uint8Array(fs.readFileSync(imageFile));
+    } catch {
+        return asXml("no image next to it");
+    }
+    try {
+        // the inflate (zlib, off the main thread) and the hash of the XML (web crypto, off the
+        // main thread too) run alongside; the digest is what decides, the length only rejects early
+        const infoPending = readNodesetImageInfo(image);
+        // not started at all when trusted by length: starting it is the cost being avoided
+        const digestPending = trustByLength ? undefined : readXml().then(sha256Hex);
+        digestPending?.catch(() => undefined);
+        const info = await infoPending;
+        const sourceLength = info.header.sourceLength;
+        if (sourceLength === undefined) {
+            // nothing cheap to check it against, so a trusted read has no ground to stand on
+            if (trustByLength) return asXml("the image records no source length, so it cannot be trusted by length alone");
+        } else if (sourceLength !== fs.statSync(xmlFile).size) {
+            return asXml(`the image is stale: it was built from ${sourceLength} bytes, the XML has ${fs.statSync(xmlFile).size}`);
+        }
+        // a catalog package older or newer than this loader, a stale or truncated image: its XML
+        // is still right. Without a digest this still checks the schema, the trailer and the node
+        // count — `nodesetImageProblem` skips only the comparison it is not given.
+        const problem = nodesetImageProblem(info, digestPending ? await digestPending : undefined);
+        if (problem) return asXml(problem);
+    } catch (err) {
+        return asXml(`the image cannot be read: ${(err as Error).message}`);
+    }
+    return { source: { name: `${xmlFile} (image)`, source: image }, path: "image" };
+}
+
+const here = import.meta.dirname;
+
+/** the version this package was built as, for the header of the images it writes */
+export function addressSpacePackageVersion(): string {
+    try {
+        const packageJson = JSON.parse(fs.readFileSync(path.join(here, "..", "package.json"), "utf8")) as { version?: string };
+        return packageJson.version ?? "unknown";
+    } catch {
+        return "unknown";
+    }
+}
+
+/**
+ * load NodeSet2 documents into an address space: file paths, and {@link NodesetSource} values
+ * for a document that is not a file (a gzip stream, an HTTP response, a string of XML). A
+ * string in the list is always a path here; content and streams go through a source.
+ *
+ * A file with a valid precompiled image next to it (`<name>.ndjson.gz`, the catalog ships one
+ * for every nodeset) is replayed from the image, with nothing to configure. With `imageStore`,
+ * a file without one is hashed and its image replayed when the store has it, written
+ * otherwise; `true` selects the per-user file store ({@link FileNodesetImageStore}).
+ * `imageStore: false` disables the sibling images too and streams the XML, for tests and for
+ * bisecting. The documents load in dependency order whatever the order given; a model one of
+ * them requires may also be one the address space holds already, from an earlier call.
+ */
+export async function generateAddressSpace(
+    addressSpace: IAddressSpace,
+    xmlFiles: string | Array<string | NodesetSource>,
+    options?: NodeSetLoaderOptions
+): Promise<void> {
+    const documents = Array.isArray(xmlFiles) ? xmlFiles : [xmlFiles];
+    const loaderOptions: NodeSetLoaderOptions = { ...(options || {}) };
+    if (loaderOptions.imageStore === false) {
+        // no sibling images, no store: the XML files, streamed
+        const sources = documents.map((document) => (typeof document === "string" ? nodesetSourceFromFile(document) : document));
+        await generateAddressSpaceRaw(addressSpace, sources, { ...loaderOptions, imageStore: undefined });
+        return;
+    }
+    if (loaderOptions.imageStore === true) {
+        loaderOptions.imageStore = new FileNodesetImageStore();
+    }
+    // the sibling store first: a catalog image is replayed with nothing to configure; what has
+    // no valid image next to it goes through the XML, and through the store when there is one
+    const sources: NodesetSource[] = [];
+    for (const document of documents) {
+        if (typeof document !== "string") {
+            sources.push(document);
+            continue;
+        }
+        const { source, path: taken, reason } = await siblingOrXml(document, !!loaderOptions.trustSiblingImages);
+        debugLog(`generateAddressSpace: ${path.basename(document)} from ${taken}${reason ? ` (${reason})` : ""}`);
+        sources.push(source);
+    }
+    await generateAddressSpaceRaw(addressSpace, sources, loaderOptions);
+}
+
+/** the precompiled image of a NodeSet2 file or source, stamped with this package's version */
+export async function nodesetFileToImage(source: NodesetSource | string, options: NodesetToImageOptions = {}): Promise<Uint8Array> {
+    const resolved: NodesetSource =
+        typeof source === "string" && !source.trimStart().startsWith("<") ? nodesetSourceFromFileWhole(source) : source;
+    return nodesetToImageRaw(resolved, { addressSpaceVersion: addressSpacePackageVersion(), ...options });
+}
+
+/**
+ * the NodeSet2 XML files loaded into a compact address space, in the order given, each
+ * streamed in chunks: no node object is created, the records go straight into the columns
+ */
+export async function generateCompactAddressSpace(
+    addressSpace: CompactAddressSpace,
+    documents: string | NodesetSource | Array<string | NodesetSource>,
+    options: StoreRecordApplierOptions = {}
+): Promise<void> {
+    const list = Array.isArray(documents) ? documents : [documents];
+    const consumer = compactRecordConsumer(addressSpace, options);
+    for (const [index, document] of list.entries()) {
+        const source = typeof document === "string" ? nodesetSourceFromFile(document) : document;
+        const reader = openNodesetSource(source, index);
+        if ((await reader.probe()) !== NODESET2_XML_FORMAT) {
+            throw new Error(
+                `generateCompactAddressSpace: ${reader.name} is not a NodeSet2 XML document (images are not loaded into a compact space yet)`
+            );
+        }
+        for await (const record of xmlNodesetRecords(textChunks(reader.chunks()))) {
+            consumer.apply(record);
+        }
+    }
+    const { unresolved } = consumer.finish();
+    if (unresolved > 0) {
+        debugLog(`generateCompactAddressSpace: ${unresolved} references point at nodes no document declares`);
+    }
+}
+
+/** the chunks of a source as text, whatever the stream yields */
+async function* textChunks(chunks: AsyncIterable<string | Uint8Array>): AsyncGenerator<string> {
+    const decoder = new TextDecoder();
+    for await (const chunk of chunks) {
+        yield typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+    }
+    const tail = decoder.decode();
+    if (tail) yield tail;
+}

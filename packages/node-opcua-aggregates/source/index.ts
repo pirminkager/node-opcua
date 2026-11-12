@@ -1,12 +1,23 @@
 /**
  * @module node-opca-aggregates
  */
-export { 
+
+export { AggregateFunction } from "node-opcua-constants";
+export {
+    addAggregateFunctionSupport,
+    addAggregateStandardFunctionSupport,
     addAggregateSupport,
-    installAggregateConfigurationOptions,
-    getAggregateConfiguration
-} from "./aggregates";
-export * from "./interpolate";
-export * from "./minmax";
-export * from "./interval";
-export * from "./common";
+    getAggregateConfiguration,
+    installAggregateConfigurationOptions
+} from "./aggregates.js";
+export * from "./average.js";
+export * from "./common.js";
+export { getCountData } from "./count.js";
+export { getDurationBadData } from "./duration_bad.js";
+export { getDurationGoodData } from "./duration_good.js";
+export * from "./interpolate.js";
+export * from "./interval.js";
+export * from "./minmax.js";
+export { getPercentBadData } from "./percent_bad.js";
+export { getPercentGoodData } from "./percent_good.js";
+export * from "./read_processed_details.js";

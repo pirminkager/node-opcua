@@ -2,9 +2,8 @@
  * @module node-opcua-service-subscription
  */
 import { assert } from "node-opcua-assert";
-import * as _ from "underscore";
 
-import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
+import { DataType, type Variant, VariantArrayType } from "node-opcua-variant";
 
 export enum DeadbandType {
     None = 0x00,
@@ -23,17 +22,11 @@ export interface PseudoRange {
 /**
  * @returns true if the difference between value1 and value2 is greater than absoluteDeadband
  */
-function _isOutsideDeadbandScalar(
-    value1: NumberType,
-    value2: NumberType,
-    dataType: DataType,
-    absoluteDeadband: number
-): boolean {
-
-    let diff;
+function _isOutsideDeadbandScalar(value1: NumberType, value2: NumberType, dataType: DataType, absoluteDeadband: number): boolean {
+    let diff: number;
     if (dataType === DataType.UInt64 || dataType === DataType.Int64) {
-        // istanbul ignore next
-        if (!(value1 instanceof Array && value2 instanceof Array)) {
+        /* c8 ignore next */
+        if (!(Array.isArray(value1) && Array.isArray(value2))) {
             throw new Error("Invalid");
         }
         const h1 = value1[0]; // high
@@ -45,23 +38,26 @@ function _isOutsideDeadbandScalar(
             }
         }
         diff = value1[1] - value2[1];
-        assert(_.isNumber(diff) && _.isFinite(diff));
+        assert(typeof diff === "number" && Number.isFinite(diff));
         return Math.abs(diff) > absoluteDeadband;
     }
-    // istanbul ignore next
+    /* c8 ignore next */
     if (!(typeof value1 === "number" && typeof value2 === "number")) {
-        throw new Error("Invalid");
+        throw new Error(
+            `Invalid value in _isOutsideDeadbandScalar > expecting number only but got ${typeof value1} ${typeof value2}`
+        );
     }
     diff = value2 - value1;
-    assert(_.isNumber(diff) && _.isFinite(diff));
+    assert(typeof diff === "number" && Number.isFinite(diff));
     return Math.abs(diff) > absoluteDeadband;
 }
 function isOutsideDeadbandVariant(v1: Variant, v2: Variant, absoluteDeadBand: number): boolean {
+    assert(Number.isFinite(absoluteDeadBand));
 
-    assert(_.isFinite(absoluteDeadBand));
-
-    if (v1.arrayType === VariantArrayType.Array) {
-
+    if (v1.arrayType === VariantArrayType.Array || v1.arrayType === VariantArrayType.Matrix) {
+        // If the Value of the MonitoredItem is an array, then the deadband calculation logic shall be applied to
+        // each element of the array. If an element that requires a DataChange is found, then no further
+        // deadband checking is necessary and the entire array shall be returned.
         if (v1.dataType !== v2.dataType) {
             return true;
         }
@@ -77,96 +73,83 @@ function isOutsideDeadbandVariant(v1: Variant, v2: Variant, absoluteDeadBand: nu
             }
         }
         return false;
-
     } else {
         assert(v1.arrayType === VariantArrayType.Scalar);
-        assert(v1.dataType === v2.dataType);
+        if (v1.dataType !== v2.dataType) {
+            return true;
+        }
         return _isOutsideDeadbandScalar(v1.value, v2.value, v1.dataType, absoluteDeadBand);
     }
 }
-function isOnEdgeOfRangeScalar(
-    currentValue: NumberType,
-    newValue: NumberType,
-    dataType: DataType,
-    range: PseudoRange): boolean {
+// function isOnEdgeOfRangeScalar(
+//     currentValue: NumberType,
+//     newValue: NumberType,
+//     dataType: DataType,
+//     range: PseudoRange,
+//     deadbandValue: number
+// ): boolean {
+//     if (dataType === DataType.UInt64 || dataType === DataType.Int64) {
+//         // c8 ignore next
+//         if (!(Array.isArray(currentValue) && Array.isArray(newValue))) {
+//             throw new Error("Invalid");
+//         }
+//         currentValue = currentValue[1];
+//         newValue = newValue[1];
+//     }
+//     if (Array.isArray(newValue)) throw new Error("internal error");
+//     if (/*currentValue !== range.low && */ Math.abs(newValue - range.low) < deadbandValue) {
+//         return true;
+//     }
+//     if (/*currentValue !== range.high && */ Math.abs(newValue - range.high) < deadbandValue) {
+//         return true;
+//     }
+//     return false;
+// }
 
-    if (dataType === DataType.UInt64 || dataType === DataType.Int64) {
-        // istanbul ignore next
-        if (!(currentValue instanceof Array && newValue instanceof Array)) {
-            throw new Error("Invalid");
-        }
-        currentValue = currentValue[1];
-        newValue = newValue[1];
-    }
-    if (/*currentValue !== range.low && */ newValue <= range.low) {
-        return true;
-    }
-    if (/*currentValue !== range.high && */ newValue >= range.high) {
-        return true;
-    }
-    return false;
-}
-
-function isOnEdgeOfRange(currentValue: Variant, newValue: Variant, range: PseudoRange): boolean {
-    if (currentValue.arrayType === VariantArrayType.Array) {
-        const n = currentValue.value.length;
-        let i = 0;
-        for (i = 0; i < n; i++) {
-            if (isOnEdgeOfRangeScalar(currentValue.value[i], newValue.value[i], newValue.dataType, range)) {
-                return true;
-            }
-        }
-        return false;
-    } else {
-        assert(currentValue.arrayType === VariantArrayType.Scalar);
-        assert(currentValue.dataType === newValue.dataType);
-        return isOnEdgeOfRangeScalar(currentValue.value, newValue.value, currentValue.dataType, range);
-    }
-}
+// function isOnEdgeOfRange(currentValue: Variant, newValue: Variant, range: PseudoRange, deadbandValue: number): boolean {
+//     if (currentValue.arrayType === VariantArrayType.Array) {
+//         const n = currentValue.value.length;
+//         let i = 0;
+//         for (i = 0; i < n; i++) {
+//             if (isOnEdgeOfRangeScalar(currentValue.value[i], newValue.value[i], newValue.dataType, range, deadbandValue)) {
+//                 return true;
+//             }
+//         }
+//         return false;
+//     } else {
+//         assert(currentValue.arrayType === VariantArrayType.Scalar);
+//         assert(currentValue.dataType === newValue.dataType);
+//         return isOnEdgeOfRangeScalar(currentValue.value, newValue.value, currentValue.dataType, range, deadbandValue);
+//     }
+// }
 
 /**
- * @method isOutsideDeadbandNone
+
  * @return true if the element is in deadBand
  */
-export function isOutsideDeadbandNone(
-    variant1: Variant,
-    variant2: Variant,
-): boolean {
+export function isOutsideDeadbandNone(variant1: Variant, variant2: Variant): boolean {
     // No Deadband calculation should be applied.
-    return isOutsideDeadbandVariant(variant1, variant2, 0.0);
+    return variant1.value !== variant2.value;
 }
 /**
- * @method isOutsideDeadbandAbsolute
+
  * @return true if the element is in deadBand
  */
-export function isOutsideDeadbandAbsolute(
-    variant1: Variant,
-    variant2: Variant,
-    deadbandValue: number
-): boolean {
+export function isOutsideDeadbandAbsolute(variant1: Variant, variant2: Variant, deadbandValue: number): boolean {
     // No Deadband calculation should be applied.
     return isOutsideDeadbandVariant(variant1, variant2, deadbandValue);
 }
 
 /**
- * @method isOutsideDeadband
+
  * @return true if the element is outside deadBand
  */
 export function isOutsideDeadbandPercent(
     variant1: Variant,
     variant2: Variant,
-    deadbandValue: number,
+    deadbandValuePercent: number,
     range: PseudoRange
 ): boolean {
-
-    // The range of the deadbandValue is from 0.0 to 100.0 Percent.
-    assert(deadbandValue >= 0 && deadbandValue <= 100);
-
-    if (isOnEdgeOfRange(variant1, variant2, range)) {
-        return true;
-    }
-
-
     // DeadbandType = PercentDeadband
     // For this type of deadband the deadbandValue is defined as the percentage of the EURange. That is,
     // it applies only to AnalogItems with an EURange Property that defines the typical value range for the
@@ -176,13 +159,16 @@ export function isOutsideDeadbandPercent(
     //      DataChange if (absolute value of (last cached value - current value) >
     //                                          (deadbandValue/100.0) * ((high-low) of EURange)))
     //
-    // Specifying a deadbandValue outside of this range will be rejected and reported with the
-    // StatusCode BadDeadbandFilterInvalid (see Table 27).
-    // If the Value of the MonitoredItem is an array, then the deadband calculation logic shall be applied to
-    // each element of the array. If an element that requires a DataChange is found, then no further
-    // deadband checking is necessary and the entire array shall be returned.
+
+    // The range of the deadbandValue is from 0.0 to 100.0 Percent.
+    assert(deadbandValuePercent >= 0 && deadbandValuePercent <= 100);
+
     const valueRange = Math.abs(range.high - range.low);
-    assert(_.isNumber(valueRange));
-    const value = deadbandValue / 100 * valueRange;
-    return isOutsideDeadbandAbsolute(variant1, variant2, value);
+    const deadBandValueAbsolute = (deadbandValuePercent / 100.0) * valueRange;
+
+    // if (isOnEdgeOfRange(variant1, variant2, range, deadBandValueAbsolute)) {
+    //     return true;
+    // }
+
+    return isOutsideDeadbandAbsolute(variant1, variant2, deadBandValueAbsolute);
 }

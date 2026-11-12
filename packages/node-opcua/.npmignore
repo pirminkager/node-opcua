@@ -1,4 +1,6 @@
 out
 test
 tsconfig.json
-tsconfig.tsbuildinfo
+*.tsbuildinfo
+.mocharc.*
+pnpm-lock.yaml

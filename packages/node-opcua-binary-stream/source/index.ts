@@ -1,9 +1,9 @@
 /**
  * @module node-opcua-binary-stream
  */
-import { BinaryStream } from "./binaryStream";
-import { BinaryStreamSizeCalculator } from "./binaryStreamSizeCalculator";
+import type { BinaryStream } from "./binaryStream.js";
+import type { BinaryStreamSizeCalculator } from "./binaryStreamSizeCalculator.js";
 export type OutputBinaryStream = BinaryStream | BinaryStreamSizeCalculator;
 
-export * from "./binaryStream";
-export * from "./binaryStreamSizeCalculator";
+export * from "./binaryStream.js";
+export * from "./binaryStreamSizeCalculator.js";

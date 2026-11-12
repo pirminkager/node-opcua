@@ -1,11 +1,10 @@
-"use strict";
 import { DataType } from "node-opcua-variant";
-import { AddressSpace, UAObject } from "../..";
+import should from "should";
+import type { AddressSpace, UAObject } from "../../dist/api/index.js";
+import type { MochaSuiteEx } from "./test_alarms_and_conditions.js";
 
-export function utest_issue_316(test: any) {
-
+export function utest_issue_316(test: MochaSuiteEx): void {
     describe("Alarm&Condition ConditionClassName and ConditionName ", () => {
-
         let addressSpace: AddressSpace;
         let source: UAObject;
         before(() => {
@@ -13,13 +12,13 @@ export function utest_issue_316(test: any) {
             source = test.source;
         });
         it("CC1 - should be possible to set the ConditionName and ConditionClassName of an alarm", () => {
-
+            const processConditionClassTypeNodeId = addressSpace.findObjectType("ProcessConditionClassType")!.nodeId;
             const condition = addressSpace.getOwnNamespace().instantiateCondition("AlarmConditionType", {
                 browseName: "AlarmCondition1",
                 componentOf: source,
                 conditionSource: source,
 
-                conditionClass: "ProcessConditionClassType",
+                conditionClass: processConditionClassTypeNodeId,
                 conditionName: "MyConditionName"
             });
             condition.browseName.toString().should.eql("1:AlarmCondition1");
@@ -46,21 +45,20 @@ export function utest_issue_316(test: any) {
             // more concrete class.
             const processConditionClassType = addressSpace.findObjectType("ProcessConditionClassType")!;
             condition.conditionClassId.readValue().value.dataType.should.equal(DataType.NodeId);
-            condition.conditionClassId.readValue().value.value.toString().should.equal(
-                processConditionClassType.nodeId.toString());
+            condition.conditionClassId.readValue().value.value.toString().should.equal(processConditionClassType.nodeId.toString());
 
             // ConditionClassName provides the display name of the ConditionClassType.
             condition.conditionClassName.readValue().value.dataType.should.equal(DataType.LocalizedText);
-            condition.conditionClassName.readValue().value.value.text!.toString().should.equal(
-                processConditionClassType.displayName[0].text);
+            should(condition.conditionClassName.readValue().value.value.text?.toString()).equal(
+                processConditionClassType.displayName[0].text
+            );
 
             // ConditionName identifies the Condition instance that the Event originated from. It can be used
             // together with the SourceName in a user display to distinguish between different Condition
             // instances. If a ConditionSource has only one instance of a ConditionType, and the Server has
             // no instance name, the Server shall supply the ConditionType browse name.
             condition.conditionName.readValue().value.dataType.should.eql(DataType.String);
-            condition.conditionName.readValue().value.value.should.eql("MyConditionName");
-
+            should(condition.conditionName.readValue().value.value).eql("MyConditionName");
         });
     });
 }

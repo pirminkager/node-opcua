@@ -2,15 +2,19 @@
  * @module node-opcua-service-session
  */
 export {
-    CreateSessionRequest, CreateSessionResponse,
-    ActivateSessionRequest, ActivateSessionResponse,
-    CloseSessionRequest, CloseSessionResponse,
-    CancelRequest, CancelResponse,
+    ActivateSessionRequest,
+    ActivateSessionResponse,
     AnonymousIdentityToken,
-    UserNameIdentityToken,
-    X509IdentityToken,
+    CancelRequest,
+    CancelResponse,
+    CloseSessionRequest,
+    CloseSessionResponse,
+    CreateSessionRequest,
+    CreateSessionResponse,
     IssuedIdentityToken,
-    SignedSoftwareCertificate
+    SignedSoftwareCertificate,
+    UserNameIdentityToken,
+    X509IdentityToken
 } from "node-opcua-types";
 
-export * from "./SessionAuthenticationToken";
+export * from "./SessionAuthenticationToken.js";

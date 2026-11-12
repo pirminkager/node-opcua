@@ -1,42 +1,44 @@
 {
     "name": "node-opcua-generator",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -generator",
+    "type": "module",
+    "version": "2.187.19",
+    "description": "pure nodejs OPCUA SDK - module generator",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "scripts": {
         "build": "tsc -b",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "test": "mocha test"
+        "lint": "biome check --no-errors-on-unmatched .",
+        "format": "biome check --write --no-errors-on-unmatched .",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "engines": {
+        "node": ">=22.13.0"
     },
     "dependencies": {
-        "chalk": "^4.0.0",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-basic-types": "^2.6.0-alpha.1",
-        "node-opcua-buffer-utils": "^2.6.0-alpha.1",
-        "node-opcua-constants": "^2.6.0-alpha.1",
-        "node-opcua-date-time": "^2.6.0-alpha.1",
-        "node-opcua-debug": "^2.6.0-alpha.1",
-        "node-opcua-enum": "^2.6.0-alpha.1",
-        "node-opcua-factory": "^2.6.0-alpha.1",
-        "node-opcua-guid": "^2.6.0-alpha.1",
-        "node-opcua-nodeid": "^2.6.0-alpha.1",
-        "node-opcua-numeric-range": "^2.6.0-alpha.1",
-        "node-opcua-schemas": "^2.6.0-alpha.1",
-        "node-opcua-status-code": "^2.6.0-alpha.1",
-        "node-opcua-utils": "^2.6.0-alpha.1",
-        "node-opcua-xml2json": "^2.6.0-alpha.1",
-        "prettier": "^2.0.5",
-        "typescript": "^3.9.2",
-        "underscore": "^1.10.2"
+        "chalk": "6.0.1",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-basic-types": "2.187.0",
+        "node-opcua-binary-stream": "2.187.0",
+        "node-opcua-constants": "2.185.0",
+        "node-opcua-data-model": "2.187.0",
+        "node-opcua-data-value": "2.187.19",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-enum": "2.187.0",
+        "node-opcua-extension-object": "2.187.0",
+        "node-opcua-factory": "2.187.0",
+        "node-opcua-nodeid": "2.187.0",
+        "node-opcua-numeric-range": "2.187.0",
+        "node-opcua-schemas": "2.187.19",
+        "node-opcua-status-code": "2.187.0",
+        "node-opcua-utils": "2.187.0",
+        "node-opcua-variant": "2.187.19",
+        "typescript-5": "npm:typescript@5.9.3"
     },
     "devDependencies": {
-        "@types/prettier": "^2.0.0",
-        "node-opcua-binary-stream": "^2.6.0-alpha.1",
-        "node-opcua-extension-object": "^2.6.0-alpha.1",
-        "node-opcua-packet-analyzer": "^2.6.0-alpha.1",
-        "should": "^13.2.3",
-        "source-map-support": "^0.5.19"
+        "node-opcua-packet-analyzer": "2.187.0",
+        "node-opcua-test-helpers": "2.184.0"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -53,5 +55,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

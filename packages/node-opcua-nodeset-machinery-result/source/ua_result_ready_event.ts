@@ -1,0 +1,22 @@
+import type { UABaseEvent, UABaseEvent_Base } from "node-opcua-nodeset-ua/dist/ua_base_event.js";
+
+import type { DTResult } from "./dt_result.js";
+import type { UAResult } from "./ua_result.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * Provides information of a complete or partial
+ * result.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Machinery/Result/               |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ResultReadyEventType i=1002                                 |
+ * |isAbstract      |true                                                        |
+ */
+export interface UAResultReadyEvent_Base extends UABaseEvent_Base {
+    result: UAResult<DTResult>;
+}
+export interface UAResultReadyEvent extends UABaseEvent, UAResultReadyEvent_Base {}

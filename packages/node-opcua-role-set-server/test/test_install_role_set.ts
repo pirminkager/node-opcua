@@ -1,0 +1,247 @@
+import { promises as fs } from "node:fs";
+import "mocha";
+import path from "node:path";
+import { AddressSpace, type UARole, type UARoleSet } from "node-opcua-address-space";
+import { generateAddressSpace } from "node-opcua-address-space/nodeJS.js";
+import { ObjectIds } from "node-opcua-constants";
+import { NodeClass } from "node-opcua-data-model";
+import { sameNodeId } from "node-opcua-nodeid";
+import { nodesets } from "node-opcua-nodesets";
+import {
+    InMemoryIdentityMappingStore,
+    identitiesToBase64,
+    loadFromBinaryFile,
+    ROLE_SET_ARCHIVE_VERSION,
+    saveToBinaryFile,
+    WellKnownRoleIds,
+    writeArchive
+} from "node-opcua-role-set-common";
+import { AnonymousIdentityToken, IdentityCriteriaType, IdentityMappingRuleType, MessageSecurityMode } from "node-opcua-types";
+import { DataType, Variant } from "node-opcua-variant";
+import should from "should";
+import { type IServerForRoleSet, installRoleSet } from "../source/install_role_set.js";
+import { RoleSetResolver } from "../source/role_set_resolver.js";
+import { scratch } from "./paths.js";
+
+// --- Tests ---
+
+describe("RoleSetResolver", () => {
+    it("should delegate resolveRoles to the store", () => {
+        const store = new InMemoryIdentityMappingStore();
+        store.addIdentity(
+            WellKnownRoleIds.Observer,
+            new IdentityMappingRuleType({
+                criteriaType: IdentityCriteriaType.Anonymous,
+                criteria: "*"
+            })
+        );
+        const resolver = new RoleSetResolver(store);
+        const roles = resolver.resolveRoles(new AnonymousIdentityToken());
+        roles.should.have.length(1);
+        sameNodeId(roles[0], WellKnownRoleIds.Observer).should.be.true();
+    });
+
+    it("should pass the Session's context to the store, so an Application rule can match", () => {
+        const store = new InMemoryIdentityMappingStore();
+        store.addIdentity(
+            WellKnownRoleIds.SecurityAdmin,
+            new IdentityMappingRuleType({ criteriaType: IdentityCriteriaType.Application, criteria: "urn:example:console" })
+        );
+        const resolver = new RoleSetResolver(store);
+        const token = new AnonymousIdentityToken();
+        const context = { applicationUri: "urn:example:console", securityMode: MessageSecurityMode.SignAndEncrypt };
+        should(resolver.resolveRoles(token, context).map((r) => r.toString())).eql([WellKnownRoleIds.SecurityAdmin.toString()]);
+        should(resolver.resolveRoles(token)).have.length(0);
+    });
+
+    it("should return empty for non-matching token", () => {
+        const store = new InMemoryIdentityMappingStore();
+        const resolver = new RoleSetResolver(store);
+        const roles = resolver.resolveRoles(new AnonymousIdentityToken());
+        roles.should.have.length(0);
+    });
+});
+
+describe("installRoleSet", () => {
+    let addressSpace: AddressSpace;
+    let server: IServerForRoleSet;
+
+    beforeEach(async function () {
+        this.timeout(30000); // loading standard nodeset can take time
+        addressSpace = AddressSpace.create();
+        addressSpace.registerNamespace("http://test");
+        await generateAddressSpace(addressSpace, [nodesets.standard]);
+
+        server = {
+            roleResolvers: [],
+            engine: { addressSpace }
+        };
+    });
+
+    afterEach(() => {
+        addressSpace.dispose();
+    });
+
+    it("should register a resolver on server.roleResolvers", async () => {
+        const { resolver } = await installRoleSet(server);
+        server.roleResolvers.should.have.length(1);
+        server.roleResolvers[0].should.equal(resolver);
+    });
+
+    it("should return the store and resolver", async () => {
+        const { store, resolver } = await installRoleSet(server);
+        store.should.be.instanceOf(InMemoryIdentityMappingStore);
+        resolver.should.be.instanceOf(RoleSetResolver);
+    });
+
+    it("should reflect stored identities in the variable after install", async () => {
+        // Pre-populate a store and save to a temp file
+        const tmpPath = scratch("_tmp_test_identities", "roles.bin");
+        const preStore = new InMemoryIdentityMappingStore();
+        preStore.addIdentity(
+            WellKnownRoleIds.SecurityAdmin,
+            new IdentityMappingRuleType({
+                criteriaType: IdentityCriteriaType.UserName,
+                criteria: "admin"
+            })
+        );
+        await writeArchive(tmpPath, { version: ROLE_SET_ARCHIVE_VERSION, identities: identitiesToBase64(preStore) });
+
+        // Install with persistence → store is loaded with the identity
+        const { store: _ } = await installRoleSet(server, { persistencePath: tmpPath });
+
+        // Verify the identities variable on the SecurityAdmin Role
+        const roleSet = addressSpace.findNode(ObjectIds.Server_ServerCapabilities_RoleSet) as UARoleSet;
+        const components = roleSet.getComponents();
+        let secAdminRole: UARole | undefined;
+        for (const c of components) {
+            if (c.nodeClass !== NodeClass.Object) continue;
+            if (sameNodeId(c.nodeId, WellKnownRoleIds.SecurityAdmin)) {
+                secAdminRole = c as UARole;
+                break;
+            }
+        }
+        should(secAdminRole).not.be.undefined();
+
+        const value = secAdminRole?.identities.readValue().value;
+        if (!value) {
+            throw new Error("identities variable value is undefined");
+        }
+        value.dataType.should.equal(DataType.ExtensionObject);
+        value.value.should.have.length(1);
+        should(value.value[0].criteria).equal("admin");
+
+        // Cleanup
+        try {
+            fs.rm(scratch("_tmp_test_identities"), { recursive: true, force: true });
+        } catch {
+            /* */
+        }
+    });
+
+    it("should override a pre-existing userManager getter binding on Identities (bindRoleSet clobber)", async () => {
+        // node-opcua-server's bindRoleSet runs at server.start() — before
+        // installRoleSet — and binds every Role's Identities Property to
+        // userManager.getIdentitiesForRole, which answers [] forever when the
+        // userManager doesn't implement that optional hook. That getter
+        // shadowed installRoleSet's setValueFromSource on every read:
+        // AddIdentity succeeded, persisted, and resolved roles, while the
+        // Property a client read back stayed empty. Reproduce that exact
+        // ordering here and verify installRoleSet now rebinds to its store.
+        const roleSet = addressSpace.findNode(ObjectIds.Server_ServerCapabilities_RoleSet) as UARoleSet;
+        for (const c of roleSet.getComponents()) {
+            if (c.nodeClass !== NodeClass.Object) continue;
+            if ((c as UARole).typeDefinitionObj?.browseName.name !== "RoleType") continue;
+            // same binding shape as node-opcua-server/source/user_manager_ua.ts
+            (c as UARole).identities.bindVariable(
+                { get: () => new Variant({ dataType: DataType.ExtensionObject, value: [] }) },
+                true
+            );
+        }
+
+        const { store } = await installRoleSet(server);
+
+        let operatorRole: UARole | undefined;
+        for (const c of roleSet.getComponents()) {
+            if (c.nodeClass !== NodeClass.Object) continue;
+            if (sameNodeId(c.nodeId, WellKnownRoleIds.Operator)) {
+                operatorRole = c as UARole;
+                break;
+            }
+        }
+        should(operatorRole).not.be.undefined();
+
+        // a runtime mutation — the store is the single source of truth, and the
+        // Property must answer from it live, not from a snapshot or a stale getter
+        store.addIdentity(
+            WellKnownRoleIds.Operator,
+            new IdentityMappingRuleType({ criteriaType: IdentityCriteriaType.UserName, criteria: "runtime-user" })
+        );
+
+        const dv = operatorRole!.identities.readValue();
+        dv.statusCode.isGood().should.eql(true);
+        dv.value.value.should.have.length(1);
+        should(dv.value.value[0].criteria).equal("runtime-user");
+    });
+
+    it("should throw if address space is not available", async () => {
+        server.engine.addressSpace = null;
+        try {
+            await installRoleSet(server);
+            throw new Error("should have thrown");
+        } catch (err) {
+            should((err as Error).message).containEql("address space is not available");
+        }
+    });
+
+    describe("persistence", () => {
+        const tmpDir = scratch("_tmp_test_install");
+        const filePath = path.join(tmpDir, "test_roles.bin");
+
+        afterEach(async () => {
+            try {
+                await fs.rm(tmpDir, { recursive: true, force: true });
+            } catch {
+                /* */
+            }
+        });
+
+        it("should persist identities on addIdentity", async () => {
+            const { store } = await installRoleSet(server, { persistencePath: filePath });
+
+            store.addIdentity(
+                WellKnownRoleIds.SecurityAdmin,
+                new IdentityMappingRuleType({
+                    criteriaType: IdentityCriteriaType.UserName,
+                    criteria: "admin"
+                })
+            );
+
+            // Trigger the persist manually (the method handler does this,
+            // but here we test that the store is loaded correctly on next init)
+            await saveToBinaryFile(store, filePath);
+
+            // Reload into a fresh store
+            const store2 = new InMemoryIdentityMappingStore();
+            await loadFromBinaryFile(store2, filePath);
+            store2.getIdentitiesForRole(WellKnownRoleIds.SecurityAdmin).should.have.length(1);
+        });
+
+        it("should load existing persistence on startup", async () => {
+            // First, create persisted data
+            const store1 = new InMemoryIdentityMappingStore();
+            store1.addIdentity(
+                WellKnownRoleIds.Observer,
+                new IdentityMappingRuleType({
+                    criteriaType: IdentityCriteriaType.Anonymous,
+                    criteria: "*"
+                })
+            );
+            await writeArchive(filePath, { version: ROLE_SET_ARCHIVE_VERSION, identities: identitiesToBase64(store1) });
+
+            // Now install with the same persistence path
+            const { store } = await installRoleSet(server, { persistencePath: filePath });
+            store.getIdentitiesForRole(WellKnownRoleIds.Observer).should.have.length(1);
+        });
+    });
+});

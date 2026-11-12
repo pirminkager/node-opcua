@@ -14,7 +14,7 @@ $ npm install node-opcua-file-transfer
 ## exposing a File node in the addressSpace
 
 ```javascript
-import { OPCUAServer, UAFileType } from "node-opcua";
+import { OPCUAServer, UAFile } from "node-opcua";
 import { installFileType } from "node-opcua-file-transfer";
 
 ```
@@ -44,7 +44,7 @@ const myFile = fileType.instantiate({
     nodeId: "s=MyFile",
     browseName: "MyFile",
     organizedBy: addressSpace.rootFolder.objects
-}) as UAFileType;
+}) as UAFile;
 
 // now bind the opcuaFile object with our file
 installFileType(opcuaFile, { 
@@ -53,6 +53,22 @@ installFileType(opcuaFile, {
 
 ```
 
+
+These options control the access to the file:
+
+| option | default | effect |
+|---|---|---|
+| `writable` | `true` | When `false`, `Open` with the Write bit returns `BadNotWritable`. Read access does not change. |
+| `maxSize` | `defaultMaxSize` (100000000) | A `Write` past this size returns `BadOutOfRange` and writes nothing. `0` means no limit. |
+| `maxOpenFilesPerSession` | `defaultMaxOpenFilesPerSession` (10) | The number of file handles that one Session can hold, for all the files. Then `Open` returns `BadResourceUnavailable`. |
+| `maxOpenFilesPerServer` | `defaultMaxOpenFilesPerServer` (256) | The number of file handles that all the Sessions can hold, for all the files. Then `Open` returns `BadResourceUnavailable`. Keep this value below the file descriptor limit of the process. |
+
+The `Writable` Property exposes the `writable` option. `UserWritable` also takes the role of the user
+into account: a user without the `Call` permission on the `Write` Method cannot open the file for
+writing, and `Open` returns `BadUserAccessDenied`.
+
+The server releases the file handles of a Session when the Session closes. To release your own
+resources in the same way, use `session.registerSessionShutdownTask(task)`.
 
 ## accessing a File node from a node-opcua client : ClientFile
 
@@ -112,13 +128,12 @@ await clientFile.open(mode);
 
 | Mode | Description |
 |------|-------------|
-| Read  |The file is opened for reading. the Write method cannot be executed. |
-| Write|The file is opened for writing. the Read cannot be executed. |
-| ReadWrite| The file is opened for reading an writing |
-| WriteEraseExisting | File is opened for writing only. The existing content of the file is erased and an empty file is provided. |
-| ReadWriteEraseExisting | File is opened for reading and writing.  The existing content of the file is erased and an empty file is provided.|
-| WriteAppend | File is opened for writing only and position is set at the end of the file |
-| ReadWriteAppend | File is opened for reading and writing and position is set at the end of the file |
+| Read  |The file is opened for reading. The Write method cannot be executed. |
+| Write|The file is opened for writing. The Read cannot be executed. |
+| ReadWrite| The file is opened for reading and writing |
+| WriteEraseExisting | File is open for writing only. The existing content of the file is erased and an empty file is provided. |
+| WriteAppend | File is open for writing only and the position is set at the end of the file |
+| ReadWriteAppend | File is opened for reading and writing and the position is set at the end of the file |
 }
 #### ClientFile#close() : close a file
 
@@ -181,9 +196,9 @@ await clientFile.write(dataToWrite);
 
 #### ClientFile#read(): Promise<Buffer> :reading data to the file
 
-Data can be writing to the file at the current cursor position.
+Data can be written to the file at the current cursor position.
 Data must be passed in a buffer.
-* read will throw an exception if file is not opened
+* read will throw an exception if the file is not opened
 
 ```javascript
 
@@ -198,7 +213,63 @@ const data: Buffer = await clientFile.read(200);
 ### notes
 
 UInt64
-* At this time BigInt, is not supported by all version of nodeJs that are targeted by node-opcua.
-UInt64 values are currently stored into a array of 2 32bits numbers : [ High,Low]
+* At this time BigInt, is not supported by all versions of nodeJs that are targeted by node-opcua.
+UInt64 values are currently stored into an array of 2 32bits numbers : [ High,Low]
 
+
+## Feature
+
+|                                        |                          |                    |
+|----------------------------------------|:------------------------:|--------------------|
+| FileType                               |  :white_check_mark:      |                    |          
+| FileDirectoryType                      |  :new_moon:              | (sponsor wanted)   |     
+| FileTransferStateMachineType           |  :new_moon:              | (sponsor wanted)   |     
+| TemporaryFileTransferType              |  :new_moon:              | (sponsor wanted)   |            
+| AddressSpaceFileType                   |  :new_moon:              | (sponsor wanted)   | 
+
+## Sponsors & Backers 
+
+We appreciate that, once you have evaluated the software you consider supporting our effort by applying to our sponsor program:
+
+  - https://github.com/sponsors/node-opcua
+  - https://opencollective.com/node-opcua
+
+Grants ensure the following:
+
+- 🔨 Long term maintenance of the project
+- ⚙️ maintain the website and continuous integration platform
+- 🛣  Progress on the road-map
+- 🐛 Quick responses to bug reports
+- 🚀 New features & enhancements
+- ⚖️ representing the node-opcua user community at the OPC Foundation
+
+# Support 
+
+Technical Support is exclusively provided to registered members of the NodeOPCUA Subscription (https://support.sterfive.com) or through dedicated Professional Services.
+
+# License
+
+Node-OPCUA is made available to you under the MIT open source license. 
+
+See [LICENSE](./LICENSE) for details.
+
+
+# value-added extensions
+
+Contact Sterfive SAS (mailto:contact@sterfive.com) for additional companion modules that are available to registered members:
+
+ - node-opcua-pub-sub : Part 14 implementation to develop OPC UA PubSub over MQTT applications
+ - node-opcua-webproxy:  to operate node-opcua from within a web browser
+ - node-opcua-optimized-client: super-charge OPC UA Client 
+ - react-components:    a collection of React UI components 
+ - aggregator:  a powerful OPC UA aggregator that can combine and monitored hundred of servers and millions of variables.
+ - node-opcua-gds: a Global Discovery Server (Part 12)
+ - node-opcua-modeler-ex: a powerful NO-GUI OPC UA modeler
+
+
+# Copyright
+
+Copyright (c) 2022-2024 Sterfive SAS - https://www.sterfive.com
+
+Copyright (c) 2014-2022 Etienne Rossignon
 

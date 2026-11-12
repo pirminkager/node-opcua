@@ -1,0 +1,546 @@
+/**
+ * @module node-opcua-address-space
+ */
+import chalk from "chalk";
+import type { BaseNode, ISessionContext, UADataType, UAObject, UAVariable } from "node-opcua-address-space-base";
+import { assert } from "node-opcua-assert";
+import { coerceInt64, coerceInt64toInt32, type Int64 } from "node-opcua-basic-types";
+import { DataTypeIds } from "node-opcua-constants";
+import { AttributeIds, type LocalizedText, NodeClass, type QualifiedNameLike } from "node-opcua-data-model";
+import { DataValue, type DataValueLike } from "node-opcua-data-value";
+import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
+import { ExpandedNodeId, NodeId, resolveNodeId, sameNodeId } from "node-opcua-nodeid";
+import { NumericRange } from "node-opcua-numeric-range";
+import { StatusCodes } from "node-opcua-status-code";
+import {
+    type DataTypeDefinition,
+    EnumDefinition,
+    type EnumFieldOptions,
+    type EnumValueType,
+    StructureDefinition,
+    type StructureFieldOptions,
+    StructureType
+} from "node-opcua-types";
+import { setOwnProperty } from "node-opcua-utils";
+import { DataType } from "node-opcua-variant";
+import type { ExtensionObjectConstructorFuncWithSchema } from "../api/interfaces/extension_object_constructor.js";
+import { SessionContext } from "../api/session_context.js";
+import { BaseNodeImpl, type InternalBaseNodeOptions } from "./base_node_impl.js";
+import {
+    BaseNode_getCache,
+    BaseNode_References_toString,
+    BaseNode_toString,
+    ToStringBuilder,
+    type ToStringOption
+} from "./base_node_private.js";
+import { construct_isSubtypeOf, get_subtypeOf, get_subtypeOfObj } from "./tool_isSubtypeOf.js";
+
+const debugLog = make_debugLog("DATA_TYPE");
+const doDebug = checkDebugFlag("DATA_TYPE");
+
+export interface StructureFieldOptionsEx extends StructureFieldOptions {
+    allowSubTypes: boolean;
+}
+
+export interface IEnumItem {
+    name: string;
+    value: number;
+}
+export interface EnumerationInfo {
+    nameIndex: { [id: string]: IEnumItem };
+    valueIndex: { [id: number]: IEnumItem };
+}
+export interface UADataTypeOptions extends InternalBaseNodeOptions {
+    partialDefinition: StructureFieldOptions[] | EnumFieldOptions[];
+    isUnion?: boolean;
+    /** the DataType is a bit mask, not an enumeration; see UADataTypeImpl.isOptionSet */
+    isOptionSet?: boolean;
+    /** the <Definition> Name as declared; see UADataTypeImpl.declaredDefinitionName */
+    definitionName?: string;
+    isAbstract?: boolean;
+    symbolicName?: string;
+}
+
+export class UADataTypeImpl extends BaseNodeImpl implements UADataType {
+    public _extensionObjectConstructor!: ExtensionObjectConstructorFuncWithSchema;
+    public readonly nodeClass = NodeClass.DataType;
+    public readonly definitionName: string = "";
+    public readonly symbolicName: string;
+
+    /**
+     * returns true if this is a super type of baseType
+     *
+     * @example
+     *
+     *    var dataTypeDouble = addressSpace.findDataType("Double");
+     *    var dataTypeNumber = addressSpace.findDataType("Number");
+     *    assert(dataTypeDouble.isSubtypeOf(dataTypeNumber));
+     *    assert(!dataTypeNumber.isSubtypeOf(dataTypeDouble));
+     *
+     */
+    public get subtypeOf(): NodeId | null {
+        return get_subtypeOf.call(this);
+    }
+
+    public get subtypeOfObj(): UADataType | null {
+        return get_subtypeOfObj.call(this) as unknown as UADataType;
+    }
+
+    /** @deprecated */
+    public isSupertypeOf = construct_isSubtypeOf<UADataType>(UADataTypeImpl);
+    public isSubtypeOf = construct_isSubtypeOf<UADataType>(UADataTypeImpl);
+
+    public readonly isAbstract: boolean;
+    // the EnumStrings / EnumValues children, reached through the child accessors: declared for the
+    // type checker only, since an emitted class field would sit on the instance and hide the
+    // accessor inherited from the prototype
+    declare private enumStrings?: UAVariable;
+    declare private enumValues?: UAVariable;
+    private $partialDefinition?: StructureFieldOptionsEx[] | EnumFieldOptions[];
+    private $fullDefinition?: StructureDefinition | EnumDefinition;
+
+    /**
+     * whether the nodeset declared this DataType with `IsOptionSet="true"`: a bit mask whose fields
+     * are bit positions rather than an enumeration whose fields are values. node-opcua builds no
+     * enumeration and no structure for one -- it is a plain UInt16 or UInt32 subtype -- so without
+     * this flag and the fields kept in $partialDefinition, an OptionSet that goes into the address
+     * space cannot come out again as the DataType the document declared.
+     */
+    public isOptionSetDataType = false;
+
+    /**
+     * the Name attribute of the <Definition> element as the nodeset spelled it. The published
+     * catalogue uses both spellings -- 467 bare names and 211 namespace-prefixed ones -- so there
+     * is no form to normalise to: recomputing it from the browse name rewrote every bare one.
+     * Undefined for a DataType this address space built itself, which has no declaration to keep.
+     */
+    public declaredDefinitionName?: string;
+
+    /** the fields of the <Definition> as declared, for a DataType the address space models no further */
+    public get declaredDefinitionFields(): StructureFieldOptionsEx[] | EnumFieldOptions[] | undefined {
+        return this.$partialDefinition;
+    }
+
+    constructor(options: UADataTypeOptions) {
+        super(options);
+        if (options.partialDefinition) {
+            this.$partialDefinition = options.partialDefinition;
+        }
+        this.isOptionSetDataType = !!options.isOptionSet;
+        if (options.definitionName) {
+            this.declaredDefinitionName = options.definitionName;
+        }
+        this.isAbstract = options.isAbstract === undefined || options.isAbstract === null ? false : options.isAbstract;
+        this.symbolicName = options.symbolicName || this.browseName.name || "";
+    }
+
+    public get basicDataType(): DataType {
+        return this.getBasicDataType();
+    }
+    public getBasicDataType(): DataType {
+        return this.addressSpace.findCorrespondingBasicDataType(this);
+    }
+
+    public readAttribute(
+        context: ISessionContext | null,
+        attributeId: AttributeIds,
+        indexRange?: NumericRange,
+        dataEncoding?: QualifiedNameLike | null
+    ): DataValue {
+        assert(!context || context instanceof SessionContext);
+
+        const options: DataValueLike = {};
+        switch (attributeId) {
+            case AttributeIds.IsAbstract:
+                options.statusCode = StatusCodes.Good;
+                options.value = { dataType: DataType.Boolean, value: !!this.isAbstract };
+                break;
+            case AttributeIds.DataTypeDefinition:
+                {
+                    const _definition = this._getDefinition()?.clone();
+                    if (_definition) {
+                        options.value = { dataType: DataType.ExtensionObject, value: _definition };
+                    } else {
+                        options.statusCode = StatusCodes.BadAttributeIdInvalid;
+                    }
+                }
+                break;
+            default:
+                return super.readAttribute(context, attributeId, indexRange, dataEncoding);
+        }
+        return new DataValue(options);
+    }
+
+    public getEncodingDefinition(encoding_name: string): string | null {
+        const encodingNode = this.getEncodingNode(encoding_name);
+        if (!encodingNode) {
+            throw new Error(`Cannot find Encoding for ${encoding_name}`);
+        }
+        const indexRange = new NumericRange();
+        const descriptionNodeRef = encodingNode.findReferences("HasDescription")[0];
+        const descriptionNode = this.addressSpace.findNode(descriptionNodeRef.nodeId) as UAVariable;
+        if (!descriptionNode) {
+            return null;
+        }
+        const dataValue = descriptionNode.readValue(SessionContext.defaultContext, indexRange);
+        return dataValue.value.value.toString() || null;
+    }
+
+    public getEncodingNode(encoding_name: string): UAObject | null {
+        const _cache = BaseNode_getCache(this);
+        _cache._encoding = _cache._encoding || new Map();
+        const key = `${encoding_name}Node`;
+        if (!_cache._encoding.has(key)) {
+            assert(encoding_name === "Default Binary" || encoding_name === "Default XML" || encoding_name === "Default JSON");
+            // could be binary or xml
+            const refs = this.findReferences("HasEncoding", true);
+            const addressSpace = this.addressSpace;
+            const encoding = refs
+                .map((ref) => addressSpace.findNode(ref.nodeId))
+                .filter((obj): obj is BaseNode => obj !== null)
+                .filter((obj) => obj.browseName.toString() === encoding_name);
+            const node = encoding.length === 0 ? null : (encoding[0] as UAObject);
+            _cache._encoding.set(key, node);
+            return node;
+        }
+        return _cache._encoding.get(key) || null;
+    }
+
+    public getEncodingNodeId(encoding_name: string): ExpandedNodeId | null {
+        const encoding = this.getEncodingNode(encoding_name);
+        if (!encoding) {
+            return null;
+        }
+        const namespaceUri = this.addressSpace.getNamespaceUri(encoding.nodeId.namespace);
+        return ExpandedNodeId.fromNodeId(encoding.nodeId, namespaceUri);
+    }
+    /**
+     * returns the encoding of this node's
+     * TODO objects have 2 encodings : XML and Binaries
+     */
+
+    public get binaryEncoding(): BaseNode | null {
+        return this.getEncodingNode("Default Binary");
+    }
+    public get binaryEncodingDefinition(): string | null {
+        return this.getEncodingDefinition("Default Binary");
+    }
+    public get binaryEncodingNodeId(): ExpandedNodeId | null {
+        return this.getEncodingNodeId("Default Binary");
+    }
+
+    public get xmlEncoding(): BaseNode | null {
+        return this.getEncodingNode("Default XML");
+    }
+    public get xmlEncodingNodeId(): ExpandedNodeId | null {
+        return this.getEncodingNodeId("Default XML");
+    }
+    public get xmlEncodingDefinition(): string | null {
+        return this.getEncodingDefinition("Default XML");
+    }
+
+    public get jsonEncoding(): BaseNode | null {
+        return this.getEncodingNode("Default JSON");
+    }
+
+    public get jsonEncodingNodeId(): ExpandedNodeId | null {
+        return this.getEncodingNodeId("Default JSON");
+    }
+
+    //  public get jsonEncodingDefinition(): string | null {
+    //      return this.getEncodingDefinition("Default JSON");
+    //  }
+
+    public _getEnumerationInfo(): EnumerationInfo {
+        let definition = [];
+        if (this.enumStrings) {
+            const enumStrings = this.enumStrings.readValue().value.value;
+            assert(Array.isArray(enumStrings));
+            definition = enumStrings.map((e: LocalizedText, index: number) => {
+                return {
+                    name: e.text,
+                    value: index
+                };
+            });
+        } else if (this.enumValues) {
+            assert(this.enumValues, "must have a enumValues property");
+            const enumValues = this.enumValues.readValue().value.value;
+            assert(Array.isArray(enumValues));
+            definition = enumValues.map((e: EnumValueType) => {
+                return {
+                    name: e.displayName.text,
+                    value: coerceInt64toInt32(e.value)
+                };
+            });
+        }
+
+        // construct nameIndex and valueIndex
+        const indexes: EnumerationInfo = {
+            nameIndex: {},
+            valueIndex: {}
+        };
+        for (const e of definition) {
+            setOwnProperty(indexes.nameIndex, e.name, e);
+            indexes.valueIndex[e.value] = e;
+        }
+        return indexes;
+    }
+
+    isStructure(): boolean {
+        const definition = this._getDefinition();
+        return !!definition && definition instanceof StructureDefinition;
+    }
+    getStructureDefinition(): StructureDefinition {
+        const definition = this._getDefinition();
+        // named: a bare assert here threw an Error with an empty message, which told a caller
+        // nothing at all about which DataType had refused and what it had instead
+        assert(
+            definition instanceof StructureDefinition,
+            `${this.browseName.toString()} (${this.nodeId.toString()}) has no StructureDefinition: ${definition ? definition.constructor.name : "none"}`
+        );
+        return definition as StructureDefinition;
+    }
+
+    isEnumeration(): boolean {
+        const definition = this._getDefinition();
+        return !!definition && definition instanceof EnumDefinition;
+    }
+    getEnumDefinition(): EnumDefinition {
+        const definition = this._getDefinition();
+        assert(
+            definition instanceof EnumDefinition,
+            `${this.browseName.toString()} (${this.nodeId.toString()}) has no EnumDefinition: ${definition ? definition.constructor.name : "none"}`
+        );
+        return definition as EnumDefinition;
+    }
+
+    public _getDefinition(): DataTypeDefinition | null {
+        if (this.$fullDefinition !== undefined) {
+            return this.$fullDefinition;
+        }
+        const addressSpace = this.addressSpace;
+        const enumeration = addressSpace.findDataType("Enumeration");
+        const structure = addressSpace.findDataType("Structure");
+        const union = addressSpace.findDataType("Union");
+
+        // we have a data type from a companion specification
+        // let's see if this data type need to be registered.
+        //
+        // One walk up the chain answers all three questions. `isSubtypeOf` would answer each of
+        // them, and memoizes — but its memo is keyed on a counter bumped every time a HasSubtype
+        // reference is added anywhere, so during a load, which adds thousands of them, the memo
+        // is thrown away before it is ever read and each call walks the chain from scratch. Three
+        // walks become one, and the one uses `subtypeOfObj`, which is cached per node, instead of
+        // filtering the node's whole reference list at every level.
+        let isEnumeration = false;
+        let isStructure = false;
+        let isUnion = false;
+        {
+            let ancestor: UADataTypeImpl | null = this;
+            // a chain longer than this is a cycle in a broken nodeset, not a model
+            let guard = 128;
+            while (ancestor && guard-- > 0) {
+                const nodeId = ancestor.nodeId;
+                if (enumeration && sameNodeId(nodeId, enumeration.nodeId)) isEnumeration = true;
+                if (structure && sameNodeId(nodeId, structure.nodeId)) isStructure = true;
+                if (union && sameNodeId(nodeId, union.nodeId)) isUnion = true;
+                ancestor = ancestor.subtypeOfObj as UADataTypeImpl | null;
+            }
+            // a Union is a Structure; the original asked for both and so does this
+            isUnion = isUnion && !!structure;
+        }
+
+        const isRootDataType = (n: UADataType) => n.nodeId.namespace === 0 && n.nodeId.value === DataTypeIds.BaseDataType;
+
+        // https://reference.opcfoundation.org/v105/Core/docs/Part3/8.49/#Table34
+        if (isStructure) {
+            let dataTypeNode: UADataTypeImpl | null = this;
+            const allPartialDefinitions: StructureFieldOptionsEx[][] = [];
+            while (dataTypeNode && !isRootDataType(dataTypeNode)) {
+                if (dataTypeNode.$partialDefinition) {
+                    allPartialDefinitions.push(dataTypeNode.$partialDefinition as StructureFieldOptionsEx[]);
+                }
+                dataTypeNode = dataTypeNode.subtypeOfObj as UADataTypeImpl | null;
+            }
+
+            // merge them:
+            const definitionFields: StructureFieldOptionsEx[] = [];
+            for (const dd of allPartialDefinitions.reverse()) {
+                definitionFields.push(...dd);
+            }
+
+            const basicDataType = this.subtypeOfObj?.nodeId || new NodeId();
+
+            const defaultEncodingId = this.binaryEncodingNodeId || this.xmlEncodingNodeId || new NodeId();
+
+            this.$fullDefinition = makeStructureDefinition(basicDataType, defaultEncodingId, definitionFields, isUnion);
+        } else if (isEnumeration) {
+            const allPartialDefinitions: StructureFieldOptions[][] = [];
+            let dataTypeNode: UADataTypeImpl | null = this;
+            while (dataTypeNode && !isRootDataType(dataTypeNode)) {
+                if (dataTypeNode.$partialDefinition) {
+                    allPartialDefinitions.push(dataTypeNode.$partialDefinition as StructureFieldOptions[]);
+                }
+                dataTypeNode = dataTypeNode.subtypeOfObj as UADataTypeImpl | null;
+            }
+            // merge them:
+            const definitionFields: StructureFieldOptions[] = [];
+            for (const dd of allPartialDefinitions.reverse()) {
+                definitionFields.push(...dd);
+            }
+            this.$fullDefinition = makeEnumDefinition(definitionFields);
+        }
+
+        return this.$fullDefinition as DataTypeDefinition;
+    }
+
+    public getDefinition(): DataTypeDefinition {
+        const d = this._getDefinition();
+        /* c8 ignore start */
+        if (!d) {
+            throw new Error("DataType has no definition property");
+        }
+        /* c8 ignore stop */
+        return d;
+    }
+
+    public install_extra_properties(): void {
+        //
+    }
+
+    public toString(): string {
+        const options = new ToStringBuilder();
+        DataType_toString.call(this, options);
+        return options.toString();
+    }
+}
+
+function dataTypeDefinition_toString(this: UADataTypeImpl, options: ToStringOption) {
+    const definition = this._getDefinition();
+    if (!definition) {
+        return;
+    }
+    const output = definition.toString();
+    options.add(options.padding + chalk.yellow(" Definition                   :             "));
+    for (const str of output.split("\n")) {
+        options.add(options.padding + chalk.yellow(`                              :   ${str}`));
+    }
+}
+
+export function DataType_toString(this: UADataTypeImpl, options: ToStringOption): void {
+    BaseNode_toString.call(this, options);
+    options.add(options.padding + chalk.yellow(`          isAbstract          : ${this.isAbstract}`));
+    options.add(options.padding + chalk.yellow(`          definitionName      : ${this.definitionName}`));
+
+    options.add(
+        options.padding +
+            chalk.yellow("          binaryEncodingNodeId: ") +
+            (this.binaryEncodingNodeId ? this.binaryEncodingNodeId.toString() : "<none>")
+    );
+    options.add(
+        options.padding +
+            chalk.yellow("          xmlEncodingNodeId   : ") +
+            (this.xmlEncodingNodeId ? this.xmlEncodingNodeId.toString() : "<none>")
+    );
+    options.add(
+        options.padding +
+            chalk.yellow("          jsonEncodingNodeId  : ") +
+            (this.jsonEncodingNodeId ? this.jsonEncodingNodeId.toString() : "<none>")
+    );
+    if (this.subtypeOfObj) {
+        options.add(
+            options.padding +
+                chalk.yellow("          subtypeOfObj        : ") +
+                (this.subtypeOfObj ? this.subtypeOfObj.browseName.toString() : "")
+        );
+    }
+    // references
+    BaseNode_References_toString.call(this, options);
+
+    dataTypeDefinition_toString.call(this, options);
+}
+
+const defaultEnumValue: Int64 = coerceInt64(-1);
+
+function makeEnumDefinition(definitionFields: EnumFieldOptions[]) {
+    return new EnumDefinition({
+        fields: definitionFields.map((x) => ({
+            description: x.description,
+            name: x.name,
+            value: x.value === undefined ? defaultEnumValue : coerceInt64(x.value)
+        }))
+    });
+}
+
+function makeStructureDefinition(
+    baseDataType: NodeId,
+    defaultEncodingId: NodeId,
+    fields: StructureFieldOptionsEx[],
+    isUnion: boolean
+): StructureDefinition {
+    const hasSubtypedFields = fields.filter((field) => field.allowSubTypes).length > 0;
+
+    if (hasSubtypedFields && doDebug) {
+        // c8 ignore next
+        doDebug && debugLog("Fields with subtypes:");
+        for (const field of fields) {
+            if (field.allowSubTypes) {
+                // c8 ignore next
+                doDebug && debugLog("  ", field.name, field.dataType?.toString());
+            }
+        }
+    }
+    const hasOptionalFields = fields.filter((field) => field.isOptional).length > 0;
+
+    const structureType = isUnion
+        ? hasSubtypedFields
+            ? StructureType.UnionWithSubtypedValues
+            : StructureType.Union
+        : hasOptionalFields
+          ? StructureType.StructureWithOptionalFields
+          : hasSubtypedFields
+            ? StructureType.StructureWithSubtypedValues
+            : StructureType.Structure;
+
+    // note:  https://reference.opcfoundation.org/Core/Part3/v105/docs/8.51
+    // field.isOptional has a special behavior depending on the structure type
+    //
+    // If the structureType is StructureWithOptionalFields this field indicates if a data type field
+    // Structure is optional. In this case a value of FALSE means the StructureField is always present in all
+    // occurrences of the Structure DataType and a value of TRUE means the StructureField may be present in an
+    // occurrence of the Structure DataType.
+    //
+    // If the structureType is Structure or Union this field shall be FALSE and shall be ignored
+    //
+    // If the structureType is StructureWithSubtypedValues, or UnionWithSubtypedValues this field is used to
+    // indicate if the data type field allows subtyping.Subtyping is allowed when set to TRUE.
+
+    const isUnionOrStructureWithSubtypedValues =
+        structureType === StructureType.UnionWithSubtypedValues || structureType === StructureType.StructureWithSubtypedValues;
+
+    if (isUnionOrStructureWithSubtypedValues) {
+        for (const field of fields) {
+            if (field.allowSubTypes) {
+                // this is a special use of the isOtional flag to indicate that subtyping is allowed for this field
+                // see https://reference.opcfoundation.org/Core/Part3/v105/docs/8.51
+                field.isOptional = field.allowSubTypes;
+            }
+        }
+    }
+
+    // Normalize: default missing field dataType to BaseDataType (i=24)
+    // per OPC UA spec, a missing DataType should reference BaseDataType,
+    // not Null NodeId (i=0)
+    const baseDataTypeNodeId = resolveNodeId(DataTypeIds.BaseDataType);
+
+    const sd = new StructureDefinition({
+        baseDataType,
+        defaultEncodingId,
+        fields: fields.map((f) => ({
+            ...f,
+            dataType: f.dataType ?? baseDataTypeNodeId
+        })),
+        structureType
+    });
+    return sd;
+}

@@ -1,174 +1,150 @@
 /**
  * @module node-opcua-server-configuration-server
  */
-import { EventEmitter } from "events";
-import * as fs from "fs";
-import * as path from "path";
-import { promisify } from "util";
-
+import { EventEmitter } from "node:events";
+import type { ISessionContext } from "node-opcua-address-space-base";
 import { assert } from "node-opcua-assert";
-import { ByteString, StatusCodes } from "node-opcua-basic-types";
-import {
-    convertPEMtoDER,
-    exploreCertificate,
-    makeSHA1Thumbprint,
-    readPrivateKey,
-    toPem
-} from "node-opcua-crypto";
-import {
-    Certificate,
-    CertificatePEM,
-    privateDecrypt_long,
-    PrivateKey,
-    PrivateKeyPEM,
-    publicEncrypt_long
-} from "node-opcua-crypto";
-import { checkDebugFlag, make_debugLog, make_errorLog } from "node-opcua-debug";
-import { NodeId, resolveNodeId, sameNodeId } from "node-opcua-nodeid";
-import { CertificateManager } from "node-opcua-pki";
-import { StatusCode } from "node-opcua-status-code";
-
-import {
+import type { ByteString } from "node-opcua-basic-types";
+import { CertificateManager } from "node-opcua-certificate-manager";
+import { make_errorLog } from "node-opcua-debug";
+import type { NodeId } from "node-opcua-nodeid";
+import type { SubjectOptions } from "node-opcua-pki";
+import type { StatusCode } from "node-opcua-status-code";
+import { rsaCertificateTypesArray } from "../clientTools/certificate_types.js";
+import type {
     CreateSigningRequestResult,
     GetRejectedListResult,
     PushCertificateManager,
     UpdateCertificateResult
-} from "../push_certificate_manager";
+} from "../push_certificate_manager.js";
+import { executeApplyChanges } from "./push_certificate_manager/apply_changes.js";
+import { executeCreateSigningRequest } from "./push_certificate_manager/create_signing_request.js";
+import { executeGetRejectedList } from "./push_certificate_manager/get_rejected_list.js";
+import { PushCertificateManagerInternalContext } from "./push_certificate_manager/internal_context.js";
+import { executeUpdateCertificate } from "./push_certificate_manager/update_certificate.js";
 
-const debugLog = make_debugLog("ServerConfiguration");
 const errorLog = make_errorLog("ServerConfiguration");
-const doDebug = checkDebugFlag("ServerConfiguration");
-
-const defaultApplicationGroup = resolveNodeId("ServerConfiguration_CertificateGroups_DefaultApplicationGroup");
-const defaultHttpsGroup = resolveNodeId("ServerConfiguration_CertificateGroups_DefaultHttpsGroup");
-const defaultUserTokenGroup = resolveNodeId("ServerConfiguration_CertificateGroups_DefaultUserTokenGroup");
 
 /**
- * check that the given certificate matches the given private key
- * @param certificate
- * @param privateKey
+ * Type-safe event map for PushCertificateManagerServerImpl.
+ *
+ * - `applyChangesCompleted` — fired after a successful `applyChanges()` call.
+ * - `certificateUpdated`    — fired after a successful `updateCertificate()` call,
+ *                             with the resolved group id and the leaf certificate.
+ * - `trustListUpdated`      — fired after a successful TrustList mutation
+ *                             (`CloseAndUpdate`, `AddCertificate`, `RemoveCertificate`),
+ *                             with the certificate-group browse-name.
  */
-function certificateMatchesPrivateKeyPEM(certificate: CertificatePEM, privateKey: PrivateKeyPEM): boolean {
-
-    const initialBuffer = Buffer.from("Lorem Ipsum");
-    const encryptedBuffer = publicEncrypt_long(initialBuffer, certificate, 256, 11);
-    const decryptedBuffer = privateDecrypt_long(encryptedBuffer, privateKey, 256);
-    return initialBuffer.toString("ascii") === decryptedBuffer.toString("ascii");
-}
-
-export function certificateMatchesPrivateKey(certificate: Certificate, privateKey: PrivateKey): boolean {
-
-    const certificatePEM = toPem(certificate, "CERTIFICATE");
-    const privateKeyPEM = toPem(privateKey, "RSA PRIVATE KEY");
-    return certificateMatchesPrivateKeyPEM(certificatePEM, privateKeyPEM);
-}
-
-function findCertificateGroupName(certificateGroupNodeId: NodeId | string): string {
-
-    if (typeof certificateGroupNodeId === "string") {
-        return certificateGroupNodeId;
-    }
-    if (sameNodeId(certificateGroupNodeId, NodeId.nullNodeId) ||
-      sameNodeId(certificateGroupNodeId, defaultApplicationGroup)) {
-        return "DefaultApplicationGroup";
-    }
-    if (sameNodeId(certificateGroupNodeId, defaultHttpsGroup)) {
-        return "DefaultHttpsGroup";
-    }
-    if (sameNodeId(certificateGroupNodeId, defaultUserTokenGroup)) {
-        return "DefaultUserTokenGroup";
-    }
-    return "";
+export interface PushCertificateManagerEvents {
+    applyChangesCompleted: (context?: ISessionContext) => void;
+    certificateUpdated: (certificateGroupId: NodeId | string, certificate: Buffer) => void;
+    trustListUpdated: (certificateGroupId: string) => void;
+    CertificateAboutToChange: (actionQueue: ActionQueue) => void;
+    CertificateChanged: (actionQueue: ActionQueue) => void;
 }
 
 export interface PushCertificateManagerServerOptions {
     applicationGroup?: CertificateManager;
     userTokenGroup?: CertificateManager;
     httpsGroup?: CertificateManager;
+
+    applicationUri: string;
+
+    /**
+     * DNS host names and IP addresses to request in a CreateSigningRequest's
+     * SAN. Without these, a CSR only ever carries the ApplicationUri: some
+     * GDS/CA implementations then refuse the connection with
+     * BadCertificateHostNameInvalid once a client reaches the server by a
+     * hostname the certificate doesn't list. Pass the same values used for
+     * the server's own self-signed certificate (see
+     * `OPCUAServer.getConfiguredHostnames()`/`getConfiguredIPs()`, plus the
+     * machine's fqdn/hostname/auto-detected IPs) to keep a renewed
+     * certificate at parity with a fresh self-signed one.
+     */
+    dns?: string[];
+    ip?: string[];
+
+    // Optional: Allowed certificate types for each group
+    // These should be read from the CertificateTypes Property of the CertificateGroup objects in the AddressSpace
+    // If not provided, defaults to all known OPC UA certificate types (backward compatibility)
+    applicationGroupCertificateTypes?: NodeId[];
+    userTokenGroupCertificateTypes?: NodeId[];
+    httpsGroupCertificateTypes?: NodeId[];
 }
 
-type Functor = () => Promise<void>;
-
-export async function copyFile(source: string, dest: string): Promise<void> {
-    try {
-        debugLog("copying file \n source ", source, "\n =>\n dest ", dest);
-        const sourceExist = await promisify(fs.exists)(source);
-        if (sourceExist) {
-            await promisify(fs.copyFile)(source, dest);
-        }
-    } catch (err) {
-        errorLog(err);
-    }
-}
-
-export async function deleteFile(file: string): Promise<void> {
-    try {
-        const exists = await promisify(fs.exists)(file);
-        if (exists) {
-            debugLog("deleting file ", file);
-            await promisify(fs.unlink)(file);
-        }
-    } catch (err) {
-        errorLog(err);
-    }
-}
-
-export async function moveFile(source: string, dest: string): Promise<void> {
-
-    debugLog("moving file file \n source ", source, "\n =>\n dest ", dest);
-    try {
-        await copyFile(source, dest);
-        await deleteFile(source);
-    } catch (err) {
-        errorLog(err);
-    }
-}
-
-export async function moveFileWithBackup(source: string, dest: string): Promise<void> {
-    // let make a copy of the destination file
-    debugLog("moveFileWithBackup file \n source ", source, "\n =>\n dest ", dest);
-    await copyFile(dest, dest + "_old");
-    await moveFile(source, dest);
-}
-
-let fileCounter = 0;
-
-export type ActionQueue = Array<() => Promise<void>>;
+export type ActionQueue = (() => Promise<void>)[];
 
 export class PushCertificateManagerServerImpl extends EventEmitter implements PushCertificateManager {
-
     public applicationGroup?: CertificateManager;
     public userTokenGroup?: CertificateManager;
     public httpsGroup?: CertificateManager;
+    public dns?: string[];
+    public ip?: string[];
 
-    private readonly _map: { [key: string]: CertificateManager } = {};
-    private readonly _pendingTasks: Functor[] = [];
+    // Use a true private reference (could be upgraded to #context in recent ES)
+    private readonly _context: PushCertificateManagerInternalContext;
 
-    private $$actionQueue: ActionQueue = [];
+    /** @hidden */
+    public applicationUri: string;
 
-    constructor(options?: PushCertificateManagerServerOptions) {
+    // ── typed event helpers ──────────────────────────────────────────
+    public on<K extends keyof PushCertificateManagerEvents>(event: K, listener: PushCertificateManagerEvents[K]): this;
+    public on(event: string | symbol, listener: (...args: unknown[]) => void): this;
+    public on(event: string | symbol, listener: (...args: unknown[]) => void): this {
+        return super.on(event, listener);
+    }
 
+    public once<K extends keyof PushCertificateManagerEvents>(event: K, listener: PushCertificateManagerEvents[K]): this;
+    public once(event: string | symbol, listener: (...args: unknown[]) => void): this;
+    public once(event: string | symbol, listener: (...args: unknown[]) => void): this {
+        return super.once(event, listener);
+    }
+
+    constructor(options: PushCertificateManagerServerOptions) {
         super();
+        this._context = new PushCertificateManagerInternalContext(this);
+
+        this.applicationUri = options ? options.applicationUri : "";
 
         if (options) {
+            this.dns = options.dns;
+            this.ip = options.ip;
             this.applicationGroup = options.applicationGroup;
             this.userTokenGroup = options.userTokenGroup;
             this.httpsGroup = options.httpsGroup;
             if (this.userTokenGroup) {
-                this._map.DefaultUserTokenGroup = this.userTokenGroup;
+                this._context.map.DefaultUserTokenGroup = this.userTokenGroup;
+                // Store allowed certificate types, or use all known types as default
+                this._context.certificateTypes.DefaultUserTokenGroup = options.userTokenGroupCertificateTypes || [
+                    // [...rsaCertificateTypes, ...eccCertificateTypes];
+                    ...rsaCertificateTypesArray
+                ]; // FIXME: ECC is not yet supported
 
-                // istanbul ignore next
+                /* c8 ignore next */
                 if (!(this.userTokenGroup instanceof CertificateManager)) {
-                    errorLog("Expecting this.userTokenGroup to be instanceof CertificateManager :", (this.userTokenGroup as any).constructor.name);
+                    errorLog(
+                        "Expecting this.userTokenGroup to be instanceof CertificateManager :",
+                        (this.userTokenGroup as unknown as { constructor: { name: string } }).constructor.name
+                    );
                     throw new Error("Expecting this.userTokenGroup to be instanceof CertificateManager ");
                 }
             }
             if (this.applicationGroup) {
-                this._map.DefaultApplicationGroup = this.applicationGroup;
+                this._context.map.DefaultApplicationGroup = this.applicationGroup;
+                // Store allowed certificate types, or use all known types as default
+                this._context.certificateTypes.DefaultApplicationGroup = options.applicationGroupCertificateTypes || [
+                    // [...rsaCertificateTypes, ...eccCertificateTypes];
+                    ...rsaCertificateTypesArray
+                ]; // FIXME: ECC is not yet supported
                 assert(this.applicationGroup instanceof CertificateManager);
             }
             if (this.httpsGroup) {
-                this._map.DefaultHttpsGroup = this.httpsGroup;
+                this._context.map.DefaultHttpsGroup = this.httpsGroup;
+                // Store allowed certificate types, or use all known types as default
+                this._context.certificateTypes.DefaultHttpsGroup = options.httpsGroupCertificateTypes || [
+                    // [...rsaCertificateTypes, ...eccCertificateTypes];
+                    ...rsaCertificateTypesArray
+                ]; // FIXME: ECC is not yet supported
                 assert(this.httpsGroup instanceof CertificateManager);
             }
         }
@@ -191,353 +167,98 @@ export class PushCertificateManagerServerImpl extends EventEmitter implements Pu
     }
 
     public async getSupportedPrivateKeyFormats(): Promise<string[]> {
-        return this.supportedPrivateKeyFormats;
+        return ["PEM"];
     }
 
     public async createSigningRequest(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      subjectName: string,
-      regeneratePrivateKey?: boolean,
-      nonce?: Buffer
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        subjectName: string | SubjectOptions | null,
+        regeneratePrivateKey?: boolean,
+        nonce?: Buffer
     ): Promise<CreateSigningRequestResult> {
-
-        const certificateManager = this.getCertificateManager(certificateGroupId);
-
-        if (!certificateManager) {
-            debugLog(" cannot find group ", certificateGroupId);
-            return {
-                statusCode: StatusCodes.BadInvalidArgument
-            };
-        }
-
-        // todo : at this time regenerate PrivateKey is not supported
-        if (regeneratePrivateKey) {
-            // The Server shall create a new Private Key which it stores until the
-            // matching signed Certificate is uploaded with the UpdateCertificate Method.
-            // Previously created Private Keys may be discarded if UpdateCertificate was not
-            // called before calling this method again.
-            debugLog(" regeneratePrivateKey = true not supported yet");
-
-            // debugLog("generating a new private key ...");
-            // setEnv("RANDFILE", certificateManager.randomFile);
-            // await createPrivateKey(certificateManager.privateKey, certificateManager.keySize);
-
-            return {
-                statusCode: StatusCodes.BadInvalidArgument
-            };
-        } else {
-            // The Server uses its existing Private Key
-        }
-
-        const options = {
-            subject: subjectName
-        };
-        const csrfile = await certificateManager.createCertificateRequest(options);
-        const csrPEM = await promisify(fs.readFile)(csrfile, "utf8");
-        const certificateSigningRequest = convertPEMtoDER(csrPEM);
-
-        this.addPendingTask(() => deleteFile(csrfile));
-
-        return {
-            certificateSigningRequest,
-            statusCode: StatusCodes.Good
-        };
+        return await executeCreateSigningRequest(
+            this._context,
+            certificateGroupId,
+            certificateTypeId,
+            subjectName,
+            regeneratePrivateKey,
+            nonce
+        );
     }
 
     public async getRejectedList(): Promise<GetRejectedListResult> {
-
-        interface FileData {
-            filename: string;
-            stat: {
-                mtime: Date
-            };
-        }
-
-        // rejectedList comes from each group
-        async function extractRejectedList(
-          group: CertificateManager | undefined,
-          certificateList: FileData[]
-        ): Promise<void> {
-            if (!group) {
-                return;
-            }
-            const rejectedFolder = path.join(group.rootDir, "rejected");
-            const files = await promisify(fs.readdir)(rejectedFolder);
-
-            const stat = promisify(fs.stat);
-
-            const promises1: Array<Promise<fs.Stats>> = [];
-            for (const certFile of files) {
-                // read date
-                promises1.push(stat(path.join(rejectedFolder, certFile)));
-            }
-            const stats = await Promise.all(promises1);
-
-            for (let i = 0; i < stats.length; i++) {
-                certificateList.push({
-                    filename: path.join(rejectedFolder, files[i]),
-                    stat: stats[i]
-                });
-            }
-        }
-
-        const list: FileData[] = [];
-        await extractRejectedList(this.applicationGroup, list);
-        await extractRejectedList(this.userTokenGroup, list);
-        await extractRejectedList(this.httpsGroup, list);
-
-        // now sort list from newer file to older file
-        list.sort((a: FileData, b: FileData) =>
-          b.stat.mtime.getTime() - a.stat.mtime.getTime()
-        );
-
-        const readFile = promisify(fs.readFile);
-        const promises: Array<Promise<string>> = [];
-        for (const item of list) {
-            promises.push(readFile(item.filename, "utf8"));
-        }
-        const certificatesPEM: string[] = await Promise.all(promises);
-
-        const certificates: Buffer[] = certificatesPEM.map(convertPEMtoDER);
-        return {
-            certificates,
-            statusCode: StatusCodes.Good
-        };
+        return await executeGetRejectedList(this._context);
     }
 
     public async updateCertificate(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      certificate: Buffer,
-      issuerCertificates: ByteString[]
-    ): Promise<UpdateCertificateResult>;
-    public async updateCertificate(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      certificate: Buffer,
-      issuerCertificates: ByteString[],
-      privateKeyFormat?: string,
-      privateKey?: Buffer
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        certificate: Buffer,
+        issuerCertificates: ByteString[],
+        privateKeyFormat?: string,
+        privateKey?: Buffer | string
     ): Promise<UpdateCertificateResult> {
-
-        // Result Code                Description
-        // BadInvalidArgument        The certificateTypeId or certificateGroupId is not valid.
-        // BadCertificateInvalid     The Certificate is invalid or the format is not supported.
-        // BadNotSupported           The PrivateKey is invalid or the format is not supported.
-        // BadUserAccessDenied       The current user does not have the rights required.
-        // BadSecurityChecksFailed   Some failure occurred verifying the integrity of the Certificate.
-        const certificateManager = this.getCertificateManager(certificateGroupId)!;
-
-        if (!certificateManager) {
-            debugLog(" cannot find group ", certificateGroupId);
-            return {
-                statusCode: StatusCodes.BadInvalidArgument
-            };
-        }
-
-        async function preinstallCertificate(self: PushCertificateManagerServerImpl) {
-
-            const certFolder = path.join(certificateManager.rootDir, "own/certs");
-            const certificateFileDER = path.join(certFolder, `_pending_certificate${fileCounter++}.der`);
-            const certificateFilePEM = path.join(certFolder, `_pending_certificate${fileCounter++}.pem`);
-
-            await promisify(fs.writeFile)(certificateFileDER, certificate, "binary");
-            await promisify(fs.writeFile)(certificateFilePEM, toPem(certificate, "CERTIFICATE"));
-
-            const destDER = path.join(certFolder, "certificate.der");
-            const destPEM = path.join(certFolder, "certificate.pem");
-
-            // put existing file in security by backing them up
-            self.addPendingTask(() => moveFileWithBackup(certificateFileDER, destDER));
-            self.addPendingTask(() => moveFileWithBackup(certificateFilePEM, destPEM));
-
-        }
-
-        async function preinstallPrivateKey(self: PushCertificateManagerServerImpl) {
-
-            assert(privateKeyFormat!.toUpperCase() === "PEM");
-            assert(privateKey! instanceof Buffer); // could be DER or PEM in a buffer ?
-
-            const ownPrivateFolder = path.join(certificateManager.rootDir, "own/private");
-            const privateKeyFilePEM = path.join(ownPrivateFolder, `_pending_private_key${fileCounter++}.pem`);
-
-            const privateKeyPEM = toPem(privateKey!, "RSA PRIVATE KEY");
-            await promisify(fs.writeFile)(privateKeyFilePEM, privateKeyPEM, "utf-8");
-
-            // console.log("KYKY ", privateKeyPEM);
-            // console.log("KYKY certificateManager.privateKey = ", certificateManager.privateKey);
-
-            self.addPendingTask(() => moveFileWithBackup(privateKeyFilePEM, certificateManager.privateKey));
-
-        }
-
-        // OPC Unified Architecture, Part 12 42 Release 1.04:
-        //
-        // UpdateCertificate is used to update a Certificate for a Server.
-        // There are the following three use cases for this Method:
-        //
-        //  - The new Certificate was created based on a signing request created with the Method
-        //    In this case there is no privateKey provided.
-        //  - A new privateKey and Certificate was created outside the Server and both are updated
-        //    with this Method.
-        //  - A new Certificate was created and signed with the information from the old Certificate.
-        //    In this case there is no privateKey provided.
-
-        // The Server shall do all normal integrity checks on the Certificate and all of the issuer
-        // Certificates. If errors occur the BadSecurityChecksFailed error is returned.
-        // todo : all normal integrity check on the certificate
-        const certInfo = exploreCertificate(certificate);
-
-        const now = new Date();
-        if (certInfo.tbsCertificate.validity.notBefore.getTime() > now.getTime()) {
-            // certificate is not yet valid
-            debugLog("Certificate is not yet valid");
-            return { statusCode: StatusCodes.BadSecurityChecksFailed };
-
-        }
-        if (certInfo.tbsCertificate.validity.notAfter.getTime() < now.getTime()) {
-            // certificate is already out of date
-            debugLog("Certificate is already out of date");
-            return { statusCode: StatusCodes.BadSecurityChecksFailed };
-        }
-
-        // If the Server returns applyChangesRequired=FALSE then it is indicating that it is able to
-        // satisfy the requirements specified for the ApplyChanges Method.
-
-        debugLog(" updateCertificate ", makeSHA1Thumbprint(certificate).toString("hex"));
-
-        if (!privateKeyFormat || !privateKey) {
-
-            // The Server shall report an error if the public key does not match the existing Certificate and
-            // the privateKey was not provided.
-            // privateKey is not provided, so check that the public key matches the existing certificate
-            const privateKeyDER = readPrivateKey(certificateManager.privateKey);
-            if (!certificateMatchesPrivateKey(certificate, privateKeyDER)) {
-                // certificate doesn't match privateKey
-                debugLog("certificate doesn't match privateKey");
-                return { statusCode: StatusCodes.BadSecurityChecksFailed };
-            }
-            // a new certificate is provided for us,
-            // we keep our private key
-            // we do this in two stages
-            await preinstallCertificate(this);
-
-            return {
-                statusCode: StatusCodes.Good
-            };
-
-        } else if (privateKey) {
-
-            // a private key has been provided by the caller !
-            if (!privateKeyFormat) {
-                debugLog("the privateKeyFormat must be specified " + privateKeyFormat);
-                return { statusCode: StatusCodes.BadNotSupported };
-            }
-            if (privateKeyFormat !== "PEM" && privateKeyFormat !== "PFX") {
-                debugLog(" the private key format is invalid privateKeyFormat =" + privateKeyFormat);
-                return { statusCode: StatusCodes.BadNotSupported };
-            }
-            if (privateKeyFormat !== "PEM") {
-                debugLog("in NodeOPCUA we only support PEM for the moment privateKeyFormat =" + privateKeyFormat);
-                return { statusCode: StatusCodes.BadNotSupported };
-            }
-
-            // privateKey is  provided, so check that the public key matches provided private key
-            if (!certificateMatchesPrivateKey(certificate, privateKey)) {
-                // certificate doesn't match privateKey
-                debugLog("certificate doesn't match privateKey");
-                return { statusCode: StatusCodes.BadSecurityChecksFailed };
-            }
-
-            await preinstallPrivateKey(this);
-
-            await preinstallCertificate(this);
-
-            return {
-                statusCode: StatusCodes.Good
-            };
-
-        } else {
-            // todo !
-            return {
-                statusCode: StatusCodes.BadNotSupported
-            };
-        }
+        return await executeUpdateCertificate(
+            this._context,
+            certificateGroupId,
+            certificateTypeId,
+            certificate,
+            issuerCertificates,
+            privateKeyFormat,
+            privateKey
+        );
     }
 
-    public async applyChanges(): Promise<StatusCode> {
-
-        // ApplyChanges is used to tell the Server to apply any security changes.
-        // This Method should only be called if a previous call to a Method that changed the
-        // configuration returns applyChangesRequired=true.
-        //
-        // If the Server Certificate has changed, Secure Channels using the old Certificate will
-        // eventually be interrupted.
-
-        this.emit("CertificateAboutToChange", this.$$actionQueue);
-        await this.flushActionQueue();
-
-        try {
-            await this.applyPendingTasks();
-        } catch (err) {
-            debugLog("err ", err);
-            return StatusCodes.BadInternalError;
-        }
-        this.emit("CertificateChanged", this.$$actionQueue);
-        await this.flushActionQueue();
-
-        // The only leeway the Server has is with the timing.
-        // In the best case, the Server can close the TransportConnections for the affected Endpoints and leave any
-        // Subscriptions intact. This should appear no different than a network interruption from the
-        // perspective of the Client. The Client should be prepared to deal with Certificate changes
-        // during its reconnect logic. In the worst case, a full shutdown which affects all connected
-        // Clients will be necessary. In the latter case, the Server shall advertise its intent to interrupt
-        // connections by setting the SecondsTillShutdown and ShutdownReason Properties in the
-        // ServerStatus Variable.
-
-        // If the Secure Channel being used to call this Method will be affected by the Certificate change
-        // then the Server shall introduce a delay long enough to allow the caller to receive a reply.
-        return StatusCodes.Good;
+    /**
+     *
+     * ApplyChanges is used to apply pending Certificate and TrustList updates
+     * and to complete a transaction as described in 7.10.2.
+     *
+     * ApplyChanges returns Bad_InvalidState if any TrustList is still open for writing.
+     * No changes are applied and ApplyChanges can be called again after the TrustList is closed.
+     *
+     * If a Session is closed or abandoned then the transaction is closed and all pending changes are discarded.
+     *
+     * If ApplyChanges is called and there is no active transaction then the Server returns Bad_NothingToDo.
+     * If there is an active transaction, however, no changes are pending the result is Good and the transaction is closed.
+     *
+     * When a Server Certificate or TrustList changes active SecureChannels are not immediately affected.
+     * This ensures the caller of ApplyChanges can get a response to the Method call.
+     * Once the Method response is returned the Server shall force existing SecureChannels affected by
+     * the changes to renegotiate and use the new Server Certificate and/or TrustLists.
+     *
+     * Servers may close SecureChannels without discarding any Sessions or Subscriptions.
+     * This will seem like a network interruption from the perspective of the Client and the Client reconnect
+     * logic (see OPC 10000-4) allows them to recover their Session and Subscriptions.
+     * Note that some Clients may not be able to reconnect because they are no longer trusted.
+     *
+     * Other Servers may need to do a complete shutdown.
+     *
+     * In this case, the Server shall advertise its intent to interrupt connections by setting the
+     * SecondsTillShutdown and ShutdownReason Properties in the ServerStatus Variable.
+     *
+     * If a TrustList change only affects UserIdentity associated with a Session then Servers
+     * shall re-evaluate the UserIdentity and if it is no longer valid the Session and associated
+     * Subscriptions are closed.
+     *
+     * This Method shall be called from an authenticated SecureChannel and from the Session that
+     * created the transaction and has access to the SecurityAdmin Role (see 7.2).
+     *
+     */
+    public async applyChanges(context?: ISessionContext): Promise<StatusCode> {
+        return await executeApplyChanges(this._context, context);
     }
 
-    private getCertificateManager(
-      certificateGroupId: NodeId | string
-    ): CertificateManager | null {
-        const groupName = findCertificateGroupName(certificateGroupId);
-        return this._map[groupName] || null;
+    public getCertificateManager(groupName: string): CertificateManager | null {
+        return this._context.map[groupName] || null;
     }
 
-    private addPendingTask(functor: () => Promise<void>): void {
-        this._pendingTasks.push(functor);
+    public getCertificateTypes(groupName: string): NodeId[] | undefined {
+        return this._context.certificateTypes[groupName];
     }
 
-    private async applyPendingTasks(): Promise<void> {
-
-        debugLog("start applyPendingTasks");
-        const promises: Array<Promise<void>> = [];
-        const t = this._pendingTasks.splice(0);
-
-        if (false) {
-            // node 10.2 and above
-            for await (const task of t) {
-                await task();
-            }
-        } else {
-            while (t.length) {
-                const task = t.shift()!;
-                await task();
-            }
-        }
-        await Promise.all(promises);
-        debugLog("end applyPendingTasks");
+    public async dispose(): Promise<void> {
+        await this._context.dispose();
     }
-
-    private async flushActionQueue(): Promise<void> {
-        while (this.$$actionQueue.length) {
-            const first = this.$$actionQueue.pop()!;
-            await first!();
-        }
-    }
-
 }

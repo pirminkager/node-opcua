@@ -1,18 +1,22 @@
 /**
  * @module node-opcua-service-translate-browse-path
  */
-import { assert } from "node-opcua-assert";
-import { NodeId, resolveNodeId } from "node-opcua-nodeid";
+import { type NodeId, type NodeIdLike, resolveNodeId } from "node-opcua-nodeid";
 import { BrowsePath } from "node-opcua-types";
-import { makeRelativePath } from "./make_relative_path";
+import { makeRelativePath } from "./make_relative_path.js";
 
-function _get_nodeId(node: any): NodeId {
-    if (node.nodeId) {
-        return node.nodeId;
+export declare type NodeIdLikeOrWithNodeId =
+    | NodeIdLike
+    | {
+          nodeId: NodeId;
+      };
+function _get_nodeId(node: NodeIdLikeOrWithNodeId): NodeId {
+    if (typeof node === "object" && Object.hasOwn(node, "nodeId")) {
+        return (node as { nodeId: NodeId }).nodeId;
     }
-    return resolveNodeId(node);
+    return resolveNodeId(node as NodeIdLike);
 }
-export function makeBrowsePath(rootNode: any, relativePathBNF: string) {
+export function makeBrowsePath(rootNode: NodeIdLikeOrWithNodeId, relativePathBNF: string): BrowsePath {
     return new BrowsePath({
         startingNode: _get_nodeId(rootNode),
 

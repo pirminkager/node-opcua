@@ -1,14 +1,7 @@
-/*global describe, it, require*/
-import * as should from "should";
-
+import "should";
 import { Range } from "node-opcua-types";
 import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
-import {
-    DeadbandType,
-    isOutsideDeadbandAbsolute,
-    isOutsideDeadbandNone,
-    isOutsideDeadbandPercent
-} from "..";
+import { isOutsideDeadbandAbsolute, isOutsideDeadbandNone, isOutsideDeadbandPercent } from "../dist/index.js";
 
 function v(value: number) {
     return new Variant({ dataType: "Double", value });
@@ -18,7 +11,6 @@ function r(low: number, high: number) {
 }
 
 describe("test DeadBand Checker", () => {
-
     const vInt32_1000 = new Variant({ dataType: DataType.Int32, value: 1000 });
     const vInt32_1010 = new Variant({ dataType: DataType.Int32, value: 1010 });
 
@@ -60,38 +52,33 @@ describe("test DeadBand Checker", () => {
     const vInt64_L1010 = new Variant({ arrayType: VariantArrayType.Scalar, dataType: DataType.Int64, value: [1, 1010] });
 
     it("Scalar - DeadbandType.None - should detect difference between two Int64 scalar", () => {
-
         isOutsideDeadbandNone(vInt64_1000, vInt64_1010).should.eql(true);
         isOutsideDeadbandNone(vInt64_1000, vInt64_1000).should.eql(false);
 
         isOutsideDeadbandNone(vInt64_1000, vInt64_L1000).should.eql(true);
         isOutsideDeadbandNone(vInt64_1000, vInt64_L1010).should.eql(true);
-
     });
 
     it("Scalar - DeadbandType.Absolute - should detect difference between two Int64 scalar", () => {
-
         isOutsideDeadbandAbsolute(vInt64_1000, vInt64_1010, 5).should.eql(true);
         isOutsideDeadbandAbsolute(vInt64_1000, vInt64_1010, 15).should.eql(false);
         isOutsideDeadbandAbsolute(vInt64_1000, vInt64_L1000, 5).should.eql(true);
         isOutsideDeadbandAbsolute(vInt64_1000, vInt64_L1010, 5).should.eql(true);
-
     });
 
     it("Scalar - DeadbandType.Percent - should handle edge case - percent 99", () => {
+        // 99%*400 = > 396
+        isOutsideDeadbandPercent(v(0), v(-200), 99, r(-200, 200)).should.eql(false);
+        isOutsideDeadbandPercent(v(0), v(200), 99, r(-200, 200)).should.eql(false);
 
-        isOutsideDeadbandPercent(v(0), v(-200), 99, r(-200, 200)).should.eql(true);
-        isOutsideDeadbandPercent(v(0), v(200), 99, r(-200, 200)).should.eql(true);
-
-        isOutsideDeadbandPercent(v(-199), v(-200), 99, r(-200, 200)).should.eql(true);
+        isOutsideDeadbandPercent(v(-199), v(-200), 99, r(-200, 200)).should.eql(false);
         isOutsideDeadbandPercent(v(-200), v(200), 99, r(-200, 200)).should.eql(true);
 
-        isOutsideDeadbandPercent(v(199), v(200), 99, r(-200, 200)).should.eql(true);
-        isOutsideDeadbandPercent(v(-200), v(-200), 99, r(-200, 200)).should.eql(true);
+        isOutsideDeadbandPercent(v(199), v(200), 99, r(-200, 200)).should.eql(false);
+        isOutsideDeadbandPercent(v(-200), v(-200), 99, r(-200, 200)).should.eql(false);
 
         isOutsideDeadbandPercent(v(-200), v(200), 99, r(-200, 200)).should.eql(true);
         isOutsideDeadbandPercent(v(-198), v(198), 99, r(-200, 200)).should.eql(false);
-
     });
 
     it("Scalar - DeadbandType.Percent - should handle edge case - percent 0", () => {
@@ -101,5 +88,4 @@ describe("test DeadBand Checker", () => {
         isOutsideDeadbandPercent(v(2), v(0), 0, r(-200, 200)).should.eql(true);
         isOutsideDeadbandPercent(v(2), v(2.1), 0, r(-200, 200)).should.eql(true);
     });
-
 });

@@ -1,58 +1,66 @@
-// tslint:disable:no-console
-// tslint:disable:only-arrow-functions
+import fs from "node:fs";
+import { promisify } from "node:util";
 import "mocha";
 import { assert } from "node-opcua-assert";
 import { decodeExpandedNodeId } from "node-opcua-basic-types";
 import { BinaryStream } from "node-opcua-binary-stream";
-import { Certificate, PrivateKeyPEM, readCertificate, readPrivateKeyPEM, split_der } from "node-opcua-crypto";
-import { makebuffer_from_trace } from "node-opcua-debug";
-import { constructObject } from "node-opcua-factory";
-import * as path from "path";
-
-import * as fs from "fs";
+import { type Certificate, type PrivateKey, readCertificateChain, readPrivateKey, split_der } from "node-opcua-crypto";
+import { makeBufferFromTrace } from "node-opcua-debug";
+import { type BaseUAObject, getStandardDataTypeFactory } from "node-opcua-factory";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import {
     computeSignature,
     getCryptoFactory,
+    type IDerivedKeyProvider,
     MessageBuilder,
     MessageSecurityMode,
     SecurityPolicy,
     verifySignature
 } from "node-opcua-secure-channel";
-import { StatusCode, StatusCodes } from "node-opcua-status-code";
-import {
+import { type StatusCode, StatusCodes } from "node-opcua-status-code";
+import type {
     ActivateSessionRequest,
     CreateSessionResponse,
     SignatureData,
     SignatureDataOptions,
-    UserIdentityToken,
     X509IdentityToken
 } from "node-opcua-types";
-import { should } from "should";
-import { promisify } from "util";
+import { testPath } from "./paths.js";
 
 const doDebug = false;
 
-function readMessage(name: string): Buffer {
+/** minimal shape used by verifyX509UserIdentity below: only policyId + toString are read */
+interface FakeUserTokenPolicy {
+    policyId: string;
+    toString(): string;
+}
 
-    const filename = path.join(__dirname, "./fixtures", name);
-    const text = fs.readFileSync(filename, "ascii");
-    const message = makebuffer_from_trace(text);
+function readMessage(name: string): Buffer {
+    const filename = testPath("fixtures", name);
+    const text = fs.readFileSync(filename, "utf-8");
+    const message = makeBufferFromTrace(text);
     return message;
 }
 
-async function decodeMessage(buffer: Buffer): Promise<any> {
+async function decodeMessage(buffer: Buffer): Promise<unknown> {
+    const derivedKeyProvider: IDerivedKeyProvider = {
+        getDerivedKey(_tokenId: number) {
+            return null;
+        }
+    };
+    const messageBuilder = new MessageBuilder(derivedKeyProvider, {
+        name: "test",
+        maxChunkCount: 1,
+        maxChunkSize: buffer.length + 100,
+        maxMessageSize: buffer.length + 100
+    });
 
-    /*
-    const offset = 16 * 3 + 6;
-    buffer = buffer.slice(offset);
-    */
-    const messageBuilder = new MessageBuilder({});
     messageBuilder.setSecurity(MessageSecurityMode.None, SecurityPolicy.None);
-    let objMessage: any = null;
+    let objMessage: BaseUAObject | null = null;
     messageBuilder.once("full_message_body", (fullMessageBody: Buffer) => {
         const stream = new BinaryStream(fullMessageBody);
         const id = decodeExpandedNodeId(stream);
-        objMessage = constructObject(id);
+        objMessage = getStandardDataTypeFactory().constructObject(id);
         objMessage.decode(stream);
     });
     messageBuilder.feed(buffer);
@@ -61,21 +69,20 @@ async function decodeMessage(buffer: Buffer): Promise<any> {
 }
 
 function verifyX509UserIdentity(
-  serverCertificate: Certificate,
-  sessionNonce: Buffer,
-  securityPolicy: SecurityPolicy,
-  userTokenPolicy: UserIdentityToken,
-  userIdentityToken: X509IdentityToken,
-  userTokenSignature: SignatureData,
-  callback: (err: null, statusCode: StatusCode) => void
+    serverCertificate: Certificate,
+    sessionNonce: Buffer,
+    securityPolicy: SecurityPolicy,
+    userTokenPolicy: FakeUserTokenPolicy,
+    userIdentityToken: X509IdentityToken,
+    userTokenSignature: SignatureData,
+    callback: (err: null, statusCode: StatusCode) => void
 ) {
-
     const cryptoFactory = getCryptoFactory(securityPolicy);
     if (!cryptoFactory) {
         return callback(null, StatusCodes.BadSecurityPolicyRejected);
     }
 
-    if (!userTokenSignature || !userTokenSignature.signature) {
+    if (!userTokenSignature?.signature) {
         return callback(null, StatusCodes.BadUserSignatureInvalid);
     }
 
@@ -85,9 +92,9 @@ function verifyX509UserIdentity(
         console.log("userTokenPolicy", userIdentityToken.toString());
         return callback(null, StatusCodes.BadSecurityPolicyRejected);
     }
-    const certificate = userIdentityToken.certificateData/* as Certificate*/;
+    const certificate = userIdentityToken.certificateData; /* as Certificate*/
 
-    const parts = split_der(certificate);
+    const _parts = split_der(certificate);
 
     const nonce = sessionNonce;
     assert(certificate instanceof Buffer, "expecting certificate to be a Buffer");
@@ -104,34 +111,32 @@ function verifyX509UserIdentity(
 
 const verifyX509UserIdentity1 = promisify(verifyX509UserIdentity);
 
-
 function rebuildSignature(
-  certificate: Certificate, // server certificate
-  serverNonce: Buffer,
-  privateKey: PrivateKeyPEM,
-  securityPolicy: SecurityPolicy
+    certificate: Certificate, // server certificate
+    serverNonce: Buffer,
+    privateKey: PrivateKey,
+    securityPolicy: SecurityPolicy
 ) {
-
     // The signature generated with private key associated with the User Certificate
-    const userTokenSignature: SignatureDataOptions = computeSignature(
-      certificate, serverNonce, privateKey, securityPolicy)!;
+    const userTokenSignature: SignatureDataOptions | undefined = computeSignature(
+        certificate,
+        serverNonce,
+        privateKey,
+        securityPolicy
+    );
 
     return userTokenSignature;
 }
 
 describe("X509 - Wireshark Analysis", () => {
-
     async function performTest(
-      _messageCreateSessionResponsePacket: Buffer,
-      _messageActivateSessionRequestPacket: Buffer,
-      securityPolicy: SecurityPolicy
+        _messageCreateSessionResponsePacket: Buffer,
+        _messageActivateSessionRequestPacket: Buffer,
+        securityPolicy: SecurityPolicy
     ): Promise<void> {
+        const createSessionResponse = (await decodeMessage(_messageCreateSessionResponsePacket)) as CreateSessionResponse;
 
-        const createSessionResponse =
-          await decodeMessage(_messageCreateSessionResponsePacket) as CreateSessionResponse;
-
-        const activateSessionRequest =
-          await decodeMessage(_messageActivateSessionRequestPacket) as ActivateSessionRequest;
+        const activateSessionRequest = (await decodeMessage(_messageActivateSessionRequestPacket)) as ActivateSessionRequest;
 
         // Verify signature
         const serverNonce = createSessionResponse.serverNonce;
@@ -140,47 +145,49 @@ describe("X509 - Wireshark Analysis", () => {
         const userIdentityToken = activateSessionRequest.userIdentityToken as X509IdentityToken;
 
         // create a fake server userTokenPolicy
-        const userTokenPolicy: any = {
-            policyId: userIdentityToken.policyId
+        const userTokenPolicy: FakeUserTokenPolicy = {
+            toString() {
+                return `UserTokenPolicy(policyId=${this.policyId})`;
+            },
+            policyId: userIdentityToken.policyId ?? ""
         };
 
-        const userCertificate = readCertificate(path.join(__dirname, "./fixtures/user1_certificate.pem"));
-        const privateKey = readPrivateKeyPEM(path.join(__dirname, "./fixtures/private_key.pem"));
+        const userCertificateChain = readCertificateChain(testPath("fixtures", "user1_certificate.pem"));
+        const userCertificate = userCertificateChain[0];
 
-        const signatureData = rebuildSignature(
-          serverCertificate,
-          serverNonce,
-          privateKey,
-          securityPolicy
-        );
+        const privateKey = readPrivateKey(testPath("fixtures", "private_key.pem"));
+
+        const signatureData = rebuildSignature(serverCertificate, serverNonce, privateKey, securityPolicy);
 
         if (doDebug) {
-
             console.log("policyId = ", userIdentityToken.policyId);
             console.log("serverNonce\n", createSessionResponse.serverNonce.toString("hex"));
             console.log("user certificate from file            \n", userCertificate.toString("hex"));
             console.log("user certificate from activate session\n", userIdentityToken.certificateData.toString("hex"));
 
-            console.log("\nsignature recomputed by the test\n", signatureData.signature!.toString("hex"));
-            console.log("", signatureData.algorithm);
+            console.log("\nsignature recomputed by the test\n", signatureData?.signature?.toString("hex"));
+            console.log("", signatureData?.algorithm);
 
-            console.log("signature generated by the client \n", activateSessionRequest.userTokenSignature.signature.toString("hex"));
+            console.log(
+                "signature generated by the client \n",
+                activateSessionRequest.userTokenSignature.signature.toString("hex")
+            );
             console.log("", activateSessionRequest.userTokenSignature.algorithm);
         }
         userCertificate.toString("hex").should.eql(userIdentityToken.certificateData.toString("hex"));
 
         const statusCode = await verifyX509UserIdentity1(
-          serverCertificate,
-          serverNonce,
-          securityPolicy,
-          userTokenPolicy,
-          userIdentityToken,
-          activateSessionRequest.userTokenSignature);
+            serverCertificate,
+            serverNonce,
+            securityPolicy,
+            userTokenPolicy,
+            userIdentityToken,
+            activateSessionRequest.userTokenSignature
+        );
         if (doDebug) {
             console.log("statusCode = ", statusCode.toString());
         }
         statusCode.should.eql(StatusCodes.Good);
-
     }
 
     it("1-should create a valid ActiveSessionRequest with X509 ", async () => {
@@ -188,28 +195,19 @@ describe("X509 - Wireshark Analysis", () => {
         // this capture has been made between UAExpert 1.5.0 client
         // and UACppServer
         // activateSession with X509 certificate ,
-        // the connection was successfullOn
+        // the connection was successful
         const messageCreateSessionResponsePacket = readMessage("createSessionResponse1.txt");
         const messageActivateSessionRequestPacket = readMessage("activateSessionRequest1.txt");
-        await performTest(
-          messageCreateSessionResponsePacket,
-          messageActivateSessionRequestPacket,
-          SecurityPolicy.Basic256Sha256
-        );
+        await performTest(messageCreateSessionResponsePacket, messageActivateSessionRequestPacket, SecurityPolicy.Basic256Sha256);
     });
 
     it("2-should create a valid ActiveSessionRequest with X509 ", async () => {
-
         // this capture has been made between node-opcua@2.0.0-alpha.7 client
         // activateSession with X509 certificate on ProsysServer,
         //
-        // the connection was successful and activateSessionRequest3 succeded
+        // the connection was successful and activateSessionRequest3 succeeded
         const messageCreateSessionResponsePacket = readMessage("createSessionResponse2.txt");
         const messageActivateSessionRequestPacket = readMessage("activateSessionRequest2.txt");
-        await performTest(
-          messageCreateSessionResponsePacket,
-          messageActivateSessionRequestPacket,
-          SecurityPolicy.Basic256
-        );
+        await performTest(messageCreateSessionResponsePacket, messageActivateSessionRequestPacket, SecurityPolicy.Basic256);
     });
 });

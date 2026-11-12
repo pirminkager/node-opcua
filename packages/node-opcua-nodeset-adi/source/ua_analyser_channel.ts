@@ -1,0 +1,141 @@
+import type { UAMethod, UAObject } from "node-opcua-address-space-base";
+import type { UAString } from "node-opcua-basic-types";
+import type { EnumDeviceHealth } from "node-opcua-nodeset-di/dist/enum_device_health.js";
+import type { UAFunctionalGroup } from "node-opcua-nodeset-di/dist/ua_functional_group.js";
+import type { UATopologyElement, UATopologyElement_Base } from "node-opcua-nodeset-di/dist/ua_topology_element.js";
+import type { UADataItem } from "node-opcua-nodeset-ua/dist/ua_data_item.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { UAAnalyserChannelStateMachine } from "./ua_analyser_channel_state_machine.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAAnalyserChannel_parameterSet extends UAObject { // Object
+      /**
+       * channelId
+       * Channel Id defined by user
+       */
+      channelId?: UADataItem<UAString, DataType.String>;
+      /**
+       * isEnabled
+       * True if the channel is enabled and accepting
+       * commands
+       */
+      isEnabled: UADataItem<boolean, DataType.Boolean>;
+      /**
+       * diagnosticStatus
+       * AnalyserChannel health status
+       */
+      diagnosticStatus: UADataItem<EnumDeviceHealth, DataType.Int32>;
+      /**
+       * activeStream
+       * Active stream for this AnalyserChannel
+       */
+      activeStream: UADataItem<UAString, DataType.String>;
+}
+export interface UAAnalyserChannel_methodSet extends UAObject { // Object
+      /**
+       * gotoOperating
+       * Transitions the AnalyserChannel to Operating mode.
+       */
+      gotoOperating: UAMethod;
+      /**
+       * gotoMaintenance
+       * Transitions the AnalyserChannel to Maintenance
+       * mode.
+       */
+      gotoMaintenance: UAMethod;
+      startSingleAcquisition: UAMethod;
+      /**
+       * reset
+       * Causes transition to the Resetting state.
+       */
+      reset: UAMethod;
+      /**
+       * start
+       * Causes transition to the Starting state.
+       */
+      start: UAMethod;
+      /**
+       * stop
+       * Causes transition to the Stopping state.
+       */
+      stop: UAMethod;
+      /**
+       * hold
+       * Causes transition to the Holding state.
+       */
+      hold: UAMethod;
+      /**
+       * unhold
+       * Causes transition to the Unholding state.
+       */
+      unhold: UAMethod;
+      /**
+       * suspend
+       * Causes transition to the Suspending state.
+       */
+      suspend: UAMethod;
+      /**
+       * unsuspend
+       * Causes transition to the Unsuspending state.
+       */
+      unsuspend: UAMethod;
+      /**
+       * abort
+       * Causes transition to the Aborting state.
+       */
+      abort: UAMethod;
+      /**
+       * clear
+       * Causes transition to the Clearing state.
+       */
+      clear: UAMethod;
+}
+export interface UAAnalyserChannel_configuration extends UAFunctionalGroup { // Object
+      /**
+       * isEnabled
+       * True if the channel is enabled and accepting
+       * commands
+       */
+      isEnabled: UADataItem<boolean, DataType.Boolean>;
+}
+export interface UAAnalyserChannel_status extends UAFunctionalGroup { // Object
+      /**
+       * diagnosticStatus
+       * AnalyserChannel health status
+       */
+      diagnosticStatus: UADataItem<EnumDeviceHealth, DataType.Int32>;
+      /**
+       * activeStream
+       * Active stream for this AnalyserChannel
+       */
+      activeStream: UADataItem<UAString, DataType.String>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/ADI/                            |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |AnalyserChannelType i=1003                                  |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAAnalyserChannel_Base extends UATopologyElement_Base {
+    /**
+     * parameterSet
+     * Flat list of Parameters
+     */
+    parameterSet?: UAAnalyserChannel_parameterSet;
+    /**
+     * methodSet
+     * Flat list of Methods
+     */
+    methodSet: UAAnalyserChannel_methodSet;
+   // PlaceHolder for $GroupIdentifier$
+    configuration: UAAnalyserChannel_configuration;
+    status: UAAnalyserChannel_status;
+    channelStateMachine: UAAnalyserChannelStateMachine;
+   // PlaceHolder for $StreamIdentifier$
+   // PlaceHolder for $AccessorySlotIdentifier$
+}
+export interface UAAnalyserChannel extends Omit<UATopologyElement, "parameterSet"|"methodSet"|"$GroupIdentifier$">, UAAnalyserChannel_Base {}

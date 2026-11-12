@@ -1,0 +1,13 @@
+import type { UAIOLinkEvent, UAIOLinkEvent_Base } from "./ua_io_link_event.js";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/IOLink/                         |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |IOLinkMasterEventType i=1006                                |
+ * |isAbstract      |true                                                        |
+ */
+export type UAIOLinkMasterEvent_Base = UAIOLinkEvent_Base;
+export interface UAIOLinkMasterEvent extends UAIOLinkEvent, UAIOLinkMasterEvent_Base {}

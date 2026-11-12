@@ -1,0 +1,43 @@
+import type { UAMethod, UAObject } from "node-opcua-address-space-base";
+import type { UAString } from "node-opcua-basic-types";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { UAFolder } from "node-opcua-nodeset-ua/dist/ua_folder.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * Provides methods to manage the Production preset.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Scales/V2/                      |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ProductionPresetType i=14                                   |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAProductionPreset_Base {
+    /**
+     * addProduct
+     * Creates an object with the JobType from the
+     * address space.
+     */
+    addProduct?: UAMethod;
+    currentProducts?: UABaseDataVariable<UAString[], DataType.String>;
+    deselectProduct?: UAMethod;
+    /**
+     * products
+     * The products used in the scale aggregated in the
+     * Products Object.
+     */
+    products?: UAFolder;
+    /**
+     * removeProduct
+     * Removes an object with the JobType from the
+     * address space.
+     */
+    removeProduct?: UAMethod;
+    selectProduct?: UAMethod;
+    switchProduct?: UAMethod;
+}
+export interface UAProductionPreset extends UAObject, UAProductionPreset_Base {}

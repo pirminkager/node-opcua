@@ -1,0 +1,36 @@
+import type { UAObject, UAProperty } from "node-opcua-address-space-base";
+import type { UAString } from "node-opcua-basic-types";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * According to ISO 10218-1:2011 Ch.5.5.2 Emergency
+ * stop the robot shall have one or more emergency
+ * stop functions.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Robotics/                       |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |EmergencyStopFunctionType i=17230                           |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAEmergencyStopFunction_Base {
+    /**
+     * active
+     * The Active variable is TRUE if this particular
+     * emergency stop function is active, e.g. that the
+     * emergency stop button is pressed, FALSE otherwise.
+     */
+    active: UABaseDataVariable<boolean, DataType.Boolean>;
+    /**
+     * name
+     * The Name of the EmergencyStopFunctionType
+     * provides a manufacturer-specific emergency stop
+     * function identifier within the safety system.
+     */
+    name: UAProperty<UAString, DataType.String>;
+}
+export interface UAEmergencyStopFunction extends UAObject, UAEmergencyStopFunction_Base {}

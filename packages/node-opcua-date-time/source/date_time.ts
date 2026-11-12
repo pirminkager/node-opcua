@@ -1,26 +1,17 @@
 /**
  * @module node-opcua-date-time
  */
-import * as  long from "long";
 import { assert } from "node-opcua-assert";
-
-export class DateWithPicoseconds extends Date {
-
-    public picoseconds = 0;
-
-    // tslint:disable:variable-name
-    public high_low = [0, 0];
-}
+import { hrtime } from "node-opcua-utils";
 
 export const offsetFactor1601 = (function offset_factor_1601() {
-
     const utc1600 = new Date(Date.UTC(1601, 0, 1, 0, 0, 0));
     const t1600 = utc1600.getTime();
 
     const utc1600PlusOneDay = new Date(Date.UTC(1601, 0, 2, 0, 0, 0));
     const t1600OneDay = utc1600PlusOneDay.getTime();
 
-    const factor1 = (24 * 60 * 60 * 1000) * 10000 / (t1600OneDay - t1600);
+    const factor1 = (24 * 60 * 60 * 1000 * 10000) / (t1600OneDay - t1600);
 
     const utc1970 = new Date(Date.UTC(1970, 0, 1, 0, 0, 0));
     const t1970 = utc1970.getTime();
@@ -30,14 +21,41 @@ export const offsetFactor1601 = (function offset_factor_1601() {
     assert(factor1 === 10000);
     assert(offsetToGregorianCalendarZero === 11644473600000);
     return [offsetToGregorianCalendarZero, factor1];
-
 })();
 
 const offset = offsetFactor1601[0];
 const factor = offsetFactor1601[1];
 
-const offsetLong = long.fromNumber(offset, true);
-const factorLong = long.fromNumber(factor, true);
+const TWO_POW_32 = 0x100000000;
+const TWO_POW_63 = 2 ** 63;
+/** 2^32 = factor * TWO_POW_32_DIV_FACTOR + TWO_POW_32_MOD_FACTOR */
+const TWO_POW_32_DIV_FACTOR = Math.floor(TWO_POW_32 / factor);
+const TWO_POW_32_MOD_FACTOR = TWO_POW_32 % factor;
+/** the largest excess of 100 ns ticks for which the encoding below stays exact */
+const maxExcess = 2 ** 50;
+
+/**
+ * a number as a 64-bit signed integer, the way DateTime encoding has always treated one: NaN
+ * is 0, a value beyond the Int64 range is clamped to it, a fraction is truncated
+ */
+function toInt64(value: number): bigint {
+    if (Number.isNaN(value)) {
+        return BigInt(0);
+    }
+    if (value <= -TWO_POW_63) {
+        return -(BigInt(2) ** BigInt(63));
+    }
+    if (value + 1 >= TWO_POW_63) {
+        return BigInt(2) ** BigInt(63) - BigInt(1);
+    }
+    return BigInt(Math.trunc(value));
+}
+
+/** the high and low 32-bit words, both signed, of a value taken modulo 2^64 */
+function int64ToHighLow(value: bigint): number[] {
+    const wrapped = BigInt.asIntN(64, value);
+    return [Number(BigInt.asIntN(32, wrapped >> BigInt(32))), Number(BigInt.asIntN(32, wrapped))];
+}
 
 // Extracted from OpcUA Spec v1.02 : part 6:
 //
@@ -80,43 +98,57 @@ const factorLong = long.fromNumber(factor, true);
  *
  * @returns {[high,low]}
  */
-export function bn_dateToHundredNanoSecondFrom1601(date: Date, picoseconds: number) {
-    assert(date instanceof Date);
-    if ((date as any).high_low) {
-        return (date as any).high_low;
-    }
+export function bn_dateToHundredNanoSecondFrom1601(date: Date, picoseconds?: number) {
     // note : The value returned by the getTime method is the number
     //        of milliseconds since 1 January 1970 00:00:00 UTC.
     //
     const t = date.getTime(); // number of milliseconds since since 1 January 1970 00:00:00 UTC.
-    const excess100nanosecond = (picoseconds !== undefined) ? Math.floor(picoseconds / 100000) : 0;
+    const excess100nanosecond = picoseconds !== undefined ? Math.floor(picoseconds / 100000) : 0;
 
-    //           value_64 = (t + offset ) * factor;
-    const tL = long.fromNumber(t, false);
-    const a = tL.add(offsetLong).multiply(factorLong).add(excess100nanosecond);
-
-    (date as any).high_low = [a.getHighBits(), a.getLowBits()];
-    (date as any).picoseconds = excess100nanosecond * 10000 + +picoseconds;
-    return (date as any).high_low;
+    //           value_64 = (t + offset ) * factor + excess;
+    // computed on plain numbers: every intermediate value below stays under 2^53, so the result
+    // is exact, and wraps modulo 2^64. The few inputs that would not stay exact (an invalid Date,
+    // absurd picoseconds) go through 64-bit integers instead.
+    const ms = t + offset;
+    if (!Number.isSafeInteger(ms) || !Number.isSafeInteger(excess100nanosecond) || Math.abs(excess100nanosecond) > maxExcess) {
+        return int64ToHighLow((toInt64(t) + BigInt(offset)) * BigInt(factor) + toInt64(excess100nanosecond));
+    }
+    const msHigh = Math.floor(ms / TWO_POW_32);
+    const lowSum = (ms - msHigh * TWO_POW_32) * factor + excess100nanosecond;
+    const carry = Math.floor(lowSum / TWO_POW_32);
+    const high = (msHigh * factor + carry) | 0;
+    const low = (lowSum - carry * TWO_POW_32) | 0;
+    return [high, low];
 }
 
-export function bn_dateToHundredNanoSecondFrom1601Excess(date: Date, picoseconds: number): number {
+export function bn_dateToHundredNanoSecondFrom1601Excess(_date: Date, picoseconds?: number): number {
     // 100 nano seconds = 100 x 1000 picoseconds
-    return (picoseconds !== undefined && picoseconds !== null) ? picoseconds % 100000 : 0;
+    return (picoseconds || 0) % 100000;
 }
 
-export function bn_hundredNanoSecondFrom1601ToDate(high: number, low: number, picoseconds = 0): DateWithPicoseconds {
+export function bn_hundredNanoSecondFrom1601ToDate(
+    high: number,
+    low: number,
+    picoseconds = 0,
+    _value: Date | null = null
+): [Date, number] {
     assert(low !== undefined);
     //           value_64 / factor  - offset = t
-    const l = new long(low, high, /*unsigned*/true);
-    const value1 = l.div(factor).toNumber() - offset;
+    // value_64 is read as unsigned: high * 2^32 + low. With 2^32 = factor * 429496 + 7296,
+    // value_64 / factor = high * 429496 + (high * 7296 + low) / factor, where high * 7296 + low
+    // stays under 2^45: the quotient and the remainder are exact on plain numbers.
+    const h = high >>> 0;
+    const rest = h * TWO_POW_32_MOD_FACTOR + (low >>> 0);
+    const restQuotient = Math.floor(rest / factor);
+    const value1 = h * TWO_POW_32_DIV_FACTOR + restQuotient - offset;
+    // const date = _value || new Date(value1);
+    // if (_value) _value.setTime(value1);
     const date = new Date(value1);
     // enrich the date
-    const excess100nanoInPico = l.mod(10000).mul(100000).toNumber();
-    (date as any).high_low = [high, low];
+    const excess100nanoInPico = (rest - restQuotient * factor) * 100000;
     // picosecond will contains un-decoded 100 nanoseconds => 10 x 100 nanoseconds = 1 microsecond
-    (date as any).picoseconds = excess100nanoInPico + ((picoseconds !== undefined) ? picoseconds : 0);
-    return date as DateWithPicoseconds;
+    const picoseconds2 = excess100nanoInPico + (picoseconds || 0);
+    return [date, picoseconds2];
 }
 
 let lastNowDate: Date;
@@ -124,7 +156,7 @@ let lastPicoseconds = 0;
 const smallTickPicosecond: number = 1000 * 100; // 100 nano second in picoseconds
 
 export interface PreciseClock {
-    timestamp: DateWithPicoseconds;
+    timestamp: Date;
     picoseconds: number;
 }
 
@@ -145,83 +177,92 @@ export function getCurrentClockWithJavascriptDate(): PreciseClock {
         lastNowDate = now;
     }
     return {
-        timestamp: lastNowDate as DateWithPicoseconds,
+        timestamp: lastNowDate,
 
         picoseconds: lastPicoseconds
     };
 }
 
-let origin = process.hrtime();
+let origin = hrtime();
 let refTime = Date.now();
 
+export const periodicClockAdjustment = {
+    adjustmentCount: 0,
+    interval: 3000 /* every 30 seconds */,
+    timerInstallationCount: 0
+};
 // update refTime now and then to make sure that we don't miss
 // any system time adjustment here such as a NTP clock event
 // see #651
 let timerId: NodeJS.Timeout | null;
-let timerInstallationCount = 0;
-const g_setInterval = global.setInterval;
-const g_clearInterval = global.clearInterval;
-export function installPeriodicClockAdjustmement() {
-    timerInstallationCount++;
+const g_setInterval = typeof global === "object" ? global.setInterval : setInterval;
+const g_clearInterval = typeof global === "object" ? global.clearInterval : clearInterval;
+export function installPeriodicClockAdjustment() {
+    periodicClockAdjustment.timerInstallationCount++;
     if (timerId) {
         return;
     }
     timerId = g_setInterval(() => {
-        origin = process.hrtime();
+        origin = hrtime();
         refTime = Date.now();
-    }, 30000 /* every 30 seconds */);
+        periodicClockAdjustment.adjustmentCount++;
+    }, periodicClockAdjustment.interval);
 }
-export function uninstallPeriodicClockAdjustmement() {
-    timerInstallationCount--;
-    if (timerInstallationCount <= 0) {
-        g_clearInterval(timerId!);
+export function uninstallPeriodicClockAdjustment() {
+    periodicClockAdjustment.timerInstallationCount--;
+    if (periodicClockAdjustment.timerInstallationCount <= 0 && timerId) {
+        g_clearInterval(timerId);
         timerId = null;
     }
 }
 
 const gClock: PreciseClockEx = {
     tick: [0, 0],
-    timestamp: new Date() as DateWithPicoseconds,
+    timestamp: new Date(),
 
     picoseconds: 0
 };
 
 // make sure we get a pointer to the actual process.hrtime,
 // just in case it get overridden by some library (such as sinon)
-const hrtime = process.hrtime;
+const original_hrtime = hrtime;
 
-const setTimeout_chek = setTimeout;
+const setTimeout_check = setTimeout;
 /*kWithProcessHRTime*/
 export function getCurrentClock(): PreciseClock {
-
-    if (setTimeout_chek !== setTimeout) {
+    if (setTimeout_check !== setTimeout) {
         // is fake sinon clock being used ?
         // in this case hrtime is not working
         return getCurrentClockWithJavascriptDate();
     }
-    gClock.tick = hrtime(origin); // [seconds, nanoseconds]
+    gClock.tick = original_hrtime(origin); // [seconds, nanoseconds]
     const milliseconds = gClock.tick[0] * 1000 + Math.floor(gClock.tick[1] / 1000000) + refTime;
     const picoseconds = (gClock.tick[1] % 1000000) * 1000;
-    // display drift in seconds :
-    //    console.log(gClock.tick[0] - Math.floor((Date.now()-refTime) / 1000));
 
-    gClock.timestamp = new Date(milliseconds) as DateWithPicoseconds;
+    gClock.timestamp = new Date(milliseconds);
     gClock.picoseconds = picoseconds;
     return gClock;
 }
 
-export function coerceClock(timestamp: any, picoseconds = 0) {
+export function coerceClock(timestamp: undefined | null | Date, picoseconds = 0): PreciseClock {
     if (timestamp) {
-        return { timestamp, picoseconds };
+        return { timestamp: timestamp as Date, picoseconds };
     } else {
         return getCurrentClock();
     }
 }
 
-const minDate = new Date(Date.UTC(1601, 0, 1, 0, 0, 0));
-
-export const minOPCUADate = minDate;
-
 export function isMinDate(date?: Date | null): boolean {
+    if (typeof date === "number") {
+        throw new Error("isMinDate: invalid argument");
+    }
     return !date || date.getTime() === minDate.getTime();
 }
+export function getMinOPCUADate() {
+    return new Date(Date.UTC(1601, 0, 1, 0, 0, 0));
+}
+
+// @deprecated use getMinOPCUADate() instead
+export const minDate = new Date(Date.UTC(1601, 0, 1, 0, 0, 0));
+// @deprecated use getMinOPCUADate() instead
+export const minOPCUADate = minDate;

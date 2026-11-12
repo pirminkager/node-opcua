@@ -2,72 +2,75 @@
  * @module node-opcua-client
  */
 
-import { EventEmitter } from "events";
+import type { EventEmitter } from "node:events";
 
-import { DateTime, UInt8 } from "node-opcua-basic-types";
-import { ServerState } from "node-opcua-common";
-import { Certificate, Nonce } from "node-opcua-crypto";
-
-import { LocalizedTextLike } from "node-opcua-data-model";
-import { DataValue } from "node-opcua-data-value";
-import { NodeId, NodeIdLike } from "node-opcua-nodeid";
-import { IBasicSession } from "node-opcua-pseudo-session";
-import { ErrorCallback } from "node-opcua-status-code";
-import {
-    BrowseDescription, BrowseDescriptionOptions, BrowseRequest, BrowseResponse, BrowseResult
-} from "node-opcua-service-browse";
-import {
-    CallMethodRequest, CallMethodRequestOptions, CallMethodResult
-} from "node-opcua-service-call";
-import { EndpointDescription } from "node-opcua-service-endpoints";
-import { HistoryReadResult } from "node-opcua-service-history";
-import {
-    QueryFirstRequest, QueryFirstRequestOptions, QueryFirstResponse
-} from "node-opcua-service-query";
-import {
-    ReadValueId, ReadValueIdOptions
-} from "node-opcua-service-read";
-import {
-    CreateMonitoredItemsRequest,
-    CreateMonitoredItemsRequestOptions, CreateMonitoredItemsResponse,
-    CreateSubscriptionRequest,
-    CreateSubscriptionRequestOptions, CreateSubscriptionResponse,
-    DeleteMonitoredItemsRequest,
+import type { DateTime, UInt8 } from "node-opcua-basic-types";
+import type { ExtraDataTypeManager } from "node-opcua-client-dynamic-extension-object";
+import type { ServerState } from "node-opcua-common";
+import type { AggregateFunction } from "node-opcua-constants";
+import type { Certificate } from "node-opcua-crypto/web";
+import type { DiagnosticInfo, LocalizedTextLike } from "node-opcua-data-model";
+import type { DataValue, TimestampsToReturn } from "node-opcua-data-value";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { NodeId, NodeIdLike } from "node-opcua-nodeid";
+import type {
+    ArgumentDefinition,
+    CallMethodRequestLike,
+    IBasicSession,
+    IBasicSessionBrowse,
+    IBasicSessionBrowseNext,
+    IBasicSessionCall,
+    IBasicSessionChangeUser,
+    IBasicSessionRead,
+    IBasicSessionTranslateBrowsePath,
+    IBasicSessionWrite,
+    MethodId,
+    ResponseCallback
+} from "node-opcua-pseudo-session";
+import type { CallMethodResult } from "node-opcua-service-call";
+import type { EndpointDescription } from "node-opcua-service-endpoints";
+import type { HistoryReadResult } from "node-opcua-service-history";
+import type { QueryFirstRequestOptions, QueryFirstResponse } from "node-opcua-service-query";
+import type {
+    CreateMonitoredItemsRequestOptions,
+    CreateMonitoredItemsResponse,
+    CreateSubscriptionRequestOptions,
+    CreateSubscriptionResponse,
     DeleteMonitoredItemsRequestOptions,
-    DeleteSubscriptionsRequest,
-    DeleteSubscriptionsRequestOptions, DeleteSubscriptionsResponse,
-    ModifyMonitoredItemsRequest,
-    ModifyMonitoredItemsRequestOptions, ModifyMonitoredItemsResponse,
-    ModifySubscriptionRequest,
-    ModifySubscriptionRequestOptions, ModifySubscriptionResponse,
-    PublishRequest, PublishResponse,
-    RepublishRequest, RepublishResponse,
-    SetMonitoringModeRequest, SetMonitoringModeRequestOptions,
+    DeleteMonitoredItemsResponse,
+    DeleteSubscriptionsRequestOptions,
+    DeleteSubscriptionsResponse,
+    ModifyMonitoredItemsRequestOptions,
+    ModifyMonitoredItemsResponse,
+    ModifySubscriptionRequestOptions,
+    ModifySubscriptionResponse,
+    PublishRequest,
+    PublishResponse,
+    RepublishRequest,
+    RepublishResponse,
+    SetMonitoringModeRequestOptions,
     SetMonitoringModeResponse,
-    TransferSubscriptionsRequest,
-    TransferSubscriptionsRequestOptions, TransferSubscriptionsResponse
+    SetTriggeringRequestOptions,
+    SetTriggeringResponse,
+    TransferSubscriptionsRequestOptions,
+    TransferSubscriptionsResponse
 } from "node-opcua-service-subscription";
-import {
-    BrowsePath, BrowsePathResult
-} from "node-opcua-service-translate-browse-path";
-import {
-    WriteValue, WriteValueOptions
-} from "node-opcua-service-write";
-import { StatusCode } from "node-opcua-status-code";
-import { DataType, Variant } from "node-opcua-variant";
-import { Callback } from "node-opcua-status-code";
+import type { Callback, ErrorCallback, StatusCode } from "node-opcua-status-code";
+import type {
+    AggregateConfigurationOptions,
+    HistoryReadRequest,
+    HistoryReadResponse,
+    HistoryReadValueIdOptions,
+    ReadValueIdOptions
+} from "node-opcua-types";
+import type { DataType, Variant } from "node-opcua-variant";
 
+export { ExtraDataTypeManager } from "node-opcua-client-dynamic-extension-object";
 
-import { ClientSubscription } from "./client_subscription";
+export { ExtensionObject } from "node-opcua-extension-object";
+export type { ArgumentDefinition, CallMethodRequestLike, MethodId } from "node-opcua-pseudo-session";
 
-export type ResponseCallback<T> = (err: Error | null, response?: T) => void;
-
-export interface NodeAttributes {
-    nodeId: NodeId;
-    statusCode: StatusCode;
-
-    [key: string]: Variant | NodeId | StatusCode;
-}
+import type { ClientSubscription } from "./client_subscription.js";
 
 export interface MonitoredItemData {
     clientHandles: Uint32Array;
@@ -83,9 +86,6 @@ export interface CreateSubscriptionOptions {
     priority?: UInt8;
 }
 
-export type BrowseDescriptionLike = string | BrowseDescriptionOptions;
-export type ReadValueIdLike = ReadValueIdOptions;
-export type WriteValueLike = WriteValueOptions;
 export type DeleteMonitoredItemsRequestLike = DeleteMonitoredItemsRequestOptions;
 export type CreateSubscriptionRequestLike = CreateSubscriptionRequestOptions;
 export type DeleteSubscriptionsRequestLike = DeleteSubscriptionsRequestOptions;
@@ -98,15 +98,7 @@ export type QueryFirstRequestLike = QueryFirstRequestOptions;
 
 export type SubscriptionId = number;
 
-import { ExtraDataTypeManager } from "node-opcua-client-dynamic-extension-object";
-import { ExtensionObject } from "node-opcua-extension-object";
-import { ArgumentDefinition, CallMethodRequestLike, MethodId } from "node-opcua-pseudo-session";
-export { ExtraDataTypeManager } from "node-opcua-client-dynamic-extension-object";
-export { ExtensionObject } from "node-opcua-extension-object";
-export { ArgumentDefinition, CallMethodRequestLike, MethodId } from "node-opcua-pseudo-session";
-
 export interface ClientSessionBase {
-
     // properties
     /** the session Id */
     timeout: number;
@@ -120,7 +112,14 @@ export interface ClientSessionBase {
      */
     lastRequestSentTime: Date;
     /**
-     * the time of the latest response received by the client
+     * the time of the latest response received by the client from the server.
+     *
+     * this is only updated when the server has actually answered. A transaction that fails
+     * on a timeout or on a broken channel does not update this value, whereas a ServiceFault
+     * does: a fault means the server answered and rejected the request, so the session is
+     * still in contact with it.
+     *
+     * before the first answer, this holds the session creation sentinel rather than a real date.
      */
     lastResponseReceivedTime: Date;
     /**
@@ -131,7 +130,21 @@ export interface ClientSessionBase {
      * the session name
      */
     name: string;
+    /**
+     * the StatusCode returned by the last ActivateSession — usually `Good`, but
+     * e.g. `Good_PasswordChangeRequired` when the user must change the password
+     * (OPC 10000-18 §5.2.8). Lets a Client react without server-side access.
+     */
+    lastActivateSessionStatusCode: StatusCode;
 
+    /**
+     * Close the session.
+     *
+     * @param deleteSubscription - if `true` (the default), all
+     *   subscriptions created on this session are deleted on
+     *   the server. Set to `false` to preserve subscriptions
+     *   for later transfer to a new session.
+     */
     close(callback: ErrorCallback): void;
 
     close(deleteSubscription: boolean, callback: ErrorCallback): void;
@@ -139,237 +152,191 @@ export interface ClientSessionBase {
     close(deleteSubscription?: boolean): Promise<void>;
 }
 
-// tslint:disable-next-line: no-empty-interface
+/**
+ * An active session to an OPC UA server.
+ *
+ * `ClientSession` provides access to all OPC UA services:
+ * reading and writing node values, browsing the address space,
+ * calling methods, and creating subscriptions for data change
+ * or event notifications.
+ *
+ * Sessions are created via {@link OPCUAClient.createSession} or
+ * {@link OPCUAClient.create} followed by `client.createSession()`.
+ *
+ * @example
+ * ```typescript
+ * const session = await client.createSession();
+ *
+ * // Read a value
+ * const dataValue = await session.read({
+ *     nodeId: "ns=0;i=2258",
+ *     attributeId: AttributeIds.Value,
+ * });
+ *
+ * // Browse the root folder
+ * const browseResult = await session.browse("RootFolder");
+ *
+ * // Write a value
+ * await session.write({
+ *     nodeId: "ns=1;s=MyVariable",
+ *     attributeId: AttributeIds.Value,
+ *     value: { value: { dataType: DataType.Double, value: 42.0 } },
+ * });
+ *
+ * await session.close();
+ * ```
+ */
 export interface ClientSession extends ClientSessionBase {
     /* */
+    serverEndpoints: EndpointDescription[];
 }
 // events
 export interface ClientSession extends EventEmitter {
-    // tslint:disable:unified-signatures
     on(event: "keepalive", eventHandler: (lastKnownServerState: ServerState) => void): this;
 
-    on(event: "keepalive_failure", eventHandler: (state: any) => void): this;
+    on(event: "keepalive_failure", eventHandler: () => void): this;
 
     on(event: "session_closed", eventHandler: (statusCode: StatusCode) => void): this;
 
     /**
-     *  session_restored is raised when the session and realted subscription
-     *  have been fullt repaired after a reconnection.
+     *  session_restored is raised when the session and related subscription
+     *  have been fully repaired after a reconnection.
      */
     on(event: "session_restored", eventHandler: () => void): this;
 
+    // biome-ignore lint/suspicious/noExplicitAny: matches Node's EventEmitter.on catch-all signature; narrowing to unknown[] breaks assignability of specifically-typed listener handlers at call sites
     on(event: string | symbol, listener: (...args: any[]) => void): this;
-
 }
 
 // browse services
-export interface ClientSessionBrowseService {
-
+/**
+ * Browse service — navigate the OPC UA address space.
+ *
+ * The `browse()` and `browseNext()` methods are inherited from
+ * {@link node-opcua-pseudo-session!IBasicSessionBrowse}.
+ */
+export interface ClientSessionBrowseService extends IBasicSessionBrowse, IBasicSessionBrowseNext {
     /**
-     * the maximum number of reference that the server should return per browseResult
-     * Continuous points will be return by server to allow retrieving remaining references
-     * with browseNext
+     * The maximum number of references the server should return
+     * per browse result. If the server has more, it returns a
+     * continuation point to retrieve the rest with `browseNext()`.
      */
     requestedMaxReferencesPerNode: number;
-
-    browse(nodeToBrowse: BrowseDescriptionLike, callback: ResponseCallback<BrowseResult>): void;
-
-    browse(nodesToBrowse: BrowseDescriptionLike[], callback: ResponseCallback<BrowseResult[]>): void;
-
-    browse(nodeToBrowse: BrowseDescriptionLike): Promise<BrowseResult>;
-
-    browse(nodesToBrowse: BrowseDescriptionLike[]): Promise<BrowseResult[]>;
-
-    browseNext(
-        continuationPoint: Buffer,
-        releaseContinuationPoints: boolean,
-        callback: ResponseCallback<BrowseResult>): void;
-
-    browseNext(
-        continuationPoints: Buffer[],
-        releaseContinuationPoints: boolean,
-        callback: ResponseCallback<BrowseResult[]>): void;
-
-    browseNext(
-        continuationPoint: Buffer,
-        releaseContinuationPoints: boolean
-    ): Promise<BrowseResult>;
-
-    browseNext(
-        continuationPoints: Buffer[],
-        releaseContinuationPoints: boolean
-    ): Promise<BrowseResult[]>;
 }
 
 // translate browsePathTo NodeId services
-export interface ClientSessionTranslateBrowsePathService {
-    translateBrowsePath(browsesPath: BrowsePath[], callback: ResponseCallback<BrowsePathResult[]>): void;
-
-    translateBrowsePath(browsePath: BrowsePath, callback: ResponseCallback<BrowsePathResult>): void;
-
-    translateBrowsePath(browsePath: BrowsePath): Promise<BrowsePathResult>;
-
-    translateBrowsePath(browsePaths: BrowsePath[]): Promise<BrowsePathResult[]>;
-
-}
+export interface ClientSessionTranslateBrowsePathService extends IBasicSessionTranslateBrowsePath {}
 
 // query services
 export interface ClientSessionQueryService {
-    queryFirst(
-        queryFirstRequest: QueryFirstRequestLike
-    ): Promise<QueryFirstResponse>;
+    queryFirst(queryFirstRequest: QueryFirstRequestLike): Promise<QueryFirstResponse>;
 
-    queryFirst(
-        queryFirstRequest: QueryFirstRequestLike,
-        callback: ResponseCallback<QueryFirstResponse>
-    ): void;
+    queryFirst(queryFirstRequest: QueryFirstRequestLike, callback: ResponseCallback<QueryFirstResponse>): void;
 }
 
 // call services
-export interface ClientSessionCallService {
+/**
+ * Call service — invoke methods on server objects.
+ *
+ * The `call()` method is inherited from
+ * {@link node-opcua-pseudo-session!IBasicSessionCall}.
+ */
+/** The strings of one DiagnosticInfo, resolved through the ResponseHeader stringTable (OPC 10000-4 §7.12). */
+export interface DiagnosticStrings {
+    symbolicId: string | null;
+    namespaceUri: string | null;
+    localizedText: string | null;
+    locale: string | null;
+}
+
+/** The results of a Call, with the DiagnosticInfo the server returned for each result's statusCode. */
+export interface CallResultsWithDiagnostics {
+    results: CallMethodResult[];
+    /**
+     * OPC 10000-4 v1.05.07 §5.12.2: one per result, in the same order, when the server returned any; empty
+     * otherwise (the server had none, or `returnDiagnostics` asked for no operation-level field).
+     */
+    diagnosticInfos: DiagnosticInfo[];
+    /**
+     * The strings each DiagnosticInfo points at in the ResponseHeader `stringTable` (OPC 10000-4 §7.12), one per entry
+     * of `diagnosticInfos`; `null` where there is none. `symbolicId` and `namespaceUri` need the operation-level
+     * SymbolicId bit (0x20) in `returnDiagnostics`, `localizedText` and `locale` the LocalizedText bit (0x40).
+     */
+    diagnosticStrings: DiagnosticStrings[];
+}
+
+export interface ClientSessionCallService extends IBasicSessionCall {
+    /**
+     * Call methods and ask the server for the DiagnosticInfo of each result's statusCode.
+     *
+     * @param returnDiagnostics - RequestHeader.returnDiagnostics (OPC 10000-4 §7.32), e.g. 0x40 for the
+     *   operation-level LocalizedText, 0x80 for AdditionalInfo, 0x3e0 for every operation-level field.
+     */
+    callWithDiagnostics(methodsToCall: CallMethodRequestLike[], returnDiagnostics: number): Promise<CallResultsWithDiagnostics>;
 
     /**
+     * Retrieve the input and output argument definitions of a method.
      *
-     * @method call
-     *
-     * @param methodToCall {CallMethodRequest} the call method request
-     * @param callback
-     *
-     * @example :
-     *
-     * ```javascript
-     * const methodToCall = {
-     *     objectId: "ns=2;i=12",
-     *     methodId: "ns=2;i=13",
-     *     inputArguments: [
-     *         new Variant({...}),
-     *         new Variant({...}),
-     *     ]
-     * }
-     * session.call(methodToCall,function(err,callResult) {
-     *    if (!err) {
-     *         console.log(" statusCode = ",callResult.statusCode);
-     *         console.log(" inputArgumentResults[0] = ",callResult.inputArgumentResults[0].toString());
-     *         console.log(" inputArgumentResults[1] = ",callResult.inputArgumentResults[1].toString());
-     *         console.log(" outputArgument[0]       = ",callResult.outputArgument[0].toString()); // array of variant
-     *    }
-     * });
-     * ```
-     *
-     * @method call
-     *
-     * @param methodsToCall {CallMethodRequest[]} the call method request array
-     * @param callbackstad
-     *
-     *
-     * @example :
-     *
-     * ```javascript
-     * const methodsToCall = [ {
-     *     objectId: "ns=2;i=12",
-     *     methodId: "ns=2;i=13",
-     *     inputArguments: [
-     *         new Variant({...}),
-     *         new Variant({...}),
-     *     ]
-     * }];
-     * session.call(methodsToCall,function(err,callResutls) {
-     *    if (!err) {
-     *         const callResult = callResutls[0];
-     *         console.log(" statusCode = ",rep.statusCode);
-     *         console.log(" inputArgumentResults[0] = ",callResult.inputArgumentResults[0].toString());
-     *         console.log(" inputArgumentResults[1] = ",callResult.inputArgumentResults[1].toString());
-     *         console.log(" outputArgument[0]       = ",callResult.outputArgument[0].toString()); // array of variant
-     *    }
-     * });
-     * ```
+     * @param methodId - the NodeId of the method
+     * @returns the argument definitions (input and output)
      */
-
-    call(
-        methodToCall: CallMethodRequestLike,
-        callback: (err: Error | null, result?: CallMethodResult) => void): void;
-
-    call(
-        methodsToCall: CallMethodRequestLike[],
-        callback: (err: Error | null, results?: CallMethodResult[]) => void): void;
-
-    call(
-        methodToCall: CallMethodRequestLike): Promise<CallMethodResult>;
-
-    call(
-        methodsToCall: CallMethodRequestLike[]): Promise<CallMethodResult[]>;
-
     getArgumentDefinition(methodId: MethodId): Promise<ArgumentDefinition>;
-
     getArgumentDefinition(methodId: MethodId, callback: (err: Error | null, args?: ArgumentDefinition) => void): void;
 }
 
 // register services
 export interface ClientSessionRegisterService {
-
     registerNodes(nodesToRegister: NodeIdLike[]): Promise<NodeId[]>;
 
-    registerNodes(
-        nodesToRegister: NodeIdLike[],
-        callback: (err: Error | null, registeredNodeIds?: NodeId[]) => void
-    ): void;
+    registerNodes(nodesToRegister: NodeIdLike[], callback: (err: Error | null, registeredNodeIds?: NodeId[]) => void): void;
 
     unregisterNodes(nodesToRegister: NodeIdLike[]): Promise<void>;
 
-    unregisterNodes(
-        nodesToRegister: NodeIdLike[],
-        callback: (err?: Error) => void
-    ): void;
-
+    unregisterNodes(nodesToRegister: NodeIdLike[], callback: (err?: Error) => void): void;
 }
 
 // read services
-export interface ClientSessionReadService {
-
-    read(nodeToRead: ReadValueIdLike, maxAge: number, callback: ResponseCallback<DataValue>): void;
-
-    read(nodesToRead: ReadValueIdLike[], maxAge: number, callback: ResponseCallback<DataValue[]>): void;
-
-    read(nodeToRead: ReadValueIdLike, callback: ResponseCallback<DataValue>): void;
-
-    read(nodesToRead: ReadValueIdLike[], callback: ResponseCallback<DataValue[]>): void;
-
-    read(nodeToRead: ReadValueIdLike, maxAge?: number): Promise<DataValue>;
-
-    read(nodesToRead: ReadValueIdLike[], maxAge?: number): Promise<DataValue[]>;
-
-    readVariableValue(nodeId: NodeIdLike, callback: ResponseCallback<DataValue>): void;
-
-    readVariableValue(nodeId: NodeIdLike): Promise<DataValue>;
-
-    readVariableValue(nodeIds: NodeIdLike[], callback: ResponseCallback<DataValue[]>): void;
-
-    readVariableValue(nodeIds: NodeIdLike[]): Promise<DataValue[]>;
-
+export interface ClientSessionReadService extends IBasicSessionRead {
+    /**
+     * @deprecated use read() instead
+     */
+    readVariableValue(nodeId: NodeIdLike | ReadValueIdOptions, callback: ResponseCallback<DataValue>): void;
+    /**
+     * @deprecated use read() instead
+     */
+    readVariableValue(nodeId: NodeIdLike | ReadValueIdOptions): Promise<DataValue>;
+    /**
+     * @deprecated use read() instead
+     */
+    readVariableValue(nodeIds: (NodeIdLike | ReadValueIdOptions)[], callback: ResponseCallback<DataValue[]>): void;
+    /**
+     * @deprecated use read() instead
+     */
+    readVariableValue(nodeIds: (NodeIdLike | ReadValueIdOptions)[]): Promise<DataValue[]>;
 }
 
 // write services
-export interface ClientSessionWriteService {
-    write(nodeToWrite: WriteValueLike, callback: ResponseCallback<StatusCode>): void;
-
-    write(nodesToWrite: WriteValueLike[], callback: ResponseCallback<StatusCode[]>): void;
-
-    write(nodesToWrite: WriteValueLike[]): Promise<StatusCode[]>;
-
-    write(nodeToWrite: WriteValueLike): Promise<StatusCode>;
-
+export interface ClientSessionWriteService extends IBasicSessionWrite {
+    /**
+     * @deprecated use write() instead
+     */
     writeSingleNode(nodeToWrite: NodeIdLike, value: Variant): Promise<StatusCode>;
 
+    /**
+     * @deprecated use write() instead
+     */
     writeSingleNode(nodeToWrite: NodeIdLike, value: Variant, callback: ResponseCallback<StatusCode>): void;
-
 }
 
 // raw subscription services
+/**
+ * Raw subscription service — low-level OPC UA subscription management.
+ *
+ * For a higher-level API, use {@link ClientSubscription} via
+ * `ClientSession.createSubscription2()`.
+ */
 export interface ClientSessionRawSubscriptionService {
-
     /**
-     * @method createSubscription
-     * @async
      *
      * @example
      *
@@ -385,89 +352,55 @@ export interface ClientSessionRawSubscriptionService {
      *    const response = await session.createSubscription(options);
      *    ```
      */
-    createSubscription(
-        options: CreateSubscriptionRequestLike,
-        callback: ResponseCallback<CreateSubscriptionResponse>
-    ): void;
+    createSubscription(options: CreateSubscriptionRequestLike, callback: ResponseCallback<CreateSubscriptionResponse>): void;
 
-    createSubscription(
-        options: CreateSubscriptionRequestLike
-    ): Promise<CreateSubscriptionResponse>;
+    createSubscription(options: CreateSubscriptionRequestLike): Promise<CreateSubscriptionResponse>;
 
-    setMonitoringMode(
-        options: SetMonitoringModeRequestLike,
-        callback: ResponseCallback<SetMonitoringModeResponse>
-    ): void;
+    setMonitoringMode(options: SetMonitoringModeRequestLike, callback: ResponseCallback<SetMonitoringModeResponse>): void;
 
-    setMonitoringMode(
-        options: SetMonitoringModeRequestLike
-    ): Promise<SetMonitoringModeResponse>;
+    setMonitoringMode(options: SetMonitoringModeRequestLike): Promise<SetMonitoringModeResponse>;
 
-    createMonitoredItems(
-        options: CreateMonitoredItemsRequestLike,
-        callback: ResponseCallback<CreateMonitoredItemsResponse>
-    ): void;
+    createMonitoredItems(options: CreateMonitoredItemsRequestLike, callback: ResponseCallback<CreateMonitoredItemsResponse>): void;
 
-    createMonitoredItems(
-        options: CreateMonitoredItemsRequestLike
-    ): Promise<CreateMonitoredItemsResponse>;
+    createMonitoredItems(options: CreateMonitoredItemsRequestLike): Promise<CreateMonitoredItemsResponse>;
 
-    modifySubscription(
-        options: ModifySubscriptionRequestLike,
-        callback: ResponseCallback<ModifySubscriptionResponse>
-    ): void;
+    modifySubscription(options: ModifySubscriptionRequestLike, callback: ResponseCallback<ModifySubscriptionResponse>): void;
 
-    modifySubscription(
-        options: ModifySubscriptionRequestLike
-    ): Promise<ModifySubscriptionResponse>;
+    modifySubscription(options: ModifySubscriptionRequestLike): Promise<ModifySubscriptionResponse>;
 
     transferSubscriptions(
         options: TransferSubscriptionsRequestLike,
         callback?: ResponseCallback<TransferSubscriptionsResponse>
     ): void;
 
-    transferSubscriptions(
-        options: TransferSubscriptionsRequestLike
-    ): Promise<TransferSubscriptionsResponse>;
+    transferSubscriptions(options: TransferSubscriptionsRequestLike): Promise<TransferSubscriptionsResponse>;
 
-    deleteSubscriptions(
-        options: DeleteSubscriptionsRequestLike,
-        callback?: ResponseCallback<DeleteSubscriptionsResponse>
-    ): void;
+    deleteSubscriptions(options: DeleteSubscriptionsRequestLike, callback?: ResponseCallback<DeleteSubscriptionsResponse>): void;
 
-    deleteSubscriptions(
-        options: DeleteSubscriptionsRequestLike
-    ): Promise<DeleteSubscriptionsResponse>;
+    deleteSubscriptions(options: DeleteSubscriptionsRequestLike): Promise<DeleteSubscriptionsResponse>;
 
     /**
-     *
-     * @method modifyMonitoredItems
-     * @async
+     * modify the monitored item parameters
      */
-    modifyMonitoredItems(
-        options: ModifyMonitoredItemsRequestLike,
-        callback?: ResponseCallback<ModifyMonitoredItemsResponse>
-    ): void;
+    modifyMonitoredItems(options: ModifyMonitoredItemsRequestLike, callback?: ResponseCallback<ModifyMonitoredItemsResponse>): void;
 
-    modifyMonitoredItems(
-        options: ModifyMonitoredItemsRequestLike)
-        : Promise<ModifyMonitoredItemsResponse>;
+    modifyMonitoredItems(options: ModifyMonitoredItemsRequestLike): Promise<ModifyMonitoredItemsResponse>;
 
-    getMonitoredItems(
-        subscriptionId: SubscriptionId
-    ): Promise<MonitoredItemData>;
+    getMonitoredItems(subscriptionId: SubscriptionId): Promise<MonitoredItemData>;
 
-    getMonitoredItems(
-        subscriptionId: SubscriptionId,
-        callback: ResponseCallback<MonitoredItemData>
-    ): void;
+    getMonitoredItems(subscriptionId: SubscriptionId, callback: ResponseCallback<MonitoredItemData>): void;
+
+    deleteMonitoredItems(request: DeleteMonitoredItemsRequestLike, callback: Callback<DeleteMonitoredItemsResponse>): void;
+
+    deleteMonitoredItems(request: DeleteMonitoredItemsRequestLike): Promise<DeleteMonitoredItemsResponse>;
+
+    setTriggering(request: SetTriggeringRequestOptions): Promise<SetTriggeringResponse>;
+    setTriggering(request: SetTriggeringRequestOptions, callback: ResponseCallback<SetTriggeringResponse>): void;
 }
 
 // subscription service
 export interface ClientSessionSubscriptionService {
-    createSubscription2(
-        createSubscriptionRequest: CreateSubscriptionRequestLike
-    ): Promise<ClientSubscription>;
+    createSubscription2(createSubscriptionRequest: CreateSubscriptionRequestLike): Promise<ClientSubscription>;
 
     createSubscription2(
         createSubscriptionRequest: CreateSubscriptionRequestLike,
@@ -475,46 +408,209 @@ export interface ClientSessionSubscriptionService {
     ): void;
 }
 
+export interface ClientSessionChangeUser extends IBasicSessionChangeUser {
+    /* */
+}
+
+export interface HistoryReadValueIdOptions2 extends HistoryReadValueIdOptions {
+    nodeId: NodeIdLike; // nodeId is mandatory here
+}
+
+export interface ExtraReadHistoryValueParameters {
+    numValuesPerNode?: number;
+    returnBounds?: boolean;
+    isReadModified?: boolean;
+    //
+    timestampsToReturn?: TimestampsToReturn;
+}
+
 // history services
 export interface ClientSessionReadHistoryService {
-
     readHistoryValue(
-        nodes: ReadValueIdOptions[],
+        nodesToRead: NodeIdLike[] | HistoryReadValueIdOptions2[],
         start: DateTime,
         end: DateTime,
         callback: (err: Error | null, results?: HistoryReadResult[]) => void
     ): void;
+    readHistoryValue(
+        nodesToRead: NodeIdLike[] | HistoryReadValueIdOptions2[],
+        start: DateTime,
+        end: DateTime,
+        options: ExtraReadHistoryValueParameters | undefined,
+        callback: (err: Error | null, results?: HistoryReadResult[]) => void
+    ): void;
 
     readHistoryValue(
-        nodes: ReadValueIdOptions[],
+        nodesToRead: NodeIdLike[] | HistoryReadValueIdOptions2[],
         start: DateTime,
-        end: DateTime
+        end: DateTime,
+        options?: ExtraReadHistoryValueParameters
     ): Promise<HistoryReadResult[]>;
 
     readHistoryValue(
-        node: ReadValueIdOptions,
+        nodeToRead: NodeIdLike | HistoryReadValueIdOptions2,
         start: DateTime,
         end: DateTime,
         callback: (err: Error | null, result?: HistoryReadResult) => void
     ): void;
+    readHistoryValue(
+        nodeToRead: NodeIdLike | HistoryReadValueIdOptions2,
+        start: DateTime,
+        end: DateTime,
+        options: ExtraReadHistoryValueParameters | undefined,
+        callback: (err: Error | null, result?: HistoryReadResult) => void
+    ): void;
 
     readHistoryValue(
-        nodes: ReadValueIdOptions,
+        nodeToRead: NodeIdLike | HistoryReadValueIdOptions2,
         start: DateTime,
-        end: DateTime
+        end: DateTime,
+        options?: ExtraReadHistoryValueParameters
     ): Promise<HistoryReadResult>;
 
+    /**
+     *
+     * @example
+     *
+     * ```javascript
+     * //  es5
+     * session.readAggregateValue(
+     *   {nodeId: "ns=5;s=Simulation Examples.Functions.Sine1" },
+     *   new Date("2015-06-10T09:00:00.000Z"),
+     *   new Date("2015-06-10T09:01:00.000Z"),
+     *  AggregateFunction.Average, 3600000, (err,dataValues)  => {
+     *
+     * });
+     * ```
+     *
+     * ```javascript
+     * //  es6
+     * const dataValues = await session.readAggregateValue(
+     *   { nodeId: "ns=5;s=Simulation Examples.Functions.Sine1" },
+     *   new Date("2015-06-10T09:00:00.000Z"),
+     *   new Date("2015-06-10T09:01:00.000Z"),
+     *   AggregateFunction.Average, 3600000);
+     * ```
+     * @param nodesToRead   the read value id
+     * @param startTime   the start time in UTC format
+     * @param endTime     the end time in UTC format
+     * @param aggregateFn
+     * @param processingInterval in milliseconds
+     * @param callback
+     *
+     *
+     * aggregateConfiguration contains additional parameters
+     *
+     * - The TreatUncertainAsBad Variable indicates how the Server treats data returned with a
+     *   StatusCode severity Uncertain with respect to Aggregate calculations. A value of True
+     *   indicates the Server considers the severity equivalent to Bad, a value of False indicates
+     *   the Server considers the severity equivalent to Good, unless the Aggregate definition says
+     *   otherwise. The default value is True. Note that the value is still treated as Uncertain when
+     *   the StatusCode for the result is calculated.
+     *
+     * - The PercentDataBad Variable indicates the minimum percentage of Bad data in a given interval
+     *   required for the StatusCode for the given interval for processed data request to be set to Bad.
+     *   (Uncertain is treated as defined above.) Refer to 5.4.3 for details on using this Variable when
+     *   assigning StatusCodes. For details on which Aggregates use the PercentDataBad Variable, see the
+     *   definition of each Aggregate. The default value is 100.
+     *
+     * - The PercentDataGood Variable indicates the minimum percentage of Good data in a given interval
+     *   required for the StatusCode for the given interval for the processed data requests to be set to
+     *   Good. Refer to 5.4.3 for details on using this Variable when assigning StatusCodes. For details
+     *   on which Aggregates use the PercentDataGood Variable, see the definition of each Aggregate.
+     *   The default value is 100.
+     *
+     * - The PercentDataGood and PercentDataBad shall follow the following relationship
+     *         PercentDataGood ≥ (100 – PercentDataBad).
+     *   If they are equal the result of the PercentDataGood calculation is used. If the values
+     *   entered for PercentDataGood and PercentDataBad do not result in a valid calculation
+     *   (e.g. Bad = 80; Good = 0) the result will have a StatusCode of Bad_AggregateInvalidInputs
+     *   The StatusCode Bad_AggregateInvalidInputs will be returned if the value of PercentDataGood
+     *   or PercentDataBad exceed 100.
+     *
+     * - The UseSlopedExtrapolation Variable indicates how the Server interpolates data when no boundary
+     *   value exists (i.e. extrapolating into the future from the last known value). A value of False
+     *   indicates that the Server will use a SteppedExtrapolation format, and hold the last known value
+     *   constant. A value of True indicates the Server will project the value using UseSlopedExtrapolation
+     *   mode. The default value is False. For SimpleBounds this value is ignored.
+     *
+     */
+    readAggregateValue(
+        nodesToRead: HistoryReadValueIdOptions[],
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction[],
+        processingInterval: number,
+        callback: Callback<HistoryReadResult[]>
+    ): void;
+    readAggregateValue(
+        nodesToRead: HistoryReadValueIdOptions[],
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction[],
+        processingInterval: number
+    ): Promise<HistoryReadResult[]>;
+    readAggregateValue(
+        nodeToRead: HistoryReadValueIdOptions,
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction,
+        processingInterval: number,
+        callback: Callback<HistoryReadResult>
+    ): void;
+    readAggregateValue(
+        nodeToRead: HistoryReadValueIdOptions,
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction,
+        processingInterval: number
+    ): Promise<HistoryReadResult>;
+    readAggregateValue(
+        nodesToRead: HistoryReadValueIdOptions[],
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction[],
+        processingInterval: number,
+        aggregateConfiguration: AggregateConfigurationOptions,
+        callback: Callback<HistoryReadResult[]>
+    ): void;
+    readAggregateValue(
+        nodesToRead: HistoryReadValueIdOptions[],
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction[],
+        processingInterval: number,
+        aggregateConfiguration: AggregateConfigurationOptions
+    ): Promise<HistoryReadResult[]>;
+    readAggregateValue(
+        nodeToRead: HistoryReadValueIdOptions,
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction,
+        processingInterval: number,
+        aggregateConfiguration: AggregateConfigurationOptions,
+        callback: Callback<HistoryReadResult>
+    ): void;
+    readAggregateValue(
+        nodeToRead: HistoryReadValueIdOptions,
+        startTime: DateTime,
+        endTime: DateTime,
+        aggregateFn: AggregateFunction,
+        processingInterval: number,
+        aggregateConfiguration: AggregateConfigurationOptions
+    ): Promise<HistoryReadResult>;
+
+    historyRead(request: HistoryReadRequest, callback: Callback<HistoryReadResponse>): void;
+    historyRead(request: HistoryReadRequest): Promise<HistoryReadResponse>;
 }
 
 export interface ClientSessionDataTypeService {
-
     /**
      * retrieve the built-in DataType of a Variable, from its DataType attribute.
      *
      *
      * this method is useful to determine which DataType to use when constructing a Variant
      * @param nodeId - the node id of the variable to query
-     * @async
      *
      *
      * @example
@@ -522,43 +618,37 @@ export interface ClientSessionDataTypeService {
      * ```javascript
      * const session = ...; // ClientSession
      * const nodeId = opcua.VariableIds.Server_ServerStatus_CurrentTime;
-     * session.getBuildInDataType(nodeId,function(err,dataType) {
+     * session.getBuiltInDataType(nodeId,function(err,dataType) {
      *   assert(dataType === opcua.DataType.DateTime);
      * });
      * // or
-     * nodeId = opcua.coerceNodeId("ns=2;s=Scalar_Static_ImagePNG");
-     * const dataType: await session.getBuildInDataType(nodeId);
+     * nodeId = opcua.coerceNodeId("ns=2;s=Static_Scalar_ImagePNG");
+     * const dataType: await session.getBuiltInDataType(nodeId);
      * assert(dataType === opcua.DataType.ByteString);
      * ```
      */
     getBuiltInDataType(nodeId: NodeId): Promise<DataType>;
 
     getBuiltInDataType(nodeId: NodeId, callback: (err: Error | null, dataType?: DataType) => void): void;
-
 }
 
 export interface ClientSessionNamespaceService {
-
     getNamespaceIndex(namespaceUri: string): number;
 
     readNamespaceArray(): Promise<string[]>;
 
     readNamespaceArray(callback: (err: Error | null, namespaceArray?: string[]) => void): void;
-
 }
 
 export interface ClientSessionExtensionObjectService {
+    constructExtensionObject(dataType: NodeId, pojo: Record<string, unknown>): Promise<ExtensionObject>;
 
-    constructExtensionObject(
-        dataType: NodeId,
-        pojo: any
-    ): Promise<ExtensionObject>;
-
+    /**
+     */
     extractNamespaceDataType(): Promise<ExtraDataTypeManager>;
 }
 
 export interface ClientSessionConditionService {
-
     disableCondition(): void;
 
     enableCondition(): void;
@@ -566,7 +656,7 @@ export interface ClientSessionConditionService {
     /**
      * helper to add a comment to a condition
      *
-     * The AddComment Method is used to apply a comment to a specific state of a Condition instance.
+     * The addComment Method is used to apply a comment to a specific state of a Condition instance.
      *
      * Normally, the NodeId of the object instance as the ObjectId is passed to the Call Service.
      *
@@ -583,18 +673,9 @@ export interface ClientSessionConditionService {
      * branch), the BranchId and all Condition values of this branch will be reported/.
      *
      */
-    addCommentCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike,
-        callback: Callback<StatusCode>
-    ): void;
+    addCommentCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike, callback: Callback<StatusCode>): void;
 
-    addCommentCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike
-    ): Promise<StatusCode>;
+    addCommentCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike): Promise<StatusCode>;
 
     /**
      * helper to confirm a condition
@@ -616,18 +697,9 @@ export interface ClientSessionConditionService {
      * @param comment
      * @param callback
      */
-    confirmCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike,
-        callback: Callback<StatusCode>
-    ): void;
+    confirmCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike, callback: Callback<StatusCode>): void;
 
-    confirmCondition(
-        conditionId: NodeIdLike,
-        eventId: Buffer,
-        comment: LocalizedTextLike
-    ): Promise<StatusCode>;
+    confirmCondition(conditionId: NodeIdLike, eventId: Buffer, comment: LocalizedTextLike): Promise<StatusCode>;
 
     /**
      * helper to acknowledge a condition
@@ -666,64 +738,50 @@ export interface ClientSessionConditionService {
      * @param comment
      * @param callback
      */
-    acknowledgeCondition(
-        conditionId: NodeId,
-        eventId: Buffer,
-        comment: LocalizedTextLike,
-        callback: Callback<StatusCode>): void;
+    acknowledgeCondition(conditionId: NodeId, eventId: Buffer, comment: LocalizedTextLike, callback: Callback<StatusCode>): void;
 
-    acknowledgeCondition(
-        conditionId: NodeId,
-        eventId: Buffer,
-        comment: LocalizedTextLike
-    ): Promise<StatusCode>;
+    acknowledgeCondition(conditionId: NodeId, eventId: Buffer, comment: LocalizedTextLike): Promise<StatusCode>;
 
     /**
-     * @method findMethodId
      *
      * @param nodeId      the nodeId of the parent Object
      * @param methodName  the method name
      * @param callback
+     *
+     * note:
+     *   - methodName is a browse name and may therefore be prefixed with a namespace index.
+     *   - if method is not found on the object specified by nodeId, then the findMethodId will
+     *     recursively browse up the hierarchy of object typeDefinition Node
+     *     until it reaches the root type. and try to find the first method that matches the
+     *     provided name.
+     *
+     * @deprecated use global findMethodId(session, nodeId, methodName): Promise<NodeId> instead
      */
-    findMethodId(
-        nodeId: NodeIdLike,
-        methodName: string,
-        callback: ResponseCallback<NodeId>
-    ): void;
+    findMethodId(nodeId: NodeIdLike, methodName: string, callback: ResponseCallback<NodeId>): void;
 
-    findMethodId(
-        nodeId: NodeIdLike,
-        methodName: string
-    ): Promise<NodeId>;
-
+    findMethodId(nodeId: NodeIdLike, methodName: string): Promise<NodeId>;
 }
 
 // publish Server
 export interface ClientSessionPublishService {
-    publish(
-        options: PublishRequest,
-        callback: ResponseCallback<PublishResponse>
-    ): void;
-    republish(
-        options: RepublishRequest,
-        callback: ResponseCallback<RepublishResponse>): void;
+    publish(options: PublishRequest, callback: ResponseCallback<PublishResponse>): void;
+    republish(options: RepublishRequest, callback: ResponseCallback<RepublishResponse>): void;
 }
 
-export interface ClientSession extends
-    ClientSessionTranslateBrowsePathService,
-    ClientSessionQueryService,
-    ClientSessionBrowseService,
-    // ClientSessionRawSubscriptionService,
-    ClientSessionSubscriptionService,
-    ClientSessionCallService,
-    ClientSessionRegisterService,
-    ClientSessionReadService,
-    ClientSessionWriteService,
-    ClientSessionReadHistoryService,
-    ClientSessionConditionService,
-    ClientSessionExtensionObjectService,
-    ClientSessionNamespaceService,
-    ClientSessionDataTypeService,
-    IBasicSession {
-
-}
+export interface ClientSession
+    extends ClientSessionTranslateBrowsePathService,
+        ClientSessionQueryService,
+        ClientSessionBrowseService,
+        // ClientSessionRawSubscriptionService,
+        ClientSessionSubscriptionService,
+        ClientSessionCallService,
+        ClientSessionRegisterService,
+        ClientSessionReadService,
+        // ClientSessionWriteService,
+        ClientSessionReadHistoryService,
+        ClientSessionConditionService,
+        ClientSessionExtensionObjectService,
+        ClientSessionNamespaceService,
+        ClientSessionDataTypeService,
+        ClientSessionChangeUser,
+        IBasicSession {}

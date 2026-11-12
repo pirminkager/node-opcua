@@ -1,0 +1,220 @@
+name: Generate API Documentation
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >
+          Version label for the docs folder (e.g. 2.173.1).
+          Leave blank to read from lerna.json.
+        required: false
+        type: string
+
+concurrency:
+  group: docs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout node-opcua
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm recursive install --no-frozen-lockfile --ignore-scripts
+
+      - name: Build
+        # build:all = generate:types + tsc. Needed because
+        # _generated_opcua_types.ts is gitignored.
+        run: pnpm run build:all
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(node -p "require('./lerna.json').version")
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Using version: $(cat "$GITHUB_OUTPUT" | grep version | cut -d= -f2)"
+
+      - name: Generate TypeDoc
+        run: |
+          pnpx typedoc --options typedoc.json \
+            --out "docs-output/${{ steps.version.outputs.version }}"
+
+      - name: Copy to latest
+        run: cp -r "docs-output/${{ steps.version.outputs.version }}" docs-output/latest
+
+      - name: Create version index page
+        run: |
+          cat > docs-output/index.html << 'INDEXEOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0;URL='latest/'">
+            <title>NodeOPCUA API Documentation</title>
+          </head>
+          <body>
+            <p>Redirecting to <a href="latest/">latest documentation</a>…</p>
+          </body>
+          </html>
+          INDEXEOF
+
+      - name: Inject canonical links into latest
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const MARKER = '<!-- NODEOPCUA-CANONICAL -->';
+          const latestDir = 'docs-output/latest';
+          function walk(dir) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else if (entry.name.endsWith('.html')) {
+                let html = fs.readFileSync(full, 'utf-8');
+                if (html.includes(MARKER)) continue;
+                const rel = path.relative(latestDir, full).split(path.sep).join('/');
+                const tag = MARKER + '<link rel=\"canonical\" href=\"https://node-opcua.github.io/api_doc/latest/' + rel + '\">\n';
+                const m = html.match(/<head[^>]*>/i);
+                if (m) {
+                  const pos = m.index + m[0].length;
+                  html = html.slice(0, pos) + '\n' + tag + html.slice(pos);
+                  fs.writeFileSync(full, html, 'utf-8');
+                }
+              }
+            }
+          }
+          walk(latestDir);
+          console.log('Canonical links injected into docs-output/latest/');
+          "
+      - name: Setup deploy key for clone
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DOCS_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Inject deprecation banners into old versions
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+          # Clone the live site to find existing version folders
+          git clone --depth 1 \
+            git@github.com:node-opcua/node-opcua.github.io.git \
+            _ghpages_clone
+          # Walk all version dirs, inject banners for old ones
+          node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const NOINDEX = '<!-- NODEOPCUA-NOINDEX -->';
+          const BSTART = '<!-- NODEOPCUA-DEPRECATION-BANNER -->';
+          const BEND = '<!-- /NODEOPCUA-DEPRECATION-BANNER -->';
+          const newVer = process.env.NEW_VERSION;
+          const apiDir = '_ghpages_clone/api_doc';
+          function walk(dir) {
+            const r = [];
+            for (const e of fs.readdirSync(dir, {withFileTypes:true})) {
+              const f = path.join(dir, e.name);
+              if (e.isDirectory()) r.push(...walk(f));
+              else if (e.name.endsWith('.html')) r.push(f);
+            }
+            return r;
+          }
+          function banner(v) {
+            return BSTART + '\n<div style=\"background:#fff3cd;border-bottom:2px solid #ffc107;padding:12px;text-align:center;font-family:sans-serif;font-size:14px\">\n⚠️ You are reading documentation for an OLD version (v' + v + '). The current released version is v' + newVer + '.\n<a href=\"/api_doc/latest/\" style=\"font-weight:bold;color:#856404\">View latest documentation →</a>\n</div>\n' + BEND;
+          }
+          if (!fs.existsSync(apiDir)) { console.log('No api_doc dir found'); process.exit(0); }
+          const dirs = fs.readdirSync(apiDir, {withFileTypes:true})
+            .filter(e => e.isDirectory() && e.name !== 'latest' && e.name !== newVer && /^\d+\./.test(e.name))
+            .map(e => e.name);
+          console.log('Old versions to process:', dirs.join(', ') || '(none)');
+          for (const ver of dirs) {
+            const vdir = path.join(apiDir, ver);
+            const files = walk(vdir);
+            let mod = 0;
+            for (const f of files) {
+              let html = fs.readFileSync(f, 'utf-8');
+              if (html.includes(NOINDEX) && html.includes(BSTART)) continue;
+              let changed = false;
+              if (!html.includes(NOINDEX)) {
+                const m = html.match(/<head[^>]*>/i);
+                if (m) { const p=m.index+m[0].length; html=html.slice(0,p)+'\n'+NOINDEX+'<meta name=\"robots\" content=\"noindex,follow\">\n'+html.slice(p); changed=true; }
+              }
+              if (!html.includes(BSTART)) {
+                const m = html.match(/<body[^>]*>/i);
+                if (m) { const p=m.index+m[0].length; html=html.slice(0,p)+'\n'+banner(ver)+'\n'+html.slice(p); changed=true; }
+              }
+              if (changed) { fs.writeFileSync(f, html, 'utf-8'); mod++; }
+            }
+            if (mod > 0) {
+              // Copy bannerized folder into docs-output so it gets deployed
+              const dest = path.join('docs-output', ver);
+              fs.cpSync(vdir, dest, { recursive: true });
+            }
+            console.log('  ' + ver + ': ' + mod + '/' + files.length + ' files modified');
+          }
+          "
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+      - name: Curate documentation versions
+        # GitHub Pages rejects deployments whose artifact exceeds 1GB. The site
+        # accumulates one full TypeDoc build per release (keep_files: true), so
+        # once enough versions pile up the deploy starts failing outright.
+        # tools/curate-api-docs.mjs drops pre-1.0 versions, superseded patches,
+        # near-duplicate releases, and (as a safety net) the oldest remaining
+        # lines if the result is still over budget. Run it with --dry-run
+        # locally against a clone to preview a curation pass before it runs
+        # here for real.
+        run: node tools/curate-api-docs.mjs _ghpages_clone/api_doc
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Commit and push pruned versions
+        run: |
+          cd _ghpages_clone
+          if [ -n "$(git status --porcelain api_doc)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A api_doc
+            git commit -m "docs: curate API doc versions, drop patches and near-duplicate releases"
+            git push origin master
+          else
+            echo "Nothing to prune"
+          fi
+        env:
+          GIT_SSH_COMMAND: "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.DOCS_DEPLOY_KEY }}
+          external_repository: node-opcua/node-opcua.github.io
+          publish_branch: master
+          publish_dir: ./docs-output
+          destination_dir: api_doc
+          keep_files: true
+          enable_jekyll: true
+          commit_message: "docs: update API docs to v${{ steps.version.outputs.version }}"

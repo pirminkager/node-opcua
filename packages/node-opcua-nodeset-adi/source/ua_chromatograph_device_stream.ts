@@ -1,0 +1,13 @@
+import type { UAStream, UAStream_Base } from "./ua_stream.js";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/ADI/                            |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ChromatographDeviceStreamType i=1034                        |
+ * |isAbstract      |false                                                       |
+ */
+export type UAChromatographDeviceStream_Base = UAStream_Base;
+export interface UAChromatographDeviceStream extends UAStream, UAChromatographDeviceStream_Base {}

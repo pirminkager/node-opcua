@@ -1,28 +1,38 @@
-import {
-    ConstructorFuncWithSchema,
-    DataTypeFactory,
-    StructuredTypeSchema,
-} from "node-opcua-factory";
+import type { DataTypeFactory, EnumerationDefinitionSchema, IStructuredTypeSchema, StructureInfo } from "node-opcua-factory";
 
 export function toTypeScript(dataTypeFactory: DataTypeFactory): string {
+    const enumeratedTypes: Map<string, EnumerationDefinitionSchema> = new Map();
+    for (const k of dataTypeFactory.enumerations()) {
+        const enumeration = dataTypeFactory.getEnumeration(k);
+        if (!enumeration) {
+            throw new Error(`Cannot find enumeration ${k}`);
+        }
+        enumeratedTypes.set(k, enumeration);
+    }
+    const structuredTypes: Map<string, StructureInfo> = new Map();
+    for (const k of dataTypeFactory.structuredTypesNames()) {
+        structuredTypes.set(k, dataTypeFactory.getStructureInfoByTypeName(k));
+    }
 
-    const enumeratedTypes = (dataTypeFactory as any)._enumerations;
-    const structuredTypes = (dataTypeFactory as any)._structureTypeConstructorByNameMap;
-
-    const declaration: { [key: string]: string } = {};
+    const declaration: Map<string, string> = new Map();
 
     function adjustType(t: string): string {
-        if (!enumeratedTypes[t] && !structuredTypes[t]) {
-            declaration[t] = t;
+        if (t === "String") {
+            t = "UAString";
+        } else if (t === "Boolean") {
+            t = "UABoolean";
+        }
+
+        if (!enumeratedTypes.has(t) && !structuredTypes.has(t)) {
+            declaration.set(t, t);
         }
         return t;
     }
     const l: string[] = [];
     // enumeration
-    for (const e of Object.values(enumeratedTypes) as any[]) {
+    for (const e of enumeratedTypes.values()) {
         l.push(`export enum ${e.name} {`);
-        // console.log((e.typedEnum as any).enumItems);
-        for (const v of Object.entries(e.enumValues as any)) {
+        for (const v of Object.entries(e.enumValues)) {
             const vv = parseInt(v[0], 10);
             if (vv >= 0) {
                 continue;
@@ -30,20 +40,16 @@ export function toTypeScript(dataTypeFactory: DataTypeFactory): string {
             l.push(`    ${v[0]} = ${v[1]},`);
         }
         l.push(`}`);
-
     }
-    const alreadyDone: { [key: string]: StructuredTypeSchema } = {};
-    function dumpType(o: StructuredTypeSchema) {
+    const alreadyDone: Set<string> = new Set();
+    function dumpType(o: IStructuredTypeSchema) {
         // base type first
-        const b = o.baseType;
-
-        const bt = structuredTypes[b]?.schema;
-
-        if (b && !alreadyDone[o.baseType] && bt) {
+        const bt = o.getBaseSchema();
+        if (bt && !alreadyDone.has(o.baseType) && bt) {
             dumpType(bt);
         }
-        alreadyDone[o.name] = o;
-        const ex1 = (b && bt) ? `extends ${b} ` : "";
+        alreadyDone.add(o.name);
+        const ex1 = bt ? `extends ${bt.name} ` : "";
 
         if (o.baseType === "Union") {
             const p: string[] = [];
@@ -59,7 +65,7 @@ export function toTypeScript(dataTypeFactory: DataTypeFactory): string {
             }
             // export all flavors
             for (const field of o.fields) {
-                const name = field.name;
+                const _name = field.name;
                 if (field.switchValue === undefined) {
                     continue;
                 }
@@ -73,9 +79,7 @@ export function toTypeScript(dataTypeFactory: DataTypeFactory): string {
             }
             const pp = p.join(" | ");
             l.push(`type ${o.name} = ${pp};`);
-
         } else {
-
             if (o.fields.length === 0) {
                 l.push("// tslint:disable-next-line: no-empty-interface");
             }
@@ -97,13 +101,13 @@ export function toTypeScript(dataTypeFactory: DataTypeFactory): string {
         }
     }
     // objects
-    for (const o of Object.values(structuredTypes) as ConstructorFuncWithSchema[]) {
-        if (alreadyDone[o.schema.name]) {
+    for (const o of structuredTypes.values()) {
+        if (alreadyDone.has(o.schema.name)) {
             continue;
         }
         dumpType(o.schema);
     }
-    const opcuatypes = Object.keys(declaration).sort().join(",\n    ");
-    l.unshift(`import {\n    ${opcuatypes}\n} from "node-opcua";`);
+    const opcuaTypes = [...declaration.keys()].sort().join(",\n    ");
+    l.unshift(`import {\n    ${opcuaTypes}\n} from "node-opcua";`);
     return l.join("\n");
 }

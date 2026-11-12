@@ -1,0 +1,201 @@
+import fs from "node:fs";
+import path from "node:path";
+import chalk from "chalk";
+import { AddressSpace, PseudoSession } from "node-opcua-address-space";
+import { generateAddressSpace } from "node-opcua-address-space/nodeJS.js";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { nodesets } from "node-opcua-nodesets";
+import should from "should";
+import {
+    convertNamespaceTypeToTypescript,
+    convertTypeToTypescript,
+    type ReferenceDescriptionEx,
+    walkThroughDataTypes,
+    walkThroughObjectTypes,
+    walkThroughReferenceTypes,
+    walkThroughVariableTypes
+} from "../dist/index.js";
+import { scratch, testPath } from "./paths.js";
+
+describe("Convert to Typescript", () => {
+    let addressSpace: AddressSpace;
+    before(async () => {
+        addressSpace = AddressSpace.create();
+        await generateAddressSpace(addressSpace, [
+            nodesets.standard,
+            nodesets.di,
+            nodesets.adi,
+            nodesets.autoId,
+            nodesets.machineVision,
+            nodesets.commercialKitchenEquipment,
+            nodesets.gds
+        ]);
+    });
+    before(() => {
+        const tmpFolder = scratch("tmp");
+        if (!fs.existsSync(tmpFolder)) {
+            fs.mkdirSync(tmpFolder);
+        }
+    });
+    after(() => {
+        addressSpace.dispose();
+    });
+
+    const options = {
+        baseFolder: scratch("tmp"),
+        prefix: "node-opcua-nodeset-",
+        licence: "MIT" as const
+    };
+    const referenceFolder = testPath("references");
+    const actualFolder = scratch("tmp");
+    it("P1 - should convert DeviceType", async () => {
+        const filename = "node-opcua-di.txt";
+
+        const nsDI = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/DI/");
+        nsDI.should.be.greaterThan(0);
+        const d = addressSpace.findObjectType("DeviceType", nsDI)!;
+        const deviceDataTypeNodeId = d.nodeId;
+        const session = new PseudoSession(addressSpace);
+
+        const { content } = await convertTypeToTypescript(session, deviceDataTypeNodeId, options);
+
+        fs.writeFileSync(path.join(actualFolder, filename), content);
+        const expectedContent = fs.readFileSync(path.join(referenceFolder, filename), "utf-8");
+        content.should.eql(expectedContent);
+    });
+    it("P2 - should convert ChromatographDevice ", async () => {
+        const filename = "ChromatographDeviceType.txt";
+
+        const nsADI = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/ADI/");
+        nsADI.should.be.greaterThan(0);
+        const d = addressSpace.findObjectType("ChromatographDeviceType", nsADI)!;
+        const chromatographDeviceTypeNodeId = d.nodeId;
+        const session = new PseudoSession(addressSpace);
+
+        const { content } = await convertTypeToTypescript(session, chromatographDeviceTypeNodeId, options);
+        fs.writeFileSync(path.join(actualFolder, filename), content);
+
+        const expectedContent = fs.readFileSync(path.join(referenceFolder, filename), "utf-8");
+        content.should.eql(expectedContent);
+    });
+    it("P3 - should convert AnalyserDevice ", async () => {
+        const filename = "node-opcua-adi_UAAnalyserDevice.txt";
+
+        const nsADI = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/ADI/");
+        nsADI.should.be.greaterThan(0);
+        const d = addressSpace.findObjectType("AnalyserDeviceType", nsADI)!;
+        const chromatographDeviceTypeNodeId = d.nodeId;
+        const session = new PseudoSession(addressSpace);
+
+        const { content } = await convertTypeToTypescript(session, chromatographDeviceTypeNodeId, options);
+        fs.writeFileSync(path.join(actualFolder, filename), content);
+
+        const expectedContent = fs.readFileSync(path.join(referenceFolder, filename), "utf-8");
+        content.should.eql(expectedContent);
+    });
+    it("P4 - should convert UASessionSecurityDiagnostics ", async () => {
+        const filename = "node-opcua-ua_UASessionSecurityDiagnostics.txt";
+
+        const d = addressSpace.findVariableType("SessionSecurityDiagnosticsType", 0)!;
+        const typeNodeId = d.nodeId;
+        const session = new PseudoSession(addressSpace);
+
+        const { content } = await convertTypeToTypescript(session, typeNodeId, options);
+        fs.writeFileSync(path.join(actualFolder, filename), content);
+
+        const expectedContent = fs.readFileSync(path.join(referenceFolder, filename), "utf-8");
+        content.should.eql(expectedContent);
+    });
+    const colors = [chalk.grey, chalk.yellow, chalk.green, chalk.cyan, chalk.blue, chalk.greenBright, chalk.bgGreenBright];
+    it("P5 - workThrough", async () => {
+        const parents: Record<string, number> = {};
+        const nodeVisitor = {
+            async visit(reference: ReferenceDescriptionEx, level: number): Promise<void> {
+                if (reference.nodeId.namespace === 0) {
+                    return;
+                }
+                if (reference.parent && !parents[reference.parent.nodeId.toString()]) {
+                    const r: ReferenceDescriptionEx[] = [];
+                    let cur = reference;
+                    while (cur.parent && !parents[cur.parent.nodeId.toString()]) {
+                        r.push(cur.parent);
+                        cur = cur.parent;
+                    }
+                    const start = level - r.length;
+                    for (let i = 0; i < r.length; i++) {
+                        const rr = r[r.length - 1 - i];
+
+                        parents[rr.nodeId.toString()] = 1;
+
+                        const c = colors[rr.nodeId.namespace];
+                        console.log("".padEnd(start + i + 1, " "), c(rr.browseName.toString()));
+                    }
+                }
+
+                const c = colors[reference.nodeId.namespace];
+                console.log(
+                    "".padEnd(level + 1, " "),
+                    c(reference.browseName.toString()),
+                    " base = ",
+                    reference.parent.browseName.toString()
+                );
+                parents[reference.nodeId.toString()] = 1;
+            }
+        };
+        const session = new PseudoSession(addressSpace);
+        console.log("---- ObjectTypes");
+        await walkThroughObjectTypes(session, nodeVisitor);
+        console.log("---- VariableTypes");
+        await walkThroughVariableTypes(session, nodeVisitor);
+        console.log("---- DataTypes");
+        await walkThroughDataTypes(session, nodeVisitor);
+        console.log("---- ReferenceTypes");
+        await walkThroughReferenceTypes(session, nodeVisitor);
+    });
+    it("P5 - convertNamespaceTypeToTypescript", async () => {
+        const session = new PseudoSession(addressSpace);
+        const options = {
+            baseFolder: scratch("tmp"),
+            prefix: "node-opcua-nodeset-",
+            licence: "MIT" as const
+        };
+        const nsUA = 0;
+        const nsDI = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/DI/");
+        const nsADI = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/ADI/");
+
+        await convertNamespaceTypeToTypescript(session, nsUA, options);
+        await convertNamespaceTypeToTypescript(session, nsDI, options);
+        await convertNamespaceTypeToTypescript(session, nsADI, options);
+    });
+    it("P6 - index.ts loads at run time only the files that declare a value", async () => {
+        // A types-only file compiles to an empty module; re-exporting it with `export *`
+        // would still load it at run time. DI has both kinds: a few enums, many interfaces.
+        const session = new PseudoSession(addressSpace);
+        const nsDI = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/DI/");
+        await convertNamespaceTypeToTypescript(session, nsDI, options);
+
+        const sourceFolder = path.join(options.baseFolder, "node-opcua-nodeset-di", "source");
+        const lines = fs
+            .readFileSync(path.join(sourceFolder, "index.ts"), "utf-8")
+            .split("\n")
+            .filter((line) => line.length > 0);
+
+        let valueExports = 0;
+        let typeExports = 0;
+        for (const line of lines) {
+            const match = line.match(/^export (type )?\* from "\.\/(.+)\.js";$/);
+            should(match).not.be.null();
+            const isTypeOnly = match?.[1] !== undefined;
+            const source = fs.readFileSync(path.join(sourceFolder, `${match?.[2]}.ts`), "utf-8");
+            const declaresValue = /^export (enum|const|function|class|let|var) /m.test(source);
+            should(isTypeOnly).eql(!declaresValue, line);
+            if (isTypeOnly) {
+                typeExports++;
+            } else {
+                valueExports++;
+            }
+        }
+        should(valueExports).be.greaterThan(0);
+        should(typeExports).be.greaterThan(0);
+    });
+});

@@ -1,231 +1,201 @@
-node-opcua
-==========
+# node-opcua
 
-an implementation of a OPC UA stack fully written in javascript and nodejs
+The most complete OPC UA stack for Node.js and the browser, written in TypeScript.
 
-
-[![NPM download](https://img.shields.io/npm/dm/node-opcua.svg)](http://www.npm-stats.com/~packages/node-opcua)
-[![NPM version](https://badge.fury.io/js/node-opcua.png)](http://badge.fury.io/js/node-opcua)
-[![Build Status](https://travis-ci.org/node-opcua/node-opcua.png?branch=master)](https://travis-ci.org/node-opcua/node-opcua)
-[![Build status](https://ci.appveyor.com/api/projects/status/8sgtm3n15aii98oc/branch/master?svg=true)](https://ci.appveyor.com/project/erossignon/node-opcua/branch/master)
-[![HitCount](http://hits.dwyl.io/node-opcua/node-opcua.svg)](http://hits.dwyl.io/node-opcua/node-opcua)
+[![NPM version](https://img.shields.io/npm/v/node-opcua)](https://www.npmjs.com/package/node-opcua)
+[![Node.js CI](https://github.com/node-opcua/node-opcua/actions/workflows/workflow.yml/badge.svg)](https://github.com/node-opcua/node-opcua/actions/workflows/workflow.yml)
+[![Coverage Status](https://img.shields.io/coverallsCoverage/github/node-opcua/node-opcua)](https://coveralls.io/r/node-opcua/node-opcua)
 [![lerna](https://img.shields.io/badge/maintained%20with-lerna-cc00ff.svg)](https://lernajs.io/)
+[![The Book](https://img.shields.io/static/v1?label=the%20book&message=NodeOPCUA%20by%20example&color=blueviolet&logo=leanpub)](https://leanpub.com/node-opcuabyexample-edition2024)
 
-<!-- [![Dependency Status](https://gemnasium.com/node-opcua/node-opcua.png)](https://gemnasium.com/node-opcua/node-opcua) -->
-[![Coverage Status](https://coveralls.io/repos/node-opcua/node-opcua/badge.png)](https://coveralls.io/r/node-opcua/node-opcua)
-[![Code Climate](https://codeclimate.com/github/node-opcua/node-opcua.png)](https://codeclimate.com/github/node-opcua/node-opcua)
+[![NPM download - server](https://img.shields.io/npm/dm/node-opcua.svg?logo=npm&label=node-opcua-server)](https://www.npmtrends.com/node-opcua-server)
+[![NPM download - server -total](https://img.shields.io/npm/dt/node-opcua.svg?label=total)](https://www.npmtrends.com/node-opcua-server)
+ 
+[![NPM download - client](https://img.shields.io/npm/dm/node-opcua-client.svg?logo=npm&label=node-opcua-client)](https://www.npmtrends.com/node-opcua-client)
+[![NPM download - client -total](https://img.shields.io/npm/dt/node-opcua-client.svg?label=total)](https://www.npmtrends.com/node-opcua-client)
 
-[![OPC UA](http://b.repl.ca/v1/OPC-UA-blue.png)](http://opcfoundation.org/)
-[![Gitter chat](https://badges.gitter.im/node-opcua/node-opcua.png)](https://gitter.im/node-opcua/node-opcua)
+---
 
-[Node-opcua](http://node-opcua.github.io/) is an full OPC-UA stack written in NodeJS.
+## Why node-opcua?
 
+- **Full OPC UA stack** — Client, Server, Discovery, and Aggregation in a single toolkit
+- **Security first** — Supports all OPC UA security policies, encrypted communication, and certificate management out of the box
+- **Cross-platform** — Runs on Windows, Linux, macOS, and in the browser
+- **Modular architecture** — Use only the packages you need, from a lightweight client to a full-featured server
+- **Battle-tested** — Trusted in production by industrial companies worldwide
+- **Well documented** — Comprehensive book, API reference, tutorials, and guided examples
 
-Why NodeJS ?
+## Quick Start
 
-Because nodeJs is a great framework to design asynchronous application.
-
-
-## Getting started
-
-### installing node-opcua as a node package
-
-    $ mkdir mytest
-    $ cd mytest
-    $ npm init 
-    $ npm install node-opcua --unsafe-perms
-    $ # create your first app.js file !
-
-
-### installing node-opcua samples as a node package
+### Install node-opcua as an npm package
 
 ```shell
-    $ mkdir myserver
-    $ cd myserver
-    $ npm init
-    $ npm install node-opcua-samples --unsafe-perms
-    $ ./node_modules/.bin/simple_server
-```   
-   or
-    
-```shell
-    $ ./node_modules/.bin/simple_client  -e "opc.tcp://opcserver.mAutomation.net:4841" -n="ns=1;s=EVR2.system.RTC_SEC"
+$ mkdir myproject
+$ cd myproject
+$ npm init
+$ npm install node-opcua
 ```
 
-### installing node-opcua from source
+### Try the sample server & client
 
+```shell
+$ npm install node-opcua-samples
+$ ./node_modules/.bin/simple_server
+```
 
-#### running the demo server from source
+```shell
+$ ./node_modules/.bin/simple_client -e "opc.tcp://opcuademo.sterfive.com:26543"
+```
 
-     $ git clone https://github.com/node-opcua/node-opcua.git
-     $ cd node-opcua
-     $ npm install
-     $ node packages/node-opcua-samples/bin/simple_server
-    
-#### running the demo client from source
+## Node.js Requirement
 
-     $ git clone https://github.com/node-opcua/node-opcua.git
-     $ cd node-opcua
-     $ npm install
-     $ node packages/node-opcua-samples/bin/simple_client.js -e "opc.tcp://opcserver.mAutomation.net:4841" -n="ns=1;s=EVR2.system.RTC_SEC"
-        
+- **Node.js 22.13** or above is required.
 
+## Documentation
+
+[![The Book](https://img.shields.io/static/v1?label=the%20book&message=NodeOPCUA%20by%20example&color=blueviolet&logo=leanpub)](https://leanpub.com/node-opcuabyexample-edition2024)
+
+**[NodeOPCUA by Example](https://leanpub.com/node-opcuabyexample-edition2024)** — The best starting point. Dozens of practical, ready-to-use, and fully documented examples.
 
 ### Tutorials
 
+- [Create a Server](https://github.com/node-opcua/node-opcua/blob/master/documentation/creating_a_server.md)
+- [Create a Client in TypeScript](https://github.com/node-opcua/node-opcua/blob/master/documentation/creating_a_client_typescript.md)
+- [Role-Based Security & User Management (OPC 10000-18)](https://github.com/node-opcua/node-opcua/blob/master/documentation/role_based_security.md)
+- [Reverse Connect (OPC 10000-6 §7.1.3)](https://github.com/node-opcua/node-opcua/blob/master/documentation/reverse_connect.md)
+- More advanced examples and training material are available for [NodeOPCUA Subscription members](https://support.sterfive.com)
 
- * [create a server](https://github.com/node-opcua/node-opcua/blob/master/documentation/creating_a_server.md)
- 
- * [create a client in typescript](https://github.com/node-opcua/node-opcua/blob/master/documentation/creating_a_client_typescript.md)
-   
+### API Reference
 
-### API Documentation
-   
- * check out the [API documentation](http://node-opcua.github.io/api_doc/index.html)
-                
-## Minimum nodejs requirement 
+- [API Documentation](https://node-opcua.github.io/api_doc/index.html)
 
-  * nodejs version 8.16 or above
-                                  
-## Contributing
+#### API surface
 
-    $ git clone git://github.com/node-opcua/node-opcua.git
-    $ cd node-opcua
-    $ npm install
-    $ npm test
+The supported, semver-protected API is what the generated documentation
+above describes. Symbols tagged `@internal` in the source (secure-channel
+plumbing such as `MessageBuilder`, `ClientSecureChannelLayer`,
+`ServerSecureChannelLayer`, and `OPCUAServerEndPoint` construction options)
+are node-opcua internals: they are reachable through re-exports for
+historical reasons, but they may change in a minor release. Applications
+configure security and keys exclusively through `OPCUAClient`,
+`OPCUAServer`, and `OPCUACertificateManager` options.
 
-## Supporting the project
+---
 
-If you like the project, please consider [sponsoring the author :beer: :tada: ](https://github.com/sponsors/erossignon), 
+## 🏢 Professional Support
 
-This will give us full of motivation to carry on and keep working on the roadmap.
+Need help with your OPC UA project? Sterfive offers professional support and consulting for node-opcua.
 
-[![NPM](https://nodei.co/npm/node-opcua.png?downloads=true&stars=true)](https://nodei.co/npm/node-opcua/)
+|                           | **Community** (GitHub)    | **Professional** (Sterfive) |
+|---------------------------|:------------------------:|:--------------------------:|
+| GitHub Issues             | ✅                       | ✅                         |
+| CVE security advisories   | After disclosure         | **Early access — patch before public disclosure** |
+| Private support channel   | —                        | ✅                         |
+| Extended documentation    | —                        | ✅                         |
+| Guaranteed response time  | —                        | ✅                         |
+| Consulting & training     | —                        | ✅                         |
+| Certifiable builds        | —                        | ✅                         |
 
-[![Project Stats](https://www.openhub.net/p/713850/widgets/project_thin_badge.gif)](https://www.openhub.net/p/node-opcua)
+[![Professional Support](https://img.shields.io/static/v1?style=for-the-badge&label=Professional&message=Support&labelColor=blue&color=green&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2ZXJzaW9uPSIxLjEiIGlkPSJMYXllcl8xIiB4PSIwcHgiIHk9IjBweCIgdmlld0JveD0iMCAwIDQ5MS41MiA0OTEuNTIiIHN0eWxlPSJlbmFibGUtYmFja2dyb3VuZDpuZXcgMCAwIDQ5MS41MiA0OTEuNTI7IiB4bWw6c3BhY2U9InByZXNlcnZlIj4NCjxnPg0KCTxnPg0KCQk8cGF0aCBkPSJNNDg3Ljk4OSwzODkuNzU1bC05My4xMDktOTIuOTc2Yy00LjgxMy00LjgwNi0xMi42NDItNC42NzQtMTcuMjczLDAuMzA3Yy03LjE0OCw3LjY4OS0xNC42NCwxNS41NTQtMjEuNzMsMjIuNjM0ICAgIGMtMC4yNzEsMC4yNy0wLjUwMSwwLjQ5My0wLjc2MywwLjc1NUw0NjcuMyw0MzIuNTA0YzguOTEtMTAuNjE0LDE2LjY1Ny0yMC40MSwyMS43My0yNi45NyAgICBDNDkyLjcyLDQwMC43NjIsNDkyLjI1NywzOTQuMDE5LDQ4Ny45ODksMzg5Ljc1NXoiLz4NCgk8L2c+DQo8L2c+DQo8Zz4NCgk8Zz4NCgkJPHBhdGggZD0iTTMzNC4zLDMzNy42NjFjLTM0LjMwNCwxMS4zNzktNzcuNTYsMC40MTMtMTE0LjU1NC0yOS41NDJjLTQ5LjAyMS0zOS42OTMtNzUuOTcyLTEwMi42NDItNjUuODM4LTE1MC41OTNMMzcuNjM0LDQxLjQxOCAgICBDMTcuNjUzLDU5LjQyNCwwLDc4LjU0NSwwLDkwYzAsMTQxLjc1MSwyNjAuMzQ0LDQxNS44OTYsNDAxLjUwMyw0MDAuOTMxYzExLjI5Ni0xLjE5OCwzMC4xNzYtMTguNjUxLDQ4LjA2Mi0zOC4xNjdMMzM0LjMsMzM3LjY2MSAgICB6Ii8+DQoJPC9nPg0KPC9nPg0KPGc+DQoJPGc+DQoJCTxwYXRoIGQ9Ik0xOTMuODU0LDk2LjA0MUwxMDEuMjEzLDMuNTNjLTQuMjI1LTQuMjItMTAuODgyLTQuNzI0LTE1LjY2NC0xLjE0NWMtNi42NTQsNC45ODMtMTYuNjQ4LDEyLjY1MS0yNy40NTMsMjEuNDk4ICAgIGwxMTEuOTQ1LDExMS43ODVjMC4wNjEtMC4wNiwwLjExMS0wLjExMywwLjE3Mi0wLjE3NGM3LjIzOC03LjIyOCwxNS4zNTUtMTQuODg1LDIzLjI5MS0yMi4xNjcgICAgQzE5OC41MzQsMTA4LjcxMywxOTguNjg0LDEwMC44NjMsMTkzLjg1NCw5Ni4wNDF6Ii8+DQoJPC9nPg0KPC9nPg0KPGc+DQo8L2c+DQo8Zz4NCjwvZz4NCjxnPg0KPC9nPg0KPGc+DQo8L2c+DQo8Zz4NCjwvZz4NCjxnPg0KPC9nPg0KPGc+DQo8L2c+DQo8Zz4NCjwvZz4NCjxnPg0KPC9nPg0KPGc+DQo8L2c+DQo8Zz4NCjwvZz4NCjxnPg0KPC9nPg0KPGc+DQo8L2c+DQo8Zz4NCjwvZz4NCjxnPg0KPC9nPg0KPC9zdmc+)](https://support.sterfive.com)
 
-## Getting commercial support
+📧 Contact: [contact@sterfive.com](mailto:contact@sterfive.com) · 🌐 [sterfive.com](https://www.sterfive.com)
 
-To get commercial support,  please contact [sterfive](https://www.sterfive.com)
-               
+---
+
+## Ecosystem
+
+### AI-Powered Modeling with MCP
+
+**[node-opcua-modeler-mcp-server](https://www.npmjs.com/package/node-opcua-modeler-mcp-server)** — An [MCP server](https://modelcontextprotocol.io) that gives AI agents access to the OPC UA companion specification type system. Discover types, resolve namespace dependencies, and look up engineering units — all from your AI coding assistant.
+
+```bash
+npx node-opcua-modeler-mcp-server
+```
+
+### OPC UA Modeler
+
+**[OPC UA Modeler](https://github.com/node-opcua/opcua-modeler)** — Designing an information model? Write it in YAML, get standard NodeSet2.xml: create, validate, and generate OPC UA information models with full companion spec support, then load the result with `nodeset_filename`.
+
+- [Open specification, JSON Schema and example models](https://github.com/node-opcua/opcua-modeler) on GitHub
+- [Online NodeSet2 editor](https://opcua-modeler.sterfive.io) — nothing to install
+- [Documentation](https://opcua-modeler.doc.sterfive.com/), starting with [How to create a NodeSet2.xml file](https://opcua-modeler.doc.sterfive.com/docs/guides/create-nodeset2-xml)
+
 ## Supported Features
 
+node-opcua implements a comprehensive set of OPC UA services, transport protocols, security policies, and server/client profiles.
 
-| __**Service**__             |                          |                    |
-|-----------------------------|-----------------------|---------------------------|
-|  Discovery Service Set     |                        |         |
-|                            |FindServers()           |  :white_check_mark:       |
-|                            |GetEndpoints()          |  :white_check_mark:       |
-|                            |RegisterServer()        |  :white_check_mark:       |
-|                            |RegisterServer2()       |  :white_check_mark:       |
-|                            |FindServersOnNetwork()  |  :white_check_mark:       |
-| Secure Channel Service Set |                        |         |
-|                            |OpenSecureChannel()     |  :white_check_mark:       |
-|                            |CloseSecureChannel()    |  :white_check_mark:       |
-| Session Service Set        |                        |         |
-|                            |CreateSession()         |  :white_check_mark:       |
-|                            |CloseSession()          |  :white_check_mark:       |
-|                            |ActivateSession()       |  :white_check_mark:       |
-|                            |Cancel()                |         |
-| View Service Set           |                        |         |
-|                            |Browse()                |  :white_check_mark:       |
-|                            |BrowseNext()            |  :white_check_mark:       |
-|                            |TranslateBrowsePathsToNodeIds() | :white_check_mark:|
-|                            |RegisterNodes()                 | :white_check_mark:|
-|                            |UnregisterNodes()      |:white_check_mark:|
-| Attribute Service Set      |                       ||
-|                            |Read()                 |:white_check_mark:|
-|                            |Write()                |:white_check_mark:|
-|                            |HistoryRead()          |:waxing_crescent_moon:|
-|                            |HistoryUpdate()        |:waxing_crescent_moon:|
-|MonitoredItems Service Set  |                       ||
-|                            |CreateMonitoredItems() |:white_check_mark:|
-|                            |ModifyMonitoredItems() |:white_check_mark:|
-|                            |SetMonitoringMode()    |:white_check_mark:|
-|                            |SetTriggering()        |:new_moon:|
-|                            |DeleteMonitoredItems() |:white_check_mark:|
-|Subscription Service Set    |                       ||
-|                            |CreateSubscription()   |:white_check_mark:|
-|                            |ModifySubscription()   |:white_check_mark:|
-|                            |DeleteSubscriptions()  |:white_check_mark:|
-|                            |Publish()              |:white_check_mark:|
-|                            |Republish()            |:white_check_mark:|
-|                            |TransferSubscriptions()|:white_check_mark:|
-|Node Management Service Set |                       ||
-|                            |AddNodes()             |:new_moon:|
-|                            |AddReferences()        |:new_moon:|
-|                            |DeleteNodes()          |:new_moon:|
-|                            |DeleteReferences()     |:new_moon:|
-|Query Service Set           |                       ||
-|                            |QueryFirst()           |:new_moon:|
-|                            |QueryNext()            |:new_moon:|
+👉 **[View the full supported features matrix](./supported_features.md)**
+
+---
 
 
-|                                        |                          |                    |
-|----------------------------------------|:------------------------:|--------------------|
-| __**Transport Protocol**__             |                          |                    |
-| **Transport**                          | **Status**               | **Comment**        |
-| UA-TCP UA-SC UA Binary                 |  :white_check_mark:      | OPC.TCP - Binary   |          
-| SOAP-HTTP WS-SC UA Binary              |  :new_moon:              | HTTP/HTTPS - Binary|               
-| SOAP-HTTP WS-SC UA XML                 |  :new_moon:              |                    |               
-| SOAP-HTTP WS-SC UA XML-UA Binary       |  :new_moon:              |                    |               
-| __**Security Policies**__              |                          |                    |
-| **Policy**                             | **Status**               | **Comment**        |
-| None                                   | :white_check_mark:       |                    |               
-| Basic128Rsa15                          | :white_check_mark:       |                    |               
-| Basic256                               | :white_check_mark:       |                    |               
-| Basic256Sha256                         | :white_check_mark:       |                    |               
-| **Authentication**                     | **Status**               | **Comment**        |
-| Anonymous                              |:white_check_mark:        |                    |
-| User Name Password                     |:white_check_mark:        |                    |
-| X509 Certificate                       |:white_check_mark:        | in version 2.0.x (sponsored)  |
-| __**client facets**__                  |                          |                    |
-| Base Client Behaviour                  |:white_check_mark:       | |
-| AddressSpace Lookup                    |:white_check_mark:       | |
-| Attribute Read                         |:white_check_mark:       | |
-| DataChange Subscription                |:white_check_mark:       | |
-| DataAccess                             |:white_check_mark:       | |
-| Discovery                              |:white_check_mark:       | |
-| Event Subscription                     |:white_check_mark:       | |
-| Method call                            |:white_check_mark:       | |
-| Historical Access                      |:first_quarter_moon:     | |
-| Advanced Type                          |:white_check_mark:       | |
-| Programming                            |:new_moon:               | |
-| Auditing                               |:first_quarter_moon:               | |
-| Redundancy                             |:new_moon:               |Sponsors wanted |
-| __**server profiles**__                |                         | |
-| Core Server                            | :white_check_mark:      | |
-| Data Access Server                     | :white_check_mark:      | |
-| Embedded Server                        | :white_check_mark:      | |
-| Nano Embedded Device Server            | :white_check_mark:      | |
-| Micro Embedded Device Server           | :white_check_mark:      | |
-| Standard DataChange Subscription Server| :white_check_mark:                         | |
-| Standard Event Subscription Server     | :white_check_mark:                         | |
-| Standard UA Server                     | :white_check_mark:                         | |
-| Redundancy Transparent Server          | :new_moon:              |Sponsors wanted |
-| Redundancy Visible Server              | :new_moon:              |Sponsors wanted |
-| Node Management Server                 | :new_moon:              |Sponsors wanted |
-| Auditing Server                        | :first_quarter_moon:   | |
-| Complex Type Server                    | :first_quarter_moon:                        |Sponsors wanted |
-| Session Diagnostics                    |  :white_check_mark:                         | (sponsored)|
-| Subscription Diagnostics               |  :white_check_mark:                         | (sponsored)|
-| Alarms & Conditions                    |  :white_check_mark:                         | (sponsored)|
-| Pub & Sub                              |  :new_moon:                         |Sponsors wanted |
+## Roadmap
 
+- Improved documentation and more tutorials
+- Compliance testing and certification (CTT)
+- Support for redundancy
+- Session-less transactions
+- JTokens and OAuth
 
+Want to influence the roadmap? [Contact Sterfive](mailto:contact@sterfive.com).
 
-## Road-map
+---
 
-This are the item we would like to achieve in the next version of the API.
+## :heart: Sponsors
 
-  * improved documentation 
-  * Compliance testing and certification (CTT) 
-  * more tutorials
+node-opcua is funded entirely by its users. If you use node-opcua in your project, please consider supporting its continued development:
 
+- 🌟 [**Become a sponsor on GitHub**](https://github.com/sponsors/node-opcua)
 
-## Feedback
+Your sponsorship ensures long-term maintenance, new features, bug fixes, and representation of the node-opcua community at the OPC Foundation.
 
-  * if you're using node-opcua in one of your project, please feel free to leave a comment and a quick description in the [wiki](https://github.com/node-opcua/node-opcua/wiki)
-  
-  * if you have a particular wish or found a issue, let us known and [create an issue](https://github.com/node-opcua/node-opcua/issues?state=open)
+---
 
+## Contributors
+
+This project exists thanks to all the people who contribute.
+
+<a href = "https://github.com/node-opcua/node-opcua/graphs/contributors">
+  <img src = "https://contrib.rocks/image?repo=node-opcua/node-opcua"/>
+</a>
+
+## Contributing
+
+We welcome contributions! Here's how to get started with the source:
+
+```shell
+$ git clone git://github.com/node-opcua/node-opcua.git
+$ cd node-opcua
+$ npm install -g pnpm
+$ pnpm install
+$ pnpm recursive install
+$ pnpm build
+```
+
+### Running the demo server from source
+
+```shell
+$ node packages/node-opcua-samples/bin/simple_server
+```
+
+### Running the demo client from source
+
+```shell
+$ node packages/node-opcua-samples/bin/simple_client.js -e "opc.tcp://opcuademo.sterfive.com:26543"
+```
+
+---
+
+## License
+
+node-opcua is [MIT licensed](./LICENSE).
+
+- You can freely use it in open-source and commercial applications.
+- You must include the copyright notice in all copies or substantial portions of the software.
+- node-opcua comes without any warranty of any kind.
+
+You are strongly encouraged to join the [NodeOPCUA Membership](https://support.sterfive.com) for additional benefits and support.
+
+## Copyright
+
+Copyright © 2014-2026 Sterfive SAS — 833264583 RCS ORLEANS — France ([sterfive.com](https://www.sterfive.com))

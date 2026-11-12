@@ -1,25 +1,31 @@
 /**
  * @module node-opcua-server-configuration.client
  */
-import { ByteString } from "node-opcua-basic-types";
-import { makeNodeId, NodeId, resolveNodeId } from "node-opcua-nodeid";
-import { CallMethodRequestLike, IBasicSession } from "node-opcua-pseudo-session";
-import { StatusCode, StatusCodes } from "node-opcua-status-code";
-import { DataType, VariantArrayType, VariantLike } from "node-opcua-variant";
+import type { ByteString } from "node-opcua-basic-types";
+import { BinaryStream } from "node-opcua-binary-stream";
+import { type Certificate, combine_der } from "node-opcua-crypto/web";
+import { AttributeIds, coerceQualifiedName, type QualifiedNameLike } from "node-opcua-data-model";
+import { ClientFile, OpenFileMode } from "node-opcua-file-transfer";
+import { NodeId, resolveNodeId } from "node-opcua-nodeid";
+import type { CallMethodRequestLike, IBasicSessionAsync } from "node-opcua-pseudo-session";
+import { makeBrowsePath } from "node-opcua-service-translate-browse-path";
+import { type StatusCode, StatusCodes } from "node-opcua-status-code";
+import { TrustListDataType } from "node-opcua-types";
+import { DataType, VariantArrayType, type VariantLike } from "node-opcua-variant";
 
-import { AttributeIds } from "node-opcua-data-model";
-import {
+import type {
     CreateSigningRequestResult,
     GetRejectedListResult,
     PushCertificateManager,
     UpdateCertificateResult
-} from "../push_certificate_manager";
+} from "../push_certificate_manager.js";
+import type { TrustListMasks } from "../server/trust_list_server.js";
+import type { ITrustList } from "../trust_list.js";
 
 const serverConfigurationNodeId = resolveNodeId("ServerConfiguration");
 const createSigningRequestMethod = resolveNodeId("ServerConfiguration_CreateSigningRequest");
 const getRejectedListMethod = resolveNodeId("ServerConfiguration_GetRejectedList");
 const updateCertificateMethod = resolveNodeId("ServerConfiguration_UpdateCertificate");
-const certificateGroups = resolveNodeId("ServerConfiguration_CertificateGroups");
 const applyChangesMethod = resolveNodeId("ServerConfiguration_ApplyChanges");
 const supportedPrivateKeyFormatsNodeId = resolveNodeId("ServerConfiguration_SupportedPrivateKeyFormats");
 
@@ -27,12 +33,7 @@ const defaultApplicationGroup = resolveNodeId("ServerConfiguration_CertificateGr
 const defaultHttpsGroup = resolveNodeId("ServerConfiguration_CertificateGroups_DefaultHttpsGroup");
 const defaultUserTokenGroup = resolveNodeId("ServerConfiguration_CertificateGroups_DefaultUserTokenGroup");
 
-function findCertificateGroupName(certificateGroupNodeId: NodeId): string {
-    return "todo";
-}
-
 function findCertificateGroupNodeId(certificateGroup: NodeId | string): NodeId {
-
     if (certificateGroup instanceof NodeId) {
         return certificateGroup;
     }
@@ -55,13 +56,203 @@ function findCertificateTypeIdNodeId(certificateTypeId: NodeId | string): NodeId
     return resolveNodeId(certificateTypeId);
 }
 
-export class ClientPushCertificateManagement implements PushCertificateManager {
+export class TrustListClient extends ClientFile implements ITrustList {
+    private closeAndUpdateNodeId?: NodeId;
+    private addCertificateNodeId?: NodeId;
+    private removeCertificateNodeId?: NodeId;
+    private openWithMasksNodeId?: NodeId;
 
+    constructor(
+        session: IBasicSessionAsync,
+        public nodeId: NodeId
+    ) {
+        super(session, nodeId);
+    }
+    /**
+     * @private
+     */
+    async _extractMethodIds(): Promise<void> {
+        const browseResults = await this.session.translateBrowsePath([
+            makeBrowsePath(this.nodeId, "/CloseAndUpdate"), // Optional
+            makeBrowsePath(this.nodeId, "/AddCertificate"), // Optional
+            makeBrowsePath(this.nodeId, "/RemoveCertificate"), // Optional
+            makeBrowsePath(this.nodeId, "/OpenWithMasks") // OpenWithMasks Mandatory
+        ]);
+
+        this.closeAndUpdateNodeId = browseResults[0].targets?.[0].targetId;
+        this.addCertificateNodeId = browseResults[1].targets?.[0].targetId;
+        this.removeCertificateNodeId = browseResults[2].targets?.[0].targetId;
+        this.openWithMasksNodeId = browseResults[3].targets?.[0].targetId;
+
+        /* c8 ignore next */
+        if (!this.openWithMasksNodeId || this.openWithMasksNodeId.isEmpty()) {
+            throw new Error("Cannot find mandatory method OpenWithMask on object");
+        }
+    }
+
+    protected async extractMethodsIds() {
+        await super.extractMethodsIds();
+        await this._extractMethodIds();
+    }
+
+    async openWithMasks(trustListMask: TrustListMasks): Promise<number> {
+        /* c8 ignore next */
+        if (this.fileHandle) {
+            throw new Error("File has already be opened");
+        }
+        await this.ensureInitialized();
+        /* c8 ignore next */
+        if (!this.openWithMasksNodeId) {
+            throw new Error("OpenWithMasks doesn't exist");
+        }
+        const inputArguments = [{ dataType: DataType.UInt32, value: trustListMask }];
+        const methodToCall: CallMethodRequestLike = {
+            inputArguments,
+            methodId: this.openWithMasksNodeId,
+            objectId: this.nodeId
+        };
+        const callMethodResult = await this.session.call(methodToCall);
+        if (callMethodResult.statusCode.isNotGood()) {
+            throw new Error(callMethodResult.statusCode.name);
+        }
+        this.fileHandle = callMethodResult.outputArguments?.[0].value as number;
+        return this.fileHandle;
+    }
+
+    async closeAndUpdate(): Promise<boolean> {
+        if (!this.fileHandle) {
+            throw new Error("File has node been opened yet");
+        }
+        await this.ensureInitialized();
+        if (!this.closeAndUpdateNodeId) {
+            throw new Error("CloseAndUpdateMethod doesn't exist");
+        }
+        const inputArguments = [{ dataType: DataType.UInt32, value: this.fileHandle }];
+        const methodToCall: CallMethodRequestLike = {
+            inputArguments,
+            methodId: this.closeAndUpdateNodeId,
+            objectId: this.nodeId
+        };
+        const callMethodResult = await this.session.call(methodToCall);
+        // CloseAndUpdate closes the file whether or not the update applied, so
+        // the handle is gone either way; keeping it would make the next Open
+        // fail with "File has already be opened".
+        this.fileHandle = 0;
+        if (callMethodResult.statusCode.isNotGood()) {
+            throw new Error(callMethodResult.statusCode.name);
+        }
+        return callMethodResult.outputArguments?.[0].value as boolean;
+    }
+
+    async addCertificate(certificateChain: Certificate | Certificate[], isTrustedCertificate: boolean): Promise<StatusCode> {
+        await this.ensureInitialized();
+
+        if (Array.isArray(certificateChain)) {
+            if (certificateChain.length === 0) {
+                return StatusCodes.BadInvalidArgument;
+            }
+        }
+
+        const compositeCertificate: Buffer = Array.isArray(certificateChain) ? combine_der(certificateChain) : certificateChain;
+
+        const inputArguments: VariantLike[] = [
+            { dataType: DataType.ByteString, value: compositeCertificate },
+            { dataType: DataType.Boolean, value: !!isTrustedCertificate }
+        ];
+        const methodToCall: CallMethodRequestLike = {
+            inputArguments,
+            methodId: this.addCertificateNodeId,
+            objectId: this.nodeId
+        };
+        const callMethodResult = await this.session.call(methodToCall);
+        return callMethodResult.statusCode;
+    }
+
+    async removeCertificate(thumbprint: string, isTrustedCertificate: boolean): Promise<StatusCode> {
+        await this.ensureInitialized();
+
+        const inputArguments: VariantLike[] = [
+            { dataType: DataType.String, value: thumbprint },
+            { dataType: DataType.Boolean, value: !!isTrustedCertificate }
+        ];
+        const methodToCall: CallMethodRequestLike = {
+            inputArguments,
+            methodId: this.removeCertificateNodeId,
+            objectId: this.nodeId
+        };
+        const callMethodResult = await this.session.call(methodToCall);
+        return callMethodResult.statusCode;
+    }
+
+    /**
+     * helper function to retrieve the list of certificates ...
+     * @returns
+     */
+    async readTrustedCertificateList(): Promise<TrustListDataType> {
+        // const size = await this.size();
+        await this.open(OpenFileMode.Read);
+        const buff = await this.read(65525);
+        await this.close();
+        const stream = new BinaryStream(buff);
+        const trustList: TrustListDataType = new TrustListDataType();
+        trustList.decode(stream);
+        return trustList;
+    }
+    async readTrustedCertificateListWithMasks(trustListMask: TrustListMasks): Promise<TrustListDataType> {
+        // const size = await this.size();
+        await this.openWithMasks(trustListMask);
+        const buff = await this.read(65525);
+        await this.close();
+        const stream = new BinaryStream(buff);
+        const trustList: TrustListDataType = new TrustListDataType();
+        trustList.decode(stream);
+        return trustList;
+    }
+
+    async writeTrustedCertificateList(trustedList: TrustListDataType): Promise<boolean> {
+        await this.open(OpenFileMode.WriteEraseExisting);
+        const s = trustedList.binaryStoreSize();
+        const stream = new BinaryStream(s);
+        trustedList.encode(stream);
+        await this.write(stream.buffer);
+        return await this.closeAndUpdate();
+    }
+}
+export class CertificateGroup {
+    constructor(
+        public session: IBasicSessionAsync,
+        public nodeId: NodeId
+    ) {}
+    async getCertificateTypes(): Promise<NodeId[]> {
+        const browsePathResult = await this.session.translateBrowsePath(makeBrowsePath(this.nodeId, "/CertificateTypes"));
+        if (browsePathResult.statusCode.isNotGood()) {
+            throw new Error(browsePathResult.statusCode.name);
+        }
+        const certificateTypesNodeId = browsePathResult.targets?.[0].targetId;
+        const dataValue = await this.session.read({ nodeId: certificateTypesNodeId, attributeId: AttributeIds.Value });
+        if (dataValue.statusCode.isNotGood()) {
+            throw new Error(browsePathResult.statusCode.name);
+        }
+        return dataValue.value.value as NodeId[];
+    }
+    async getTrustList(): Promise<TrustListClient> {
+        const browsePathResult = await this.session.translateBrowsePath(makeBrowsePath(this.nodeId, "/TrustList"));
+        if (browsePathResult.statusCode.isNotGood()) {
+            throw new Error(browsePathResult.statusCode.name);
+        }
+        const trustListNodeId = browsePathResult.targets?.[0].targetId;
+        if (!trustListNodeId) {
+            throw new Error("TrustList node not found");
+        }
+        return new TrustListClient(this.session, trustListNodeId);
+    }
+}
+export class ClientPushCertificateManagement implements PushCertificateManager {
     public static rsaSha256ApplicationCertificateType: NodeId = resolveNodeId("i=12560");
 
-    public session: IBasicSession;
+    public session: IBasicSessionAsync;
 
-    constructor(session: IBasicSession) {
+    constructor(session: IBasicSessionAsync) {
         this.session = session;
     }
 
@@ -104,13 +295,12 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
      * BadUserAccessDenied          The current user does not have the rights required.
      */
     public async createSigningRequest(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      subjectName: string,
-      regeneratePrivateKey?: boolean,
-      nonce?: ByteString
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        subjectName: string | null,
+        regeneratePrivateKey?: boolean,
+        nonce?: ByteString
     ): Promise<CreateSigningRequestResult> {
-
         nonce = nonce || Buffer.alloc(0);
 
         const inputArguments = [
@@ -127,10 +317,9 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
         };
         const callMethodResult = await this.session.call(methodToCall);
 
-        if (callMethodResult.statusCode === StatusCodes.Good) {
-            // xx console.log(callMethodResult.toString());
+        if (callMethodResult.statusCode.isGood()) {
             return {
-                certificateSigningRequest: callMethodResult.outputArguments![0].value,
+                certificateSigningRequest: callMethodResult.outputArguments?.[0].value,
                 statusCode: callMethodResult.statusCode
             };
         } else {
@@ -157,12 +346,12 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
             objectId: serverConfigurationNodeId
         };
         const callMethodResult = await this.session.call(methodToCall);
-        if (callMethodResult.statusCode === StatusCodes.Good) {
-            if (callMethodResult.outputArguments![0].dataType !== DataType.ByteString) {
+        if (callMethodResult.statusCode.isGood()) {
+            if (callMethodResult.outputArguments?.[0].dataType !== DataType.ByteString) {
                 return { statusCode: StatusCodes.BadInvalidArgument };
             }
             return {
-                certificates: callMethodResult.outputArguments![0].value,
+                certificates: callMethodResult.outputArguments?.[0].value,
                 statusCode: callMethodResult.statusCode
             };
         } else {
@@ -203,10 +392,10 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
      *
      */
     public async updateCertificate(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      certificate: Buffer,
-      issuerCertificates: Buffer[]
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        certificate: Buffer,
+        issuerCertificates: Buffer[]
     ): Promise<UpdateCertificateResult>;
     /**
      *
@@ -220,29 +409,28 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
      *
      */
     public async updateCertificate(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      certificate: Buffer,
-      issuerCertificates: Buffer[],
-      privateKeyFormat: string,
-      privateKey: Buffer
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        certificate: Buffer,
+        issuerCertificates: Buffer[],
+        privateKeyFormat: string,
+        privateKey: string | Buffer
     ): Promise<UpdateCertificateResult>;
     public async updateCertificate(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      certificate: Buffer,
-      issuerCertificates: Buffer[],
-      privateKeyFormat?: string,
-      privateKey?: Buffer
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        certificate: Buffer,
+        issuerCertificates: Buffer[],
+        privateKeyFormat?: string,
+        privateKey?: string | Buffer
     ): Promise<UpdateCertificateResult> {
-
         const inputArguments: VariantLike[] = [
             { dataType: DataType.NodeId, value: findCertificateGroupNodeId(certificateGroupId) },
             { dataType: DataType.NodeId, value: findCertificateTypeIdNodeId(certificateTypeId) },
             { dataType: DataType.ByteString, value: certificate },
             { dataType: DataType.ByteString, arrayType: VariantArrayType.Array, value: issuerCertificates },
             { dataType: DataType.String, value: privateKeyFormat || "" },
-            { dataType: DataType.ByteString, value:  privateKeyFormat ? privateKey : Buffer.alloc(0) }
+            { dataType: DataType.ByteString, value: privateKeyFormat ? privateKey : Buffer.alloc(0) }
         ];
         const methodToCall: CallMethodRequestLike = {
             inputArguments,
@@ -250,19 +438,23 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
             objectId: serverConfigurationNodeId
         };
         const callMethodResult = await this.session.call(methodToCall);
-        if (callMethodResult.statusCode === StatusCodes.Good) {
-            if (!callMethodResult.outputArguments || callMethodResult.outputArguments!.length !== 1) {
+        if (callMethodResult.statusCode.isGood()) {
+            if (callMethodResult.outputArguments?.length !== 1) {
                 return {
-                    statusCode: StatusCodes.BadInternalError
+                    statusCode: StatusCodes.BadInternalError,
+                    applyChangesRequired: false
                 };
                 // throw Error("Internal Error, expecting 1 output result");
             }
             return {
-                applyChangesRequired: callMethodResult.outputArguments![0].value,
+                applyChangesRequired: !!callMethodResult.outputArguments?.[0].value,
                 statusCode: callMethodResult.statusCode
             };
         } else {
-            return { statusCode: callMethodResult.statusCode };
+            return {
+                statusCode: callMethodResult.statusCode,
+                applyChangesRequired: false
+            };
         }
     }
 
@@ -288,7 +480,6 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
      * BadUserAccessDenied   The current user does not have the rights required.
      */
     public async applyChanges(): Promise<StatusCode> {
-
         const methodToCall: CallMethodRequestLike = {
             inputArguments: [],
             methodId: applyChangesMethod,
@@ -296,14 +487,13 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
         };
         const callMethodResult = await this.session.call(methodToCall);
 
-        if (callMethodResult.outputArguments && callMethodResult.outputArguments.length) {
+        if (callMethodResult.outputArguments?.length) {
             throw new Error("Invalid  output arguments");
         }
         return callMethodResult.statusCode;
     }
 
     public async getSupportedPrivateKeyFormats(): Promise<string[]> {
-
         const dataValue = await this.session.read({
             attributeId: AttributeIds.Value,
             nodeId: supportedPrivateKeyFormatsNodeId
@@ -312,7 +502,6 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
     }
 
     public async getCertificateGroupId(certificateGroupName: string): Promise<NodeId> {
-
         if (certificateGroupName === "DefaultApplicationGroup") {
             return defaultApplicationGroup;
         }
@@ -320,4 +509,27 @@ export class ClientPushCertificateManagement implements PushCertificateManager {
         throw new Error("Not Implemented yet");
     }
 
+    /**
+     *
+     * @param browseName
+     */
+    public async getCertificateGroup(
+        browseName: QualifiedNameLike | "DefaultApplicationGroup" | "DefaultUserTokenGroup"
+    ): Promise<CertificateGroup> {
+        browseName = coerceQualifiedName(browseName);
+        if (browseName.toString() === "DefaultApplicationGroup") {
+            return new CertificateGroup(this.session, defaultApplicationGroup);
+        }
+        if (browseName.toString() === "DefaultUserTokenGroup") {
+            return new CertificateGroup(this.session, defaultUserTokenGroup);
+        }
+        /* c8 ignore next */
+        throw new Error("Not Implemented yet");
+    }
+    public async getApplicationGroup(): Promise<CertificateGroup> {
+        return this.getCertificateGroup("DefaultApplicationGroup");
+    }
+    public async getUserTokenGroup(): Promise<CertificateGroup> {
+        return this.getCertificateGroup("DefaultUserTokenGroup");
+    }
 }

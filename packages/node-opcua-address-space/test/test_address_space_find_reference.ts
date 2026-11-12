@@ -1,62 +1,66 @@
-// tslint:disable:max-line-length
 import { resolveNodeId } from "node-opcua-nodeid";
-import * as should from "should";
-import {AddressSpace, UAReference} from "..";
-import { create_minimalist_address_space_nodeset } from "../";
+import should from "should";
+import { AddressSpace } from "../dist/api/index.js";
+import { create_minimalist_address_space_nodeset } from "../testHelpers.js";
 
 describe("testing AddressSpace#findReferenceType and findReferenceTypeFromInverseName", () => {
-
     let addressSpace: AddressSpace;
     before(() => {
         addressSpace = AddressSpace.create();
         create_minimalist_address_space_nodeset(addressSpace);
     });
-    after(() =>  {
+    after(() => {
         addressSpace.dispose();
     });
 
     it("findReferenceType findReferenceTypeFromInverseName - should provide a way to access a referenceType from its inverse name", () => {
-        const n1 = addressSpace.findReferenceType("Organizes")!.nodeId;
+        const n1 = addressSpace.findReferenceType("Organizes")?.nodeId;
         should.not.exist(addressSpace.findReferenceType("OrganizedBy"));
 
-        const n2 = addressSpace.findReferenceTypeFromInverseName("OrganizedBy")!.nodeId;
+        const n2 = addressSpace.findReferenceTypeFromInverseName("OrganizedBy")?.nodeId;
         should.not.exist(addressSpace.findReferenceTypeFromInverseName("Organizes"));
 
-        n1.should.equal(n2);
-
+        should.exist(n1);
+        should(n1).equal(n2);
     });
 
     it("should normalize a {referenceType/isForward} combination", () => {
+        addressSpace
+            .normalizeReferenceType({
+                isForward: true,
+                nodeId: "i=58",
+                referenceType: "OrganizedBy"
+            })
+            .toString()
+            .should.eql(
+                addressSpace
+                    .normalizeReferenceType({
+                        isForward: false,
+                        nodeId: resolveNodeId("i=58"),
+                        referenceType: resolveNodeId("Organizes")
+                    })
+                    .toString()
+            );
 
-        addressSpace.normalizeReferenceType({
-            isForward: true,
-            nodeId: "i=58",
-            referenceType: "OrganizedBy",
-        }).toString().should.eql(
-
-          addressSpace.normalizeReferenceType({
-              isForward: false,
-              nodeId: resolveNodeId("i=58"),
-              referenceType: resolveNodeId("Organizes"),
-          }).toString()
-        );
-
-        addressSpace.normalizeReferenceType({
-            isForward: false,
-            nodeId: "i=58",
-            referenceType: "OrganizedBy",
-        }).toString().should.eql(
-
-          addressSpace.normalizeReferenceType({
-              isForward: true,
-              nodeId: "i=58",
-              referenceType: "Organizes",
-          }).toString()
-        );
+        addressSpace
+            .normalizeReferenceType({
+                isForward: false,
+                nodeId: "i=58",
+                referenceType: "OrganizedBy"
+            })
+            .toString()
+            .should.eql(
+                addressSpace
+                    .normalizeReferenceType({
+                        isForward: true,
+                        nodeId: "i=58",
+                        referenceType: "Organizes"
+                    })
+                    .toString()
+            );
     });
 
     it("inverseReferenceType - should provide a easy way to get the inverse name of a Reference Type", () => {
-
         addressSpace.inverseReferenceType("Organizes").should.eql("OrganizedBy");
         addressSpace.inverseReferenceType("ChildOf").should.eql("HasChild");
         addressSpace.inverseReferenceType("AggregatedBy").should.eql("Aggregates");
@@ -75,5 +79,4 @@ describe("testing AddressSpace#findReferenceType and findReferenceTypeFromInvers
         addressSpace.inverseReferenceType("HasSubtype").should.eql("HasSupertype");
         addressSpace.inverseReferenceType("HasEventSource").should.eql("EventSourceOf");
     });
-
 });

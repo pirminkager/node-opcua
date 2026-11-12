@@ -1,0 +1,32 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { UAFunctionalGroup } from "node-opcua-nodeset-di/dist/ua_functional_group.js";
+import type { UATopologyElement, UATopologyElement_Base } from "node-opcua-nodeset-di/dist/ua_topology_element.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/ADI/                            |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |AccessoryType i=1019                                        |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAAccessory_Base extends UATopologyElement_Base {
+    configuration: UAFunctionalGroup;
+    status: UAFunctionalGroup;
+    factorySettings: UAFunctionalGroup;
+    /**
+     * isHotSwappable
+     * True if this accessory can be inserted in the
+     * accessory slot while it is powered
+     */
+    isHotSwappable: UAProperty<boolean, DataType.Boolean>;
+    /**
+     * isReady
+     * True if this accessory is ready for use
+     */
+    isReady: UAProperty<boolean, DataType.Boolean>;
+}
+export interface UAAccessory extends UATopologyElement, UAAccessory_Base {}

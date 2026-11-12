@@ -1,28 +1,25 @@
 // compile with  tsc --lib es2018 client_with_custom_datatype.ts
 // tslint:disable:no-console
-import * as chalk from "chalk";
+import chalk from "chalk";
 
 import {
     AttributeIds,
-    BrowseResult, ClientMonitoredItemBase,
+    type ClientMonitoredItemBase,
     ClientMonitoredItemGroup,
-    ConnectionStrategyOptions,
-    DataValue,
+    type ConnectionStrategyOptions,
+    type DataValue,
     MessageSecurityMode,
     OPCUAClient,
-    OPCUAClientOptions,
+    type OPCUAClientOptions,
     resolveNodeId,
     SecurityPolicy,
-    TimestampsToReturn,
-    UserTokenType
+    TimestampsToReturn
 } from "node-opcua-client";
 
 const endpointUri = "opc.tcp://localhost:48010";
 
 (async () => {
-
     try {
-
         const connectionStrategy: ConnectionStrategyOptions = {
             initialDelay: 1000,
             maxDelay: 20000, // retry every 20 seconds
@@ -32,7 +29,7 @@ const endpointUri = "opc.tcp://localhost:48010";
         const options: OPCUAClientOptions = {
             applicationName: "ClientBrowseNextDemo",
             connectionStrategy,
-            endpoint_must_exist: false,
+            endpointMustExist: false,
             keepSessionAlive: false,
             requestedSessionTimeout: 60000, // 1 minute
             securityMode: MessageSecurityMode.None,
@@ -76,7 +73,7 @@ const endpointUri = "opc.tcp://localhost:48010";
             requestedPublishingInterval: 1000
         });
 
-        subscription.on("raw_notification", (n: any) => {
+        subscription.on("raw_notification", (n: unknown) => {
             console.log(n.toString());
         });
 
@@ -106,14 +103,19 @@ const endpointUri = "opc.tcp://localhost:48010";
             samplingInterval: 10
         };
 
-        const monitoredItemGroup = ClientMonitoredItemGroup.create(subscription, itemsToMonitor, optionsGroup, TimestampsToReturn.Both);
+        const monitoredItemGroup = ClientMonitoredItemGroup.create(
+            subscription,
+            itemsToMonitor,
+            optionsGroup,
+            TimestampsToReturn.Both
+        );
 
         // subscription.on("item_added",function(monitoredItem){
         monitoredItemGroup.on("initialized", async () => {
             console.log(" Initialized !");
         });
 
-        monitoredItemGroup.on("changed", (monitoredItem: ClientMonitoredItemBase, dataValue: DataValue, index: number) => {
+        monitoredItemGroup.on("changed", (_monitoredItem: ClientMonitoredItemBase, dataValue: DataValue, index: number) => {
             console.log("Changed on ", index, dataValue.value.toString());
         });
 
@@ -124,7 +126,6 @@ const endpointUri = "opc.tcp://localhost:48010";
         await session.close();
         await client.disconnect();
         console.log(chalk.green("Done !"));
-
     } catch (err) {
         console.log(chalk.red("Error"), err);
     }

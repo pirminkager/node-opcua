@@ -1,0 +1,57 @@
+{
+    "name": "node-opcua-address-space-base",
+    "type": "module",
+    "version": "2.187.26",
+    "description": "pure nodejs OPCUA SDK - module address-space-base",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "engines": {
+        "node": ">=22.13.0"
+    },
+    "scripts": {
+        "build": "tsc -b",
+        "test": "echo no test",
+        "lint": "biome check --no-errors-on-unmatched .",
+        "format": "biome check --write --no-errors-on-unmatched .",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "mocha:version": "mocha --version",
+        "fix:tsconfig": "node ../../code_gen/extract-modules.js tsconfig.json"
+    },
+    "dependencies": {
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-basic-types": "2.187.0",
+        "node-opcua-constants": "2.185.0",
+        "node-opcua-crypto": "6.2.5",
+        "node-opcua-data-model": "2.187.0",
+        "node-opcua-data-value": "2.187.19",
+        "node-opcua-date-time": "2.187.0",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-extension-object": "2.187.0",
+        "node-opcua-nodeid": "2.187.0",
+        "node-opcua-numeric-range": "2.187.0",
+        "node-opcua-schemas": "2.187.19",
+        "node-opcua-status-code": "2.187.0",
+        "node-opcua-types": "2.187.19",
+        "node-opcua-variant": "2.187.19"
+    },
+    "author": "Etienne Rossignon",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/node-opcua/node-opcua.git"
+    },
+    "keywords": [
+        "OPCUA",
+        "opcua",
+        "m2m",
+        "iot",
+        "opc ua",
+        "internet of things"
+    ],
+    "homepage": "http://node-opcua.github.io/",
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
+}

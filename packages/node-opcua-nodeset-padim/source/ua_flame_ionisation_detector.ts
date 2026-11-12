@@ -1,0 +1,26 @@
+import type { UAAnalogUnit } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { UAPADIM_deviceConditionSet } from "./ua_padim.js";
+import type { UAProcessAnalyser, UAProcessAnalyser_Base } from "./ua_process_analyser.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAFlameIonisationDetector_deviceConditionSet extends UAPADIM_deviceConditionSet { // Object
+      blockTemperature?: UAAnalogUnit<number, DataType.Float>;
+      catalystTemperature?: UAAnalogUnit<number, DataType.Float>;
+      combustionAirPressure?: UAAnalogUnit<number, DataType.Float>;
+      fuelGasPressure?: UAAnalogUnit<number, DataType.Float>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/PADIM/                          |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |FlameIonisationDetectorType i=1085                          |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAFlameIonisationDetector_Base extends UAProcessAnalyser_Base {
+    deviceConditionSet?: UAFlameIonisationDetector_deviceConditionSet;
+}
+export interface UAFlameIonisationDetector extends Omit<UAProcessAnalyser, "deviceConditionSet">, UAFlameIonisationDetector_Base {}

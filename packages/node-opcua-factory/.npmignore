@@ -12,6 +12,8 @@ schemas/
 pki/
 tmp/
 tsconfig.json
-tsconfig.tsbuildinfo
+*.tsbuildinfo
+pnpm-lock.yaml
 tslint.*
+.mocharc.*
 

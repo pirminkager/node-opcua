@@ -1,25 +1,29 @@
 {
     "name": "node-opcua-date-time",
+    "type": "module",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -date-time",
+    "version": "2.187.0",
+    "description": "pure nodejs OPCUA SDK - module date-time",
     "scripts": {
         "build": "tsc -b",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "test": "mocha test"
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "engines": {
+        "node": ">=22.13.0"
     },
     "dependencies": {
-        "long": "^4.0.0",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-binary-stream": "2.187.0",
+        "node-opcua-utils": "2.187.0"
     },
     "devDependencies": {
-        "@types/underscore": "^1.10.0",
-        "bignumber.js": "^9.0.0",
-        "node-opcua-benchmarker": "^2.6.0-alpha.1",
-        "node-opcua-binary-stream": "^2.6.0-alpha.1",
-        "should": "^13.2.3"
+        "bignumber.js": "^11.1.5",
+        "long": "5.3.2",
+        "node-opcua-benchmarker": "2.187.0",
+        "node-opcua-debug": "2.186.7"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -36,5 +40,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "e4d73afdfcccb3491423149d9b9785888f4ebb3c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

@@ -1,30 +1,40 @@
 {
     "name": "node-opcua-schemas",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -schemas",
+    "type": "module",
+    "version": "2.187.19",
+    "description": "pure nodejs OPCUA SDK - module schemas",
     "main": "dist/source/index.js",
     "types": "dist/source/index.d.ts",
     "scripts": {
         "build": "tsc -b",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "test": "echo no test"
+        "lint": "biome check --no-errors-on-unmatched .",
+        "format": "biome check --write --no-errors-on-unmatched .",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "engines": {
+        "node": ">=22.13.0"
     },
     "dependencies": {
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-binary-stream": "^2.6.0-alpha.1",
-        "node-opcua-data-model": "^2.6.0-alpha.1",
-        "node-opcua-debug": "^2.6.0-alpha.1",
-        "node-opcua-enum": "^2.6.0-alpha.1",
-        "node-opcua-extension-object": "^2.6.0-alpha.1",
-        "node-opcua-factory": "^2.6.0-alpha.1",
-        "node-opcua-nodeid": "^2.6.0-alpha.1",
-        "node-opcua-utils": "^2.6.0-alpha.1",
-        "node-opcua-variant": "^2.6.0-alpha.1",
-        "node-opcua-xml2json": "^2.6.0-alpha.1",
-        "thenify": "^3.3.0"
+        "chalk": "6.0.1",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-binary-stream": "2.187.0",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-extension-object": "2.187.0",
+        "node-opcua-factory": "2.187.0",
+        "node-opcua-nodeid": "2.187.0",
+        "node-opcua-variant": "2.187.19",
+        "node-opcua-xml2json": "2.187.0"
     },
     "devDependencies": {
-        "node-opcua-packet-analyzer": "^2.6.0-alpha.1"
+        "node-opcua-data-model": "2.187.0",
+        "node-opcua-packet-analyzer": "2.187.0",
+        "node-opcua-test-helpers": "2.184.0",
+        "node-opcua-utils": "2.187.0"
+    },
+    "devPeerDependencies": {
+        "node-opcua": "2.156.0"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -41,5 +51,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

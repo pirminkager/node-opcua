@@ -1,12 +1,11 @@
-import * as chalk from "chalk";
-import * as should from "should";
+import chalk from "chalk";
+import should from "should";
 
-import { AddressSpace, UAObjectType, UAServerStatus } from "..";
-import { getMiniAddressSpace } from "../";
-import { createCameraType, FakeCamera } from "./fixture_camera_type";
+import type { AddressSpace, DTServerStatus, UAObjectType, UAServerStatus } from "../dist/api/index.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
+import { createCameraType, type FakeCamera } from "./fixture_camera_type.js";
 
 describe("Automatic Generation of  string nodeId", () => {
-
     let addressSpace: AddressSpace;
     before(async () => {
         addressSpace = await getMiniAddressSpace();
@@ -17,17 +16,19 @@ describe("Automatic Generation of  string nodeId", () => {
 
     it(
         "testing default string node creation (NodeOPCUA specified)\n\n" +
-        chalk.cyan("      Given") + " a Node with a String Node ( for instance : ns=1;s=abcdef )  \n" +
-        chalk.cyan("      When ") + " I add a component or a property to this node, without specifying a nodeId\n" +
-        chalk.cyan("      Then ") + " NodeOPCUA should assign a string nodeId to the child node made from\n" +
-        "            the nodeId of the parent node and the browse name of the child.\n"
-        , () => {
-
+            chalk.cyan("      Given") +
+            " a Node with a String Node ( for instance : ns=1;s=abcdef )  \n" +
+            chalk.cyan("      When ") +
+            " I add a component or a property to this node, without specifying a nodeId\n" +
+            chalk.cyan("      Then ") +
+            " NodeOPCUA should assign a string nodeId to the child node made from\n" +
+            "            the nodeId of the parent node and the browse name of the child.\n",
+        () => {
             const namespace = addressSpace.getOwnNamespace();
 
             const objNode1 = namespace.addObject({
                 browseName: "MyObject",
-                nodeId: "s=abcdef",
+                nodeId: "s=abcdef"
             });
 
             const comp1 = namespace.addVariable({
@@ -41,7 +42,7 @@ describe("Automatic Generation of  string nodeId", () => {
             const prop1 = namespace.addVariable({
                 browseName: "Property1",
                 dataType: "Double",
-                propertyOf: objNode1,
+                propertyOf: objNode1
             });
             prop1.browseName.toString().should.eql("1:Property1");
             prop1.nodeId.toString().should.eql("ns=1;s=abcdef-Property1");
@@ -50,16 +51,18 @@ describe("Automatic Generation of  string nodeId", () => {
             const elementInFolder = namespace.addVariable({
                 browseName: "ElementInFolder",
                 dataType: "Double",
-                organizedBy: objNode1,
+                organizedBy: objNode1
             });
             elementInFolder.browseName.toString().should.eql("1:ElementInFolder");
             elementInFolder.nodeId.toString().should.not.eql("ns=1;s=abcdef-1:ElementInFolder");
             elementInFolder.nodeId.toString().should.not.eql("ns=1;s=abcdef-ElementInFolder");
-        });
+        }
+    );
 
-    it("should generate string NodeIds on components and properties " +
-        "when instantiating an object type that have a string nodeId (node-opcua specific)", () => {
-
+    it(
+        "should generate string NodeIds on components and properties " +
+            "when instantiating an object type that have a string nodeId (node-opcua specific)",
+        () => {
             const cameraType = createCameraType(addressSpace);
 
             const namespace = addressSpace.getOwnNamespace();
@@ -68,37 +71,39 @@ describe("Automatic Generation of  string nodeId", () => {
             const camera1 = cameraType.instantiate({
                 browseName: "Camera2",
                 nodeId: "s=MYCAMERA",
-                organizedBy: "RootFolder",
+                organizedBy: "RootFolder"
             }) as FakeCamera;
 
             camera1.nodeId.toString().should.eql("ns=1;s=MYCAMERA");
             camera1.trigger.nodeId.toString().should.eql("ns=1;s=MYCAMERA-Trigger");
-        });
+        }
+    );
 
-    it("should generate string NodeIds on components and properties " +
-        "when instantiating an VariableType that have a string nodeId (node-opcua specific)", async () => {
-
+    it(
+        "should generate string NodeIds on components and properties " +
+            "when instantiating an VariableType that have a string nodeId (node-opcua specific)",
+        async () => {
             const serverStatusType = addressSpace.findVariableType("ServerStatusType")!;
 
             const serverStatus = serverStatusType.instantiate({
                 browseName: "MyServerStatus",
                 nodeId: "s=MyServerStatus",
-                organizedBy: "RootFolder",
-            }) as UAServerStatus;
+                organizedBy: "RootFolder"
+            }) as UAServerStatus<DTServerStatus>;
             serverStatus.nodeId.toString().should.eql("ns=1;s=MyServerStatus");
             serverStatus.buildInfo.nodeId.toString().should.eql("ns=1;s=MyServerStatus-BuildInfo");
             serverStatus.buildInfo.productUri.nodeId.toString().should.eql("ns=1;s=MyServerStatus-BuildInfo-ProductUri");
 
             // xx console.log(serverStatus.toString());
 
-            serverStatus.getComponentByName("BuildInfo")!.should.eql(serverStatus.buildInfo);
+            should(serverStatus.getComponentByName("BuildInfo")).eql(serverStatus.buildInfo);
 
             // xx console.log(serverStatus.toString());
             // xx console.log(serverStatus.buildInfo.toString());
-        });
+        }
+    );
 
     describe("Given a derived ObjectType ", () => {
-
         let objectType: UAObjectType;
         let objectType2: UAObjectType;
         before(() => {
@@ -121,7 +126,7 @@ describe("Automatic Generation of  string nodeId", () => {
 
             objectType2 = namespace.addObjectType({
                 browseName: "MyObjectType2",
-                subtypeOf: objectType,
+                subtypeOf: objectType
             });
             namespace.addObject({
                 browseName: "Status",
@@ -154,7 +159,6 @@ describe("Automatic Generation of  string nodeId", () => {
             // xx console.log(obj.toString());
 
             should(obj.getComponentByName("Status")).not.eql(null, "We asked for optional component Status");
-
         });
     });
 });

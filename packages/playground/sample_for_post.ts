@@ -1,25 +1,20 @@
 // tslint:disable:no-console
-import {
-    AttributeIds, OPCUAClient
-} from "node-opcua";
+import { types } from "node:util";
+import { AttributeIds, OPCUAClient } from "node-opcua";
 
 async function main() {
-
     const client = OPCUAClient.create({
-
-        endpoint_must_exist: false
+        endpointMustExist: false
     });
 
     client.on("backoff", (retry: number, delay: number) => {
-        console.log(" cannot connect to endpoint retry = ", retry,
-            " next attempt in ", delay / 1000, "seconds");
+        console.log(" cannot connect to endpoint retry = ", retry, " next attempt in ", delay / 1000, "seconds");
     });
 
     // put the endpoint to your OPCUA Server here
     const endpointUrl = "opc.tcp://localhost:48020";
 
     try {
-
         await client.connect(endpointUrl);
 
         const session = await client.createSession();
@@ -27,7 +22,6 @@ async function main() {
         const dataValue = await session.read({
             attributeId: AttributeIds.Value,
             nodeId: "i=2258" // Server CurrentTime
-
         });
 
         console.log("Server time is ", dataValue.value.toString());
@@ -36,7 +30,9 @@ async function main() {
 
         await client.disconnect();
     } catch (err) {
-        console.log(" err ", err.message);
+        if (types.isNativeError(err)) {
+            console.log(" err ", err.message);
+        }
     }
 }
 

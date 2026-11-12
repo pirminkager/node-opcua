@@ -1,0 +1,49 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { NodeId } from "node-opcua-nodeid";
+import type { UAAnalogUnit, UAAnalogUnit_Base } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * Remaining lifetime
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/DI/                             |
+ * |nodeClass       |VariableType                                                |
+ * |typedDefinition |LifetimeVariableType i=468                                  |
+ * |dataType        |Variant                                                     |
+ * |dataType Name   |number i=26                                                 |
+ * |value rank      |-1                                                          |
+ * |isAbstract      |false                                                       |
+ */
+export interface UALifetimeVariable_Base<T, DT extends DataType>  extends UAAnalogUnit_Base<T, DT> {
+    /**
+     * startValue
+     * StartValue indicates the initial value, when
+     * there is still the full lifetime left.
+     */
+    startValue: UAProperty<any, any>;
+    /**
+     * limitValue
+     * LimitValue indicates when the end of lifetime has
+     * been reached.
+     */
+    limitValue: UAProperty<any, any>;
+    /**
+     * indication
+     * Indication gives an indication of what is
+     * actually measured / represented by the Value of
+     * the Variable and the StartValue and LimitValue.
+     */
+    indication?: UAProperty<NodeId, DataType.NodeId>;
+    /**
+     * warningValues
+     * WarningValues indicates one or more levels when
+     * the end of lifetime is reached soon and can be
+     * used to inform the user when reached.
+     */
+    warningValues?: UAProperty<any, any>;
+}
+export interface UALifetimeVariable<T, DT extends DataType> extends UAAnalogUnit<T, DT>, UALifetimeVariable_Base<T, DT> {}

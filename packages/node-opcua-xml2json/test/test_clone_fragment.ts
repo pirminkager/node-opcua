@@ -1,54 +1,43 @@
-// tslint:disable:no-console
-import * as mocha from "mocha";
-import { should } from "should";
-
-import {
-  ReaderStateParserLike,
-  FragmentClonerParser,
-  Xml2Json
-} from "..";
+import should from "should";
+import { FragmentClonerParser, type ReaderStateParserLike, Xml2Json } from "../dist/source/index.js";
 
 const doDebug = false;
 
 describe("Cloning XML Fragment", () => {
-
-  it("should clone a fragment", async () => {
-
-    const xmlObjects: any[] = [];
-    const reader: ReaderStateParserLike = {
-      parser: {
-        UAVariable: {
-          parser: {
-            DisplayName: {},
-            References: {},
-            Value: {
-              parser: {
-                ListOfExtensionObject: {
-                  parser: {
-                    ExtensionObject: {
-                      parser: {
-                        TypeId: {
-
-                        },
-                        Body: new FragmentClonerParser()
-                      },
-                      finish() {
-                        if (doDebug) {
-                          console.log("Body = ", this.parser.Body.value);
+    it("should clone a fragment", async () => {
+        const xmlObjects: Array<string | null | undefined> = [];
+        const reader: ReaderStateParserLike = {
+            parser: {
+                UAVariable: {
+                    parser: {
+                        DisplayName: {},
+                        References: {},
+                        Value: {
+                            parser: {
+                                ListOfExtensionObject: {
+                                    parser: {
+                                        ExtensionObject: {
+                                            parser: {
+                                                TypeId: {},
+                                                Body: new FragmentClonerParser()
+                                            },
+                                            finish() {
+                                                if (doDebug) {
+                                                    console.log("Body = ", this.parser.Body.value);
+                                                }
+                                                xmlObjects.push(this.parser.Body.value);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        xmlObjects.push(this.parser.Body.value);
-                      }
                     }
-                  }
                 }
-              }
             }
-          }
-        }
-      }
-    };
+        };
 
-    const xmlDoc = `<doc>
+        const xmlDoc = `<doc>
  <UAVariable NodeId="i=12169" BrowseName="EnumValues" ParentNodeId="i=120" DataType="i=7594" ValueRank="1">
     <DisplayName>EnumValues</DisplayName>
     <References>
@@ -125,11 +114,11 @@ describe("Cloning XML Fragment", () => {
   
 `;
 
-    const parser = new Xml2Json(reader);
-    const a = await parser.parseString(xmlDoc);
+        const parser = new Xml2Json(reader);
+        const _a = await parser.parseString(xmlDoc);
 
-    xmlObjects.length.should.eql(3);
-    xmlObjects[0].should.eql(`<EnumValueType a="b" c="d">
+        xmlObjects.length.should.eql(3);
+        should(xmlObjects[0]).eql(`<EnumValueType a="b" c="d">
     <Value>1</Value>
     <DisplayName>
         <Locale/>
@@ -139,6 +128,6 @@ describe("Cloning XML Fragment", () => {
         <Locale/>
         <Text>The BrowseName must appear in all instances of the type.</Text>
     </Description>
-</EnumValueType>`)
-  });
+</EnumValueType>`);
+    });
 });

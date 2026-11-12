@@ -2,22 +2,24 @@
  * @module node-opcua-client
  */
 
-// tslint:disable:unified-signatures
-import { EventEmitter } from "events";
+import type { EventEmitter } from "node:events";
+import type { Byte, Double, UInt32 } from "node-opcua-basic-types";
 
-import { DiagnosticInfo } from "node-opcua-data-model";
-import { ReadValueIdOptions, TimestampsToReturn } from "node-opcua-service-read";
-import {
+import type { DiagnosticInfo } from "node-opcua-data-model";
+import type { IBasicSubscription } from "node-opcua-pseudo-session";
+import type { ReadValueIdOptions, TimestampsToReturn } from "node-opcua-service-read";
+import type {
+    MonitoringMode,
     MonitoringParametersOptions,
-    NotificationMessage
+    NotificationMessage,
+    SetTriggeringResponse
 } from "node-opcua-service-subscription";
-import { StatusCode } from "node-opcua-status-code";
-import { ErrorCallback } from "node-opcua-status-code";
+import type { Callback, ErrorCallback, StatusCode } from "node-opcua-status-code";
 
-import { ClientMonitoredItem } from "./client_monitored_item";
-import { ClientMonitoredItemBase } from "./client_monitored_item_base";
-import { ClientMonitoredItemGroup } from "./client_monitored_item_group";
-import { ClientSession, MonitoredItemData, SubscriptionId } from "./client_session";
+import type { ClientMonitoredItem } from "./client_monitored_item.js";
+import type { ClientMonitoredItemBase } from "./client_monitored_item_base.js";
+import type { ClientMonitoredItemGroup } from "./client_monitored_item_group.js";
+import type { ClientSession, MonitoredItemData, SubscriptionId } from "./client_session.js";
 
 export interface ClientSubscriptionOptions {
     requestedPublishingInterval?: number;
@@ -34,44 +36,49 @@ export interface ClientMonitoredItemBaseMap {
     [key: string]: ClientMonitoredItemBase;
 }
 
+export interface ModifySubscriptionOptions {
+    requestedPublishingInterval?: Double;
+    requestedLifetimeCount?: UInt32;
+    requestedMaxKeepAliveCount?: UInt32;
+    maxNotificationsPerPublish?: UInt32;
+    priority?: Byte;
+}
+
+export interface ModifySubscriptionResult {
+    revisedPublishingInterval: Double;
+    revisedLifetimeCount: UInt32;
+    revisedMaxKeepAliveCount: UInt32;
+}
+
 export interface ClientSubscription extends EventEmitter {
+    readonly subscriptionId: SubscriptionId;
+    readonly publishingInterval: number;
+    readonly lifetimeCount: number;
+    readonly maxKeepAliveCount: number;
+    readonly maxNotificationsPerPublish: number;
+    readonly publishingEnabled: boolean;
+    readonly priority: number;
+    readonly monitoredItems: ClientMonitoredItemBaseMap;
+    readonly timeoutHint: number;
 
-    subscriptionId: SubscriptionId;
-    publishingInterval: number;
-    lifetimeCount: number;
-    maxKeepAliveCount: number;
-    maxNotificationsPerPublish: number;
-    publishingEnabled: boolean;
-    priority: number;
-    monitoredItems: ClientMonitoredItemBaseMap;
-    timeoutHint: number;
+    /**
+     * return the session associated with the subscription.
+     * (may throw if the session is not valid, use hasSession to check validity)
+     */
+    readonly session: ClientSession;
 
-    session: ClientSession;
+    /**
+     * return true if the subscription is attached to a valid session
+     */
+    readonly hasSession: boolean;
 
     /**
      * true is the subscription is fully active
      */
-    isActive: boolean;
+    readonly isActive: boolean;
 
     /**
      * add a monitor item to the subscription
-     *
-     * @method monitor
-     * @async
-     * @param itemToMonitor                        {ReadValueId}
-     * @param itemToMonitor.nodeId                 {NodeId}
-     * @param itemToMonitor.attributeId            {AttributeId}
-     * @param itemToMonitor.indexRange             {null|NumericRange}
-     * @param itemToMonitor.dataEncoding
-     * @param requestedParameters                  {MonitoringParameters}
-     * @param requestedParameters.clientHandle     {IntegerId}
-     * @param requestedParameters.samplingInterval {Duration}
-     * @param requestedParameters.filter           {ExtensionObject|null} EventFilter/DataChangeFilter
-     * @param requestedParameters.queueSize        {Counter}
-     * @param requestedParameters.discardOldest    {Boolean}
-     * @param timestampsToReturn                   {TimestampsToReturn} //{TimestampsToReturnId}
-     * @param  [done]                              {Function} optional done callback
-     * @return {ClientMonitoredItem}
      *
      *
      * Monitoring a simple Value Change
@@ -171,23 +178,22 @@ export interface ClientSubscription extends EventEmitter {
     monitor(
         itemToMonitor: ReadValueIdOptions,
         requestedParameters: MonitoringParametersOptions,
-        timestampsToReturn: TimestampsToReturn
-    ): Promise<ClientMonitoredItemBase>;
+        timestampsToReturn: TimestampsToReturn,
+        monitoringMode?: MonitoringMode
+    ): Promise<ClientMonitoredItem>;
     monitor(
         itemToMonitor: ReadValueIdOptions,
         requestedParameters: MonitoringParametersOptions,
         timestampsToReturn: TimestampsToReturn,
-        done: (err: Error | null, monitoredItem?: ClientMonitoredItemBase) => void
+        monitoringMode: MonitoringMode,
+        callback: Callback<ClientMonitoredItem>
     ): void;
-    monitor(...args: any[]): any;
 
     /**
-     * @method monitorItems
      * @param itemsToMonitor
      * @param requestedParameters
      * @param timestampsToReturn
      * @return a ClientMonitoredItemGroup
-     * @async
      */
     monitorItems(
         itemsToMonitor: ReadValueIdOptions[],
@@ -196,33 +202,45 @@ export interface ClientSubscription extends EventEmitter {
     ): Promise<ClientMonitoredItemGroup>;
 
     /**
-     * @method monitorItems
-     * @param itemsToMonitor
-     * @param requestedParameters
-     * @param timestampsToReturn
-     * @param done
-     * @async
      */
     monitorItems(
         itemsToMonitor: ReadValueIdOptions[],
         requestedParameters: MonitoringParametersOptions,
         timestampsToReturn: TimestampsToReturn,
-        done: (err: Error | null, monitoredItemGroup?: ClientMonitoredItemGroup) => void
+        callback: Callback<ClientMonitoredItemGroup>
     ): void;
-    monitorItems(...args: any[]): any;
 
     getMonitoredItems(): Promise<MonitoredItemData>;
     getMonitoredItems(callback: (err: Error | null, result?: MonitoredItemData) => void): void;
 
+    // public subscription service
+    modify(options: ModifySubscriptionOptions, callback: Callback<ModifySubscriptionResult>): void;
+    modify(options: ModifySubscriptionOptions): Promise<ModifySubscriptionResult>;
+
+    setTriggering(
+        triggeringItem: ClientMonitoredItemBase,
+        linksToAdd: ClientMonitoredItemBase[] | null,
+        linksToRemove: ClientMonitoredItemBase[] | null,
+        callback: Callback<SetTriggeringResponse>
+    ): void;
+    setTriggering(
+        triggeringItem: ClientMonitoredItemBase,
+        linksToAdd: ClientMonitoredItemBase[] | null,
+        linksToRemove: ClientMonitoredItemBase[] | null
+    ): Promise<SetTriggeringResponse>;
+
+    setPublishingMode(publishing: boolean): Promise<StatusCode>;
+    setPublishingMode(publishing: boolean, callback: Callback<StatusCode>): void;
+
     terminate(): Promise<void>;
     terminate(callback: ErrorCallback): void;
-    terminate(...args: any[]): any;
 }
 
 export declare interface ClientSubscription {
-
+    // biome-ignore lint/suspicious/noExplicitAny: matches Node's EventEmitter catch-all signature; narrowing to unknown[] breaks assignability of specifically-typed listener handlers at call sites
     once(event: string | symbol, listener: (...args: any[]) => void): this;
 
+    // biome-ignore lint/suspicious/noExplicitAny: matches Node's EventEmitter catch-all signature; narrowing to unknown[] breaks assignability of specifically-typed listener handlers at call sites
     on(event: string | symbol, listener: (...args: any[]) => void): this;
     /**
      * notify the observers that the subscription has now started
@@ -235,6 +253,23 @@ export declare interface ClientSubscription {
      * @event  terminated
      */
     on(event: "terminated", eventHandler: () => void): this;
+
+    /**
+     * notify the observers that the subscription has been recreated with a new subscriptionId.
+     *
+     * This happens when the client repairs a broken connection and the server could not
+     * transfer the original subscription (TransferSubscriptions not supported or refused,
+     * or the subscription had already timed out and been deleted on the server). In that
+     * case the client silently creates a new subscription on the server, and `subscriptionId`
+     * is updated to reflect it. Since `started` is only emitted once, applications that need
+     * to track the current subscriptionId (for logging, diagnostics, or correlating it with
+     * server-side state) should listen to this event as well.
+     * @event subscriptionId_changed
+     */
+    on(
+        event: "subscriptionId_changed",
+        eventHandler: (subscriptionId: SubscriptionId, previousSubscriptionId: SubscriptionId) => void
+    ): this;
 
     /**
      * notify the observers that a new monitored item has been added to the subscription.
@@ -273,10 +308,20 @@ export declare interface ClientSubscription {
 
     on(event: "error", eventHandler: (err: Error) => void): this;
 }
+export declare interface ClientSubscription {
+    _createMonitoredItem(
+        itemToMonitor: ReadValueIdOptions,
+        monitoringParameters: MonitoringParametersOptions,
+        timestampsToReturn: TimestampsToReturn
+    ): ClientMonitoredItem;
+}
 
-export class ClientSubscription {
-    public static create(clientSession: ClientSession, options: ClientSubscriptionOptions): ClientSubscription {
-        /* istanbul ignore next*/
+// biome-ignore lint/suspicious/noUnsafeDeclarationMerging: interface adds typed members/overloads for this class
+// biome-ignore lint/complexity/noStaticOnlyClass: class identity is required for the `implements IBasicSubscription` contract; static factory + static flag can't be expressed as a namespace
+export class ClientSubscription implements IBasicSubscription {
+    public static create(_clientSession: ClientSession, _options: ClientSubscriptionOptions): ClientSubscription {
+        /* c8 ignore next*/
         throw new Error("Not Implemented");
     }
+    public static ignoreNextWarning = false;
 }

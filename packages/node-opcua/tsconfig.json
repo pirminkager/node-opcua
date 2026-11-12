@@ -1,17 +1,20 @@
 {
-    "extends": "../tsconfig.json",
+    "extends": "../tsconfig.common.json",
     "compilerOptions": {
         "rootDir": "source",
         "outDir": "dist",
-        "composite": true
+        "composite": true,
+        "incremental": true
     },
-    "include": ["source/**/*.ts"],
+    "include": [
+        "source/**/*.ts"
+    ],
     "references": [
         {
             "path": "../node-opcua-address-space"
         },
         {
-            "path": "../node-opcua-address-space-for-conformance-testing"
+            "path": "../node-opcua-aggregates"
         },
         {
             "path": "../node-opcua-assert"
@@ -27,12 +30,6 @@
         },
         {
             "path": "../node-opcua-client"
-        },
-        {
-            "path": "../node-opcua-client-crawler"
-        },
-        {
-            "path": "../node-opcua-client-proxy"
         },
         {
             "path": "../node-opcua-common"
@@ -53,12 +50,6 @@
             "path": "../node-opcua-debug"
         },
         {
-            "path": "../node-opcua-enum"
-        },
-        {
-            "path": "../node-opcua-factory"
-        },
-        {
             "path": "../node-opcua-hostname"
         },
         {
@@ -69,12 +60,6 @@
         },
         {
             "path": "../node-opcua-numeric-range"
-        },
-        {
-            "path": "../node-opcua-packet-analyzer"
-        },
-        {
-            "path": "../node-opcua-secure-channel"
         },
         {
             "path": "../node-opcua-server"
@@ -134,20 +119,20 @@
             "path": "../node-opcua-transport"
         },
         {
-            "path": "../node-opcua-types"
-        },
-        {
             "path": "../node-opcua-utils"
         },
         {
             "path": "../node-opcua-variant"
-        },
-        {
-            "path": "../node-opcua-vendor-diagnostic"
-        },
-        {
-            "path": "../node-opcua-address-space-for-conformance-testing"
         }
     ],
-    "exclude": ["node_modules", "dist"]
+    "exclude": [
+        "node_modules",
+        "dist"
+    ],
+    "typedocOptions": {
+        "entryPoints": [
+            "source/index.ts"
+        ],
+        "out": "docs"
+    }
 }

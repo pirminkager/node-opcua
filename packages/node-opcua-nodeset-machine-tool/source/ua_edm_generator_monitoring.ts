@@ -1,0 +1,21 @@
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { EnumEDMGeneratorState } from "./enum_edm_generator_state.js";
+import type { UAWorkingUnitMonitoring, UAWorkingUnitMonitoring_Base } from "./ua_working_unit_monitoring.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/MachineTool/                    |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |EDMGeneratorMonitoringType i=42                             |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAEDMGeneratorMonitoring_Base extends UAWorkingUnitMonitoring_Base {
+    edMGeneratorState: UABaseDataVariable<EnumEDMGeneratorState, DataType.Int32>;
+    isOn: UABaseDataVariable<boolean, DataType.Boolean>;
+}
+export interface UAEDMGeneratorMonitoring extends UAWorkingUnitMonitoring, UAEDMGeneratorMonitoring_Base {}

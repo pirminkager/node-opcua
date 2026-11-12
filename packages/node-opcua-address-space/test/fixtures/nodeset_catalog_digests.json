@@ -1,0 +1,403 @@
+{
+  "standard": {
+    "files": [
+      "standard"
+    ],
+    "nodes": 5476,
+    "references": 19109,
+    "hash": "080429fc76a0605b7b05188d6be0d13652281bbb"
+  },
+  "di": {
+    "files": [
+      "standard",
+      "di"
+    ],
+    "nodes": 5923,
+    "references": 20754,
+    "hash": "aef1abdeaf4c5fd23abd97802f111206eea51678"
+  },
+  "adi": {
+    "files": [
+      "standard",
+      "di",
+      "adi"
+    ],
+    "nodes": 6608,
+    "references": 23875,
+    "hash": "c689d08cedc69357e80cec9c3947adeb7b068721"
+  },
+  "autoId": {
+    "files": [
+      "standard",
+      "di",
+      "autoId"
+    ],
+    "nodes": 6228,
+    "references": 21860,
+    "hash": "c4135fa89d33f907ec1b395ded83696b38423616"
+  },
+  "machineVision": {
+    "files": [
+      "standard",
+      "machineVision"
+    ],
+    "nodes": 6266,
+    "references": 22459,
+    "hash": "536d78582e423d959c06e9286974943b33a4d338"
+  },
+  "commercialKitchenEquipment": {
+    "files": [
+      "standard",
+      "di",
+      "commercialKitchenEquipment"
+    ],
+    "nodes": 6720,
+    "references": 23812,
+    "hash": "e295fc3339134e5055b1c1de6ef7fe360b2dbeb2"
+  },
+  "amb": {
+    "files": [
+      "standard",
+      "amb"
+    ],
+    "nodes": 5568,
+    "references": 19400,
+    "hash": "0f0190a6a2a254fb1c2ef8eb5ffcf87ab2c11bf7"
+  },
+  "gds": {
+    "files": [
+      "standard",
+      "gds"
+    ],
+    "nodes": 5881,
+    "references": 20354,
+    "hash": "3afddca098d8012ad5346c46e667f91a98862356"
+  },
+  "robotics": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "robotics"
+    ],
+    "nodes": 6576,
+    "references": 23368,
+    "hash": "24a3e6693bbbe631723597696e480774b5283e6f"
+  },
+  "isa95JobControl": {
+    "files": [
+      "standard",
+      "isa95JobControl"
+    ],
+    "nodes": 5734,
+    "references": 20259,
+    "hash": "f8d220bb06645912f835e6f1cdeb938c23dbd698"
+  },
+  "machineryJobs": {
+    "files": [
+      "standard",
+      "isa95JobControl",
+      "machineryJobs"
+    ],
+    "nodes": 5794,
+    "references": 20462,
+    "hash": "865c285a0f260abd1192519c9195231e467d0e88"
+  },
+  "machineryResult": {
+    "files": [
+      "standard",
+      "machineryResult"
+    ],
+    "nodes": 5600,
+    "references": 19558,
+    "hash": "8c5e35b12fed726ce02d57b1d8cedca94e94a219"
+  },
+  "machinery": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery"
+    ],
+    "nodes": 6225,
+    "references": 21953,
+    "hash": "7b0066580debad90db1e3c62ab6b910d2aeb4b81"
+  },
+  "ia": {
+    "files": [
+      "standard",
+      "di",
+      "ia"
+    ],
+    "nodes": 6045,
+    "references": 21179,
+    "hash": "98f07d3ee50dd9c607f85bc5d2ef23da3ea9c04d"
+  },
+  "machineTool": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "isa95JobControl",
+      "machineryJobs",
+      "machineTool"
+    ],
+    "nodes": 7132,
+    "references": 25761,
+    "hash": "dd01af5318a0b34f82a8ffad8647f1dacd3dd88e"
+  },
+  "cnc": {
+    "files": [
+      "standard",
+      "cnc"
+    ],
+    "nodes": 6580,
+    "references": 22875,
+    "hash": "b92da44c5dbd2c17fff9a2e9d3ef69b1deb7fa75"
+  },
+  "woodWorking": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "isa95JobControl",
+      "machineryJobs",
+      "woodWorking"
+    ],
+    "nodes": 8359,
+    "references": 30589,
+    "hash": "652694604cd45e10eca272850c41cba0328df185"
+  },
+  "glass": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "glass"
+    ],
+    "nodes": 6646,
+    "references": 23536,
+    "hash": "d7c0273bfe9b61e1f899f73ebdf4a6b24bf8ee38"
+  },
+  "ijtBase": {
+    "files": [
+      "standard",
+      "di",
+      "amb",
+      "ia",
+      "machinery",
+      "machineryResult",
+      "ijtBase"
+    ],
+    "nodes": 7223,
+    "references": 25564,
+    "hash": "6e5f27f9421fda0d9a6c080a929504080835f118"
+  },
+  "tightening": {
+    "files": [
+      "standard",
+      "di",
+      "amb",
+      "ia",
+      "machinery",
+      "machineryResult",
+      "ijtBase",
+      "tightening"
+    ],
+    "nodes": 7259,
+    "references": 25692,
+    "hash": "a402ff20a36b0e28ad795c163835f1ba5e9c3f13"
+  },
+  "lads": {
+    "files": [
+      "standard",
+      "di",
+      "amb",
+      "ia",
+      "machinery",
+      "lads"
+    ],
+    "nodes": 6967,
+    "references": 25042,
+    "hash": "3aa7a7b349e50ebc33903be8c3bc4a81ef5312d6"
+  },
+  "packML": {
+    "files": [
+      "standard",
+      "packML"
+    ],
+    "nodes": 5724,
+    "references": 20131,
+    "hash": "b467025eca8dce0f46487316c18f9605b926dec8"
+  },
+  "iolink": {
+    "files": [
+      "standard",
+      "di",
+      "iolink"
+    ],
+    "nodes": 6152,
+    "references": 21705,
+    "hash": "c0a5f2691cf2304355e810557fdd5573aaf12b8c"
+  },
+  "iolinkIODD": {
+    "files": [
+      "standard",
+      "iolinkIODD"
+    ],
+    "nodes": 5484,
+    "references": 19133,
+    "hash": "f01cd1233eb431396167102057be2bf6cb0761ec"
+  },
+  "irdi": {
+    "files": [
+      "standard",
+      "irdi"
+    ],
+    "nodes": 5747,
+    "references": 19923,
+    "hash": "8a2b5705afebeb079a4eae51738ea958f2d87f53"
+  },
+  "padim": {
+    "files": [
+      "standard",
+      "irdi",
+      "di",
+      "padim"
+    ],
+    "nodes": 6982,
+    "references": 25626,
+    "hash": "f1b1bd0f4dd64f93c2ad611b576546a11d9931e2"
+  },
+  "machineryProcessValues": {
+    "files": [
+      "standard",
+      "di",
+      "irdi",
+      "padim",
+      "machineryProcessValues"
+    ],
+    "nodes": 7120,
+    "references": 26167,
+    "hash": "8d7ef29200b9b8c066ffb88144ba2d91edd31703"
+  },
+  "metalForming": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "irdi",
+      "padim",
+      "machineryProcessValues",
+      "isa95JobControl",
+      "machineryJobs",
+      "machineTool",
+      "metalForming"
+    ],
+    "nodes": 8484,
+    "references": 31759,
+    "hash": "4fe3aa7378b171182ee86b22e503531a10e5216d"
+  },
+  "scales": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "packML",
+      "scales"
+    ],
+    "nodes": 7821,
+    "references": 28141,
+    "hash": "95c0ce86bb02a751356089ff0f85257fef3319e3"
+  },
+  "i4aas": {
+    "files": [
+      "standard",
+      "i4aas"
+    ],
+    "nodes": 5821,
+    "references": 20612,
+    "hash": "7526e2fbccf1b007e6d21b1d0f99e8cc04197f4b"
+  },
+  "weihenstephan": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "packML",
+      "weihenstephan"
+    ],
+    "nodes": 6532,
+    "references": 23183,
+    "hash": "8eefe224e5fbfb231a70613df473acf2829fc4e5"
+  },
+  "surfaceTechnologyGeneralTypes": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "isa95JobControl",
+      "machineryJobs",
+      "surfaceTechnologyGeneralTypes"
+    ],
+    "nodes": 6672,
+    "references": 23823,
+    "hash": "d11d1d9d08c08d3202bc1f3f91dc4e58e593cb28"
+  },
+  "surfaceTechnologyOctMss": {
+    "files": [
+      "standard",
+      "di",
+      "ia",
+      "machinery",
+      "isa95JobControl",
+      "machineryJobs",
+      "irdi",
+      "padim",
+      "machineryProcessValues",
+      "surfaceTechnologyGeneralTypes",
+      "surfaceTechnologyOctMss"
+    ],
+    "nodes": 8120,
+    "references": 30224,
+    "hash": "4ea02d621783bffa1aad09c60ea339d77632ab0a"
+  },
+  "fxData": {
+    "files": [
+      "standard",
+      "fxData"
+    ],
+    "nodes": 5662,
+    "references": 19725,
+    "hash": "466730f3569569488571a671db70d122454859b4"
+  },
+  "fxAc": {
+    "files": [
+      "standard",
+      "di",
+      "fxData",
+      "fxAc"
+    ],
+    "nodes": 6620,
+    "references": 23259,
+    "hash": "aba9cb0f250fbaea6c85e64b9d5d5879c6481191"
+  },
+  "fxCm": {
+    "files": [
+      "standard",
+      "di",
+      "fxData",
+      "fxCm"
+    ],
+    "nodes": 6654,
+    "references": 23387,
+    "hash": "6557f411bbd099728ad3abee991bb9b083386cfa"
+  }
+}

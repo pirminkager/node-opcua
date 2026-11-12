@@ -1,32 +1,30 @@
 {
     "name": "node-opcua-service-discovery",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -service-discovery",
+    "type": "module",
+    "version": "2.187.19",
+    "description": "pure nodejs OPCUA SDK - module service-discovery",
     "scripts": {
         "build": "tsc -b",
-        "test": "mocha test",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
         "-generate": "node ./generate"
     },
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
+    "engines": {
+        "node": ">=22.13.0"
+    },
     "dependencies": {
-        "@types/bonjour": "^3.5.6",
-        "bonjour": "^3.5.0",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-basic-types": "^2.6.0-alpha.1",
-        "node-opcua-binary-stream": "^2.6.0-alpha.1",
-        "node-opcua-data-model": "^2.6.0-alpha.1",
-        "node-opcua-debug": "^2.6.0-alpha.1",
-        "node-opcua-factory": "^2.6.0-alpha.1",
-        "node-opcua-nodeid": "^2.6.0-alpha.1",
-        "node-opcua-service-endpoints": "^2.6.0-alpha.1",
-        "node-opcua-service-secure-channel": "^2.6.0-alpha.1",
-        "node-opcua-types": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
+        "chalk": "6.0.1",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-object-registry": "2.186.7",
+        "node-opcua-types": "2.187.19",
+        "sterfive-bonjour-service": "1.1.4"
     },
     "devDependencies": {
-        "node-opcua-generator": "^2.6.0-alpha.1"
+        "node-opcua-leak-detector": "2.186.7"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -43,5 +41,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

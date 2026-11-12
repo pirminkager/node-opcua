@@ -1,0 +1,22 @@
+import type { UAObject, UAProperty } from "node-opcua-address-space-base";
+import type { UAString, UInt16 } from "node-opcua-basic-types";
+import type { DataType } from "node-opcua-variant";
+
+import type { UAProductionProgramStateMachine } from "./ua_production_program_state_machine.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/MachineTool/                    |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ProductionProgramType i=59                                  |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAProductionProgram_Base {
+    name: UAProperty<UAString, DataType.String>;
+    numberInList: UAProperty<UInt16, DataType.UInt16>;
+    state?: UAProductionProgramStateMachine;
+}
+export interface UAProductionProgram extends UAObject, UAProductionProgram_Base {}

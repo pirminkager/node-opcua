@@ -1,13 +1,27 @@
 /**
- * @module node-opca-aggregates
+ * @module node-opcua-aggregates
  */
-import { ObjectIds } from "node-opcua-constants";
-import { makeNodeId } from "node-opcua-nodeid";
-import * as utils from "node-opcua-utils";
+
+import type {
+    AddressSpace,
+    BaseNode,
+    IAddressSpace,
+    UAHistoricalDataConfiguration,
+    UAHistoryServerCapabilities,
+    UAObject,
+    UAServerCapabilities,
+    UAVariable
+} from "node-opcua-address-space";
+import { installReadProcessedDetails } from "node-opcua-address-space";
+import { AggregateFunction, ObjectIds, ObjectTypeIds, ReferenceTypeIds } from "node-opcua-constants";
+import { BrowseDirection, coerceQualifiedName, NodeClass, NodeClassMask } from "node-opcua-data-model";
+import { coerceNodeId, makeNodeId, type NodeId, type NodeIdLike, resolveNodeId, sameNodeId } from "node-opcua-nodeid";
+import { lowerFirstLetter } from "node-opcua-utils";
 import { DataType } from "node-opcua-variant";
 
-import { AddressSpace, BaseNode, UAObject, UAServerCapabilities, UAVariable } from "node-opcua-address-space";
-import { AggregateConfigurationOptionsEx } from "./interval";
+import type { AggregateConfigurationOptionsEx } from "./interval.js";
+import { readProcessedDetails } from "./read_processed_details.js";
+
 // import { HistoryServerCapabilities } from "node-opcua-server";
 
 /*
@@ -43,19 +57,15 @@ const historicalCapabilitiesDefaultProperties /*: HistoryServerCapabilities */ =
     updateEventCapability: false // Boolean PropertyType Mandatory
 };
 
-export function createHistoryServerCapabilities(
-  addressSpace: AddressSpace,
-  serverCapabilities: UAServerCapabilities
-): UAObject {
-
-    /* istanbul ignore next */
+export function createHistoryServerCapabilities(addressSpace: AddressSpace, serverCapabilities: UAServerCapabilities): UAObject {
+    /* c8 ignore next */
     if (serverCapabilities.browseName.toString() !== "ServerCapabilities") {
         throw new Error("Expecting server Capabilities");
     }
 
-    const historyServerCapabilitiesType = addressSpace.getNamespace(0).findObjectType("HistoryServerCapabilitiesType")!;
+    const historyServerCapabilitiesType = addressSpace.getNamespace(0).findObjectType("HistoryServerCapabilitiesType");
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!historyServerCapabilitiesType) {
         throw new Error("Cannot find HistoryServerCapabilitiesType");
     }
@@ -65,36 +75,36 @@ export function createHistoryServerCapabilities(
     });
 }
 
-function setHistoricalServerCapabilities(
-  historyServerCapabilities: any,
-  defaultProperties: any
-) {
+function setHistoricalServerCapabilities(historyServerCapabilities: UAObject, defaultProperties: Record<string, boolean | number>) {
     function setBoolean(propName: string) {
-        const lowerCase = utils.lowerFirstLetter(propName);
+        const lowerCase = lowerFirstLetter(propName);
 
-        /* istanbul ignore next */
-        if (!defaultProperties.hasOwnProperty(lowerCase)) {
-            throw new Error("cannot find " + lowerCase);
+        /* c8 ignore next */
+        if (!Object.hasOwn(defaultProperties, lowerCase)) {
+            throw new Error(`cannot find ${lowerCase}`);
         }
         const value = defaultProperties[lowerCase];
-        const prop = historyServerCapabilities.getChildByName(propName);
+        const prop = historyServerCapabilities.getChildByName(propName) as UAVariable | null;
 
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (!prop) {
-            throw new Error(" Cannot find property " + propName);
+            throw new Error(` Cannot find property ${propName}`);
         }
         prop.setValueFromSource({ dataType: DataType.Boolean, value });
-
     }
 
     function setUInt32(propName: string) {
-        const lowerCase = utils.lowerFirstLetter(propName);
-        /* istanbul ignore next */
-        if (!historyServerCapabilities.hasOwnProperty(lowerCase)) {
-            throw new Error("cannot find " + lowerCase);
+        const lowerCase = lowerFirstLetter(propName);
+        /* c8 ignore next */
+        if (!Object.hasOwn(defaultProperties, lowerCase)) {
+            throw new Error(`cannot find ${lowerCase}`);
         }
         const value = defaultProperties[lowerCase];
-        const prop = historyServerCapabilities.getChildByName(propName);
+        const prop = historyServerCapabilities.getChildByName(propName) as UAVariable | null;
+        /* c8 ignore next */
+        if (!prop) {
+            throw new Error(` Cannot find property ${propName}`);
+        }
         prop.setValueFromSource({ dataType: DataType.UInt32, value });
     }
 
@@ -115,59 +125,18 @@ function setHistoricalServerCapabilities(
     setBoolean("DeleteEventCapability");
 
     /// FOUND A BUG HERE spec says InsertAnnotationsCapability
-    /// Standard dnodeset2 says InsertAnnotationCapability ( without s )
+    /// Standard nodeset2 says InsertAnnotationCapability ( without s )
     // xx setBoolean("InsertAnnotationsCapability");
 }
 
-export type AggregateFunctioName =
-  "AnnotationCount" |
-  "Average" |
-  "Count" |
-  "Delta" |
-  "DeltaBounds" |
-  "DurationBad" |
-  "DurationGood" |
-  "DurationInStateNonZero" |
-  "DurationInStateZero" |
-  "EndBound" |
-  "Interpolative" |
-  "Maximum" |
-  "Maximum2" |
-  "MaximumActualTime" |
-  "MaximumActualTime2" |
-  "Minimum" |
-  "Minimum2" |
-  "MinimumActualTime" |
-  "MinimumActualTime2" |
-  "NumberOfTransitions" |
-  "PercentBad" |
-  "PercentGood" |
-  "Range" |
-  "Range2" |
-  "StandardDeviationPopulation" |
-  "StandardDeviationSample" |
-  "Start" |
-  "StartBound" |
-  "TimeAverage" |
-  "TimeAverage2" |
-  "Total" |
-  "Total2" |
-  "VariancePopulation" |
-  "VarianceSample" |
-  "WorstQuality" |
-  "WorstQuality2";
+interface UAHistoryServerCapabilitiesWithH extends UAServerCapabilities {
+    historyServerCapabilities: UAHistoryServerCapabilities;
+}
 
-function addAggregateFunctionSupport(
-  addressSpace: AddressSpace, functionName: number): void {
+export function addAggregateFunctionSupport(addressSpace: AddressSpace, aggregateFunctionNodeId: NodeIdLike): void {
+    const serverCapabilities = addressSpace.rootFolder.objects.server.serverCapabilities as UAHistoryServerCapabilitiesWithH;
 
-    /* istanbul ignore next */
-    if (!functionName) {
-        throw new Error("Invalid function name");
-    }
-
-    const serverCapabilities = addressSpace.rootFolder.objects.server.serverCapabilities;
-
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!serverCapabilities.historyServerCapabilities) {
         throw new Error("missing serverCapabilities.historyServerCapabilities");
     }
@@ -176,12 +145,19 @@ function addAggregateFunctionSupport(
 
     const aggregateFunctionsInHist = serverCapabilities.historyServerCapabilities.aggregateFunctions;
 
-    const functionNodeId = makeNodeId(functionName);
-    const functionNode = addressSpace.getNamespace(0).findNode(functionNodeId);
+    const functionNode = addressSpace.findNode(aggregateFunctionNodeId);
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!functionNode) {
-        throw new Error("Cannot find node " + functionName + " in addressSpace");
+        throw new Error(`Cannot find node ${aggregateFunctionNodeId.toString()} in addressSpace`);
+    }
+    /* c8 ignore next */
+    if (functionNode.nodeClass !== NodeClass.Object) {
+        throw new Error("Expecting an object Node");
+    }
+    /* c8 ignore next */
+    if (!sameNodeId((functionNode as UAObject).typeDefinition, coerceNodeId(ObjectTypeIds.AggregateFunctionType))) {
+        throw new Error("Expecting an object with TypeDefinition AggregateFunctionType");
     }
 
     aggregateFunctions.addReference({
@@ -194,115 +170,168 @@ function addAggregateFunctionSupport(
     });
 }
 
-const enum AggregateFunction {
-    AnnotationCount = ObjectIds.AggregateFunction_AnnotationCount,
-    Average = ObjectIds.AggregateFunction_Average,
-    Count = ObjectIds.AggregateFunction_Count,
-    Delta = ObjectIds.AggregateFunction_Delta,
-    DeltaBounds = ObjectIds.AggregateFunction_DeltaBounds,
-    DurationBad = ObjectIds.AggregateFunction_DurationBad,
-    DurationGood = ObjectIds.AggregateFunction_DurationGood,
-    DurationInStateNonZero = ObjectIds.AggregateFunction_DurationInStateNonZero,
-    DurationInStateZero = ObjectIds.AggregateFunction_End,
-    EndBound = ObjectIds.AggregateFunction_EndBound,
-    Interpolative = ObjectIds.AggregateFunction_Interpolative,
-    Maximum = ObjectIds.AggregateFunction_Maximum,
-    Maximum2 = ObjectIds.AggregateFunction_Maximum2,
-    MaximumActualTime = ObjectIds.AggregateFunction_MaximumActualTime,
-    MaximumActualTime2 = ObjectIds.AggregateFunction_MaximumActualTime2,
-    Minimum = ObjectIds.AggregateFunction_Minimum,
-    Minimum2 = ObjectIds.AggregateFunction_Minimum2,
-    MinimumActualTime = ObjectIds.AggregateFunction_MinimumActualTime,
-    MinimumActualTime2 = ObjectIds.AggregateFunction_MinimumActualTime2,
-    NumberOfTransitions = ObjectIds.AggregateFunction_NumberOfTransitions,
-    PercentBad = ObjectIds.AggregateFunction_PercentBad,
-    PercentGood = ObjectIds.AggregateFunction_PercentGood,
-    Range = ObjectIds.AggregateFunction_Range,
-    Range2 = ObjectIds.AggregateFunction_Range2,
-    StandardDeviationPopulation = ObjectIds.AggregateFunction_StandardDeviationPopulation,
-    StandardDeviationSample = ObjectIds.AggregateFunction_StandardDeviationSample,
-    Start = ObjectIds.AggregateFunction_Start,
-    StartBound = ObjectIds.AggregateFunction_StartBound,
-    TimeAverage = ObjectIds.AggregateFunction_TimeAverage,
-    TimeAverage2 = ObjectIds.AggregateFunction_TimeAverage2,
-    Total = ObjectIds.AggregateFunction_Total,
-    Total2 = ObjectIds.AggregateFunction_Total2,
-    VariancePopulation = ObjectIds.AggregateFunction_VariancePopulation,
-    VarianceSample = ObjectIds.AggregateFunction_VarianceSample,
-    WorstQuality = ObjectIds.AggregateFunction_WorstQuality,
-    WorstQuality2 = ObjectIds.AggregateFunction_WorstQuality2
+export function addAggregateStandardFunctionSupport(addressSpace: AddressSpace, functionName: AggregateFunction): void {
+    /* c8 ignore next */
+    if (!functionName) {
+        throw new Error("Invalid function name");
+    }
+    const functionNodeId = makeNodeId(functionName);
+    addAggregateFunctionSupport(addressSpace, functionNodeId);
 }
 
-export function addAggregateSupport(addressSpace: AddressSpace) {
+export function addAggregateSupport(addressSpace: AddressSpace, aggregatedFunctions?: AggregateFunction[]): void {
+    aggregatedFunctions = aggregatedFunctions || [
+        AggregateFunction.Interpolative,
+        AggregateFunction.Minimum,
+        AggregateFunction.Maximum,
+        AggregateFunction.Average
+    ];
+
     const aggregateConfigurationType = addressSpace.getNamespace(0).findObjectType("AggregateConfigurationType");
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!aggregateConfigurationType) {
         throw new Error("addressSpace do not expose AggregateConfigurationType");
     }
 
     const aggregateFunctionType = addressSpace.getNamespace(0).findObjectType("AggregateFunctionType");
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!aggregateFunctionType) {
         throw new Error("addressSpace do not expose AggregateFunctionType");
     }
 
     const serverObject = addressSpace.rootFolder.objects.getFolderElementByName("Server");
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!serverObject) {
         throw new Error("addressSpace do not expose a ServerObject");
     }
     // xx serverObject.
 
-    const serverCapabilities = serverObject.getChildByName("ServerCapabilities")! as UAServerCapabilities;
+    const serverCapabilities = serverObject.getChildByName("ServerCapabilities") as UAServerCapabilities | null;
+
+    /* c8 ignore next */
+    if (!serverCapabilities) {
+        throw new Error("addressSpace do not expose a ServerCapabilities object");
+    }
 
     // Let see if HistoryServer Capabilities object exists
-    let historyServerCapabilities = serverCapabilities.getChildByName("HistoryServerCapabilities");
+    let historyServerCapabilities = serverCapabilities.getChildByName("HistoryServerCapabilities") as UAObject | null;
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (!historyServerCapabilities) {
         historyServerCapabilities = createHistoryServerCapabilities(addressSpace, serverCapabilities);
     }
 
     setHistoricalServerCapabilities(historyServerCapabilities, historicalCapabilitiesDefaultProperties);
 
-    addAggregateFunctionSupport(addressSpace, AggregateFunction.Interpolative);
-    addAggregateFunctionSupport(addressSpace, AggregateFunction.Minimum);
-    addAggregateFunctionSupport(addressSpace, AggregateFunction.Maximum);
-
+    for (const f of aggregatedFunctions) {
+        addAggregateStandardFunctionSupport(addressSpace, f);
+    }
+    installReadProcessedDetails(addressSpace, readProcessedDetails);
 }
 
+interface BaseNodeWithHistoricalDataConfiguration extends UAVariable {
+    $historicalDataConfiguration: UAHistoricalDataConfiguration;
+}
+
+export function getAggregateFunctions(addressSpace: IAddressSpace): NodeId[] {
+    const aggregateFunctionTypeNodeId = resolveNodeId(ObjectTypeIds.AggregateFunctionType);
+    const aggregateFunctions = addressSpace.findNode(ObjectIds.Server_ServerCapabilities_AggregateFunctions) as UAObject;
+    if (!aggregateFunctions) {
+        return [];
+    }
+    const referenceDescripitions = aggregateFunctions.browseNode({
+        referenceTypeId: ReferenceTypeIds.HierarchicalReferences,
+        resultMask: 63,
+        nodeClassMask: NodeClassMask.Object,
+        browseDirection: BrowseDirection.Forward,
+        includeSubtypes: true
+    });
+    const aggregateFunctionsNodeIds = referenceDescripitions
+        .filter((a) => sameNodeId(a.typeDefinition, aggregateFunctionTypeNodeId))
+        .map((a) => a.nodeId);
+    return aggregateFunctionsNodeIds;
+}
+
+/**
+ * Install aggregateConfiguration on an historizing variable
+ * 
+ * @param node the variable on which to add the aggregateConfiguration.
+ * @param options the default AggregateConfigurationOptions.
+ * @param aggregateFunctions the aggregatedFunctions, if not specified the aggregatedFunction of ServerCapabilities.AggregatedFunction will be used.
+
+ */
 export function installAggregateConfigurationOptions(
-  node: UAVariable,
-  options: AggregateConfigurationOptionsEx
-) {
-    const nodePriv = node as any;
+    node: UAVariable,
+    options: AggregateConfigurationOptionsEx,
+    aggregateFunctions?: NodeIdLike[]
+): void {
+    const nodePriv = node as BaseNodeWithHistoricalDataConfiguration;
+
+    // c8 ignore next
+    if (!nodePriv.historizing) {
+        throw new Error(
+            "variable.historizing is not set\n make sure addressSpace.installHistoricalDataNode(variable) has been called"
+        );
+    }
+
     const aggregateConfiguration = nodePriv.$historicalDataConfiguration.aggregateConfiguration;
-    aggregateConfiguration.percentDataBad.setValueFromSource({ dataType: "Byte", value: options.percentDataBad });
-    aggregateConfiguration.percentDataGood.setValueFromSource({ dataType: "Byte", value: options.percentDataGood });
+
+    const f = (a: number | boolean | undefined, defaultValue: number | boolean): number | boolean =>
+        a === undefined ? defaultValue : a;
+
+    aggregateConfiguration.percentDataBad.setValueFromSource({ dataType: "Byte", value: f(options.percentDataBad, 100) });
+    aggregateConfiguration.percentDataGood.setValueFromSource({ dataType: "Byte", value: f(options.percentDataGood, 100) });
     aggregateConfiguration.treatUncertainAsBad.setValueFromSource({
         dataType: "Boolean",
-        value: options.treatUncertainAsBad
+        value: f(options.treatUncertainAsBad, false)
     });
     aggregateConfiguration.useSlopedExtrapolation.setValueFromSource({
         dataType: "Boolean",
-        value: options.useSlopedExtrapolation
+        value: f(options.useSlopedExtrapolation, false)
     });
 
     nodePriv.$historicalDataConfiguration.stepped.setValueFromSource({
         dataType: "Boolean",
-        value: options.stepped
+        value: f(options.stepped, false)
     });
+    // https://reference.opcfoundation.org/v104/Core/docs/Part13/4.4/
+    // Exposing Supported Functions and Capabilities
+    if (!aggregateFunctions) {
+        aggregateFunctions = getAggregateFunctions(node.addressSpace);
+    }
+
+    let uaAggregateFunctions = nodePriv.$historicalDataConfiguration.aggregateFunctions;
+    if (!uaAggregateFunctions) {
+        const namespace = nodePriv.namespace;
+        uaAggregateFunctions = namespace.addObject({
+            browseName: coerceQualifiedName({ name: "AggregateFunctions", namespaceIndex: 0 }),
+            componentOf: nodePriv.$historicalDataConfiguration
+        });
+        uaAggregateFunctions = nodePriv.$historicalDataConfiguration.aggregateFunctions;
+    }
+    // verify that all aggregateFunctions are of type AggregateFunctionType
+    // ... to do
+
+    const referenceType = resolveNodeId(ReferenceTypeIds.Organizes);
+    for (const nodeId of aggregateFunctions) {
+        uaAggregateFunctions?.addReference({
+            nodeId,
+            referenceType,
+            isForward: true
+        });
+    }
 }
 
 export function getAggregateConfiguration(node: BaseNode): AggregateConfigurationOptionsEx {
+    const nodePriv = node as BaseNodeWithHistoricalDataConfiguration;
 
-    const nodePriv = node as any;
-
-    /* istanbul ignore next */
-    if (!nodePriv.$historicalDataConfiguration) { throw new Error("internal error"); }
+    /* c8 ignore next */
+    if (!nodePriv.$historicalDataConfiguration) {
+        throw new Error("internal error");
+    }
     const aggregateConfiguration = nodePriv.$historicalDataConfiguration.aggregateConfiguration;
 
     // Beware ! Stepped value comes from Historical Configuration !

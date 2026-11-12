@@ -1,51 +1,54 @@
-// tslint:disable:max-line-length
-import * as fs from "fs";
-import * as should from "should";
-import { promisify } from "util";
-
+import fs from "node:fs";
+import { promisify } from "node:util";
 import { AttributeIds } from "node-opcua-data-model";
 import { DataValue } from "node-opcua-data-value";
-import * as nodesets from "node-opcua-nodesets";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { coerceNodeId } from "node-opcua-nodeid";
+import type { UAHistoricalDataConfiguration } from "node-opcua-nodeset-ua";
+import { nodesets } from "node-opcua-nodesets";
 import {
-    HistoryData,
-    ReadAtTimeDetails, ReadEventDetails,
+    type HistoryData,
+    ReadAtTimeDetails,
+    ReadEventDetails,
     ReadProcessedDetails,
     ReadRawModifiedDetails
 } from "node-opcua-service-history";
-import { WriteValueOptions } from "node-opcua-service-write";
-import { StatusCodes } from "node-opcua-status-code";
+import type { WriteValueOptions } from "node-opcua-service-write";
+import { extraStatusCodeBits, StatusCodes } from "node-opcua-status-code";
 import { DataType } from "node-opcua-variant";
-
+import should from "should";
 import {
-    AddressSpace, generateAddressSpace, SessionContext, UAVariable
-} from "../..";
+    AddressSpace,
+    type ContinuationPoint,
+    ContinuationPointManager,
+    SessionContext,
+    type UAVariable
+} from "../../dist/api/index.js";
+import { generateAddressSpace } from "../../nodeJS.js";
+import { date_add } from "../../testHelpers.js";
 
-const context = SessionContext.defaultContext;
 const sleep = promisify(setTimeout);
 
-// tslint:disable-next-line:no-var-requires
-require("date-utils");
-
-function date_add(date: Date, options: any): Date {
-    const tmp = new Date(date);
-    (tmp as any).add(options);
-    return tmp;
+interface WithHAConfiguration {
+    // startOfOnlineArchive is optional on UAHistoricalDataConfiguration but is
+    // always present once installHistoricalDataNode has run
+    "hA Configuration": UAHistoricalDataConfiguration & Required<Pick<UAHistoricalDataConfiguration, "startOfOnlineArchive">>;
 }
 
-// make sure extra error checking is made on object constructions
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("Testing Historical Data Node", () => {
-
     let addressSpace: AddressSpace;
 
-    before(async () => {
+    const context = new SessionContext({
+        session: {
+            continuationPointManager: new ContinuationPointManager(),
+            getSessionId: () => coerceNodeId(1)
+        }
+    });
 
+    before(async () => {
         addressSpace = AddressSpace.create();
-        const xml_files = [
-            nodesets.standard_nodeset_file
-        ];
-        fs.existsSync(xml_files[0]).should.be.eql(true, "file " + xml_files[0] + " must exist");
+        const xml_files = [nodesets.standard];
+        fs.existsSync(xml_files[0]).should.be.eql(true, `file ${xml_files[0]} must exist`);
         await generateAddressSpace(addressSpace, xml_files);
         const namespace = addressSpace.registerNamespace("MyPrivateNamespace");
         namespace.namespaceUri.should.eql("MyPrivateNamespace");
@@ -55,18 +58,16 @@ describe("Testing Historical Data Node", () => {
     });
 
     it("HHH1- should create a 'HA Configuration' node", () => {
-
         const node = addressSpace.getOwnNamespace().addVariable({
             browseName: "MyVar",
             componentOf: addressSpace.rootFolder.objects.server.vendorServerInfo,
             dataType: "Double"
         });
         addressSpace.installHistoricalDataNode(node);
-        (node as any)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
+        (node as unknown as WithHAConfiguration)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
     });
 
     it("HHH2- should keep values in memory to provide historical reads", async () => {
-
         const node = addressSpace.getOwnNamespace().addVariable({
             browseName: "MyVar1",
             componentOf: addressSpace.rootFolder.objects.server.vendorServerInfo,
@@ -75,9 +76,9 @@ describe("Testing Historical Data Node", () => {
 
         addressSpace.installHistoricalDataNode(node);
 
-        (node as any)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
+        (node as unknown as WithHAConfiguration)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
 
-        // let's injects some values into the history
+        // let's inject some values into the history
         const today = new Date();
 
         node.setValueFromSource({ dataType: "Double", value: 0 }, StatusCodes.Good, date_add(today, { seconds: 0 }));
@@ -88,22 +89,28 @@ describe("Testing Historical Data Node", () => {
         node.setValueFromSource({ dataType: "Double", value: 5 }, StatusCodes.Good, date_add(today, { seconds: 5 }));
         node.setValueFromSource({ dataType: "Double", value: 6 }, StatusCodes.Good, date_add(today, { seconds: 6 }));
 
-        (node as any)["hA Configuration"].startOfOnlineArchive.readValue().value.value.should.eql(today);
+        (node as unknown as WithHAConfiguration)["hA Configuration"].startOfOnlineArchive
+            .readValue()
+            .value.value.getTime()
+            .should.eql(today.getTime());
 
         const historyReadDetails = new ReadRawModifiedDetails({
             endTime: date_add(today, { seconds: 10 }),
             isReadModified: false,
             numValuesPerNode: 1000,
-            returnBounds: true,
+            // bounds are exercised in their own describe block below; this test is only about
+            // values being kept in memory, so it is kept clear of Bad_BoundNotFound entries
+            returnBounds: false,
             startTime: date_add(today, { seconds: -10 })
         });
 
         const indexRange = null;
         const dataEncoding = null;
-        const continuationPoint = undefined;
+        const continuationPoint: ContinuationPoint | null = null;
 
-        const historyReadResult = await node.historyRead(
-            context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+        const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+            continuationPoint
+        });
 
         should.not.exist(historyReadResult.continuationPoint);
         historyReadResult.statusCode.should.eql(StatusCodes.Good);
@@ -116,29 +123,27 @@ describe("Testing Historical Data Node", () => {
         dataValues[3].value.value.should.eql(3);
         dataValues[4].value.value.should.eql(4);
         dataValues[5].value.value.should.eql(5);
-
     });
 
-    it("HHH4- should store initial dataValue when historical stuff is set", async () => {
-
+    it("HHH3- should store initial dataValue when historical stuff is set", async () => {
         const node = addressSpace.getOwnNamespace().addVariable({
             browseName: "MyVar42",
             componentOf: addressSpace.rootFolder.objects.server.vendorServerInfo,
             dataType: "Double"
         });
-        // let's injects some values into the history
         const today = new Date();
 
         const historyReadDetails = new ReadRawModifiedDetails({
             endTime: date_add(today, { seconds: 20 }),
             isReadModified: false,
             numValuesPerNode: 1000,
-            returnBounds: true,
+            // bounds are exercised in their own describe block below
+            returnBounds: false,
             startTime: date_add(today, { seconds: -10 })
         });
         const indexRange = null;
         const dataEncoding = null;
-        const continuationPoint = undefined;
+        const continuationPoint: ContinuationPoint | null = null;
 
         node.setValueFromSource({ dataType: "Double", value: 3.14 });
 
@@ -147,8 +152,9 @@ describe("Testing Historical Data Node", () => {
             maxOnlineValues: 3 // Only very few values !!!!
         });
 
-        const historyReadResult = await node.historyRead(
-            context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+        const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+            continuationPoint
+        });
 
         const dataValues = (historyReadResult.historyData as HistoryData).dataValues!;
         dataValues.length.should.eql(1);
@@ -159,18 +165,17 @@ describe("Testing Historical Data Node", () => {
 
         node.setValueFromSource({ dataType: "Double", value: 6.28 });
 
-        const historyReadResult2 = await node.historyRead(
-            context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+        const historyReadResult2 = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+            continuationPoint
+        });
 
         const dataValues2 = (historyReadResult2.historyData as HistoryData).dataValues!;
         dataValues2.length.should.eql(2);
         dataValues2[0].value.value.should.eql(3.14);
         dataValues2[1].value.value.should.eql(6.28);
-
     });
 
-    it("HHH5- #420 should be possible to set/unset historizing attribute ", async () => {
-
+    it("HHH4- #420 should be possible to set/unset historizing attribute ", async () => {
         // un-setting the historizing flag shall suspend value being collected
         const node = addressSpace.getOwnNamespace().addVariable({
             browseName: "MyVar4",
@@ -180,7 +185,7 @@ describe("Testing Historical Data Node", () => {
         addressSpace.installHistoricalDataNode(node, {
             maxOnlineValues: 10 // Only very few values !!!!
         });
-        (node as any)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
+        (node as unknown as WithHAConfiguration)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
 
         const today = new Date();
 
@@ -203,18 +208,30 @@ describe("Testing Historical Data Node", () => {
         node.historizing.should.eql(false);
 
         // lets_inject_some_values
-        node.setValueFromSource({
-            dataType: "Double",
-            value: 1
-        }, StatusCodes.Good, date_add(today, { seconds: 1 }));
-        node.setValueFromSource({
-            dataType: "Double",
-            value: 2
-        }, StatusCodes.Good, date_add(today, { seconds: 2 }));
-        node.setValueFromSource({
-            dataType: "Double",
-            value: 3
-        }, StatusCodes.Good, date_add(today, { seconds: 3 }));
+        node.setValueFromSource(
+            {
+                dataType: "Double",
+                value: 1
+            },
+            StatusCodes.Good,
+            date_add(today, { seconds: 1 })
+        );
+        node.setValueFromSource(
+            {
+                dataType: "Double",
+                value: 2
+            },
+            StatusCodes.Good,
+            date_add(today, { seconds: 2 })
+        );
+        node.setValueFromSource(
+            {
+                dataType: "Double",
+                value: 3
+            },
+            StatusCodes.Good,
+            date_add(today, { seconds: 3 })
+        );
 
         //  turn_historizing_attribute_to_true(callback) {
         const writeValue2: WriteValueOptions = {
@@ -226,51 +243,62 @@ describe("Testing Historical Data Node", () => {
         node.historizing.should.eql(true);
 
         // lets_inject_some_more_values(callback) {
-        node.setValueFromSource({
-            dataType: "Double",
-            value: 4
-        }, StatusCodes.Good, date_add(today, { seconds: 4 }));
-        node.setValueFromSource({
-            dataType: "Double",
-            value: 5
-        }, StatusCodes.Good, date_add(today, { seconds: 5 }));
-        node.setValueFromSource({
-            dataType: "Double",
-            value: 6
-        }, StatusCodes.Good, date_add(today, { seconds: 6 }));
+        node.setValueFromSource(
+            {
+                dataType: "Double",
+                value: 4
+            },
+            StatusCodes.Good,
+            date_add(today, { seconds: 4 })
+        );
+        node.setValueFromSource(
+            {
+                dataType: "Double",
+                value: 5
+            },
+            StatusCodes.Good,
+            date_add(today, { seconds: 5 })
+        );
+        node.setValueFromSource(
+            {
+                dataType: "Double",
+                value: 6
+            },
+            StatusCodes.Good,
+            date_add(today, { seconds: 6 })
+        );
 
         const historyReadDetails = new ReadRawModifiedDetails({
             endTime: date_add(today, { seconds: 10 }),
             isReadModified: false,
             numValuesPerNode: 1000,
-            returnBounds: true,
+            // bounds are exercised in their own describe block below
+            returnBounds: false,
             startTime: date_add(today, { seconds: -10 })
         });
         const indexRange = null;
         const dataEncoding = null;
-        const continuationPoint = undefined;
+        const continuationPoint: ContinuationPoint | null = null;
 
-        const historyReadResult = await node.historyRead(
-            context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+        const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+            continuationPoint
+        });
 
         const dataValues = (historyReadResult.historyData as HistoryData).dataValues!;
         dataValues.length.should.eql(4);
 
-        dataValues[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 0 }));
+        should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: 0 }));
         // no data recorded
-        dataValues[1].sourceTimestamp!.should.eql(date_add(today, { seconds: 4 }));
-        dataValues[2].sourceTimestamp!.should.eql(date_add(today, { seconds: 5 }));
-        dataValues[3].sourceTimestamp!.should.eql(date_add(today, { seconds: 6 }));
-
+        should(dataValues[1].sourceTimestamp).eql(date_add(today, { seconds: 4 }));
+        should(dataValues[2].sourceTimestamp).eql(date_add(today, { seconds: 5 }));
+        should(dataValues[3].sourceTimestamp).eql(date_add(today, { seconds: 6 }));
     });
 
     describe("HRRM HistoryReadRawModified", () => {
-
         let node: UAVariable;
         const today = new Date(2010, 10, 10, 0, 0, 0);
 
         before(() => {
-
             node = addressSpace.getOwnNamespace().addVariable({
                 browseName: "MyVar5",
                 componentOf: addressSpace.rootFolder.objects.server.vendorServerInfo,
@@ -279,41 +307,67 @@ describe("Testing Historical Data Node", () => {
             addressSpace.installHistoricalDataNode(node, {
                 maxOnlineValues: 100 // Only very few values !!!!
             });
-            (node as any)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
+            (node as unknown as WithHAConfiguration)["hA Configuration"].browseName.toString().should.eql("HA Configuration");
 
-            node.setValueFromSource({
-                dataType: "Double",
-                value: 0
-            }, StatusCodes.Good, date_add(today, { seconds: 0 }));
-            node.setValueFromSource({
-                dataType: "Double",
-                value: 1
-            }, StatusCodes.Good, date_add(today, { seconds: 60 * 1 }));
-            node.setValueFromSource({
-                dataType: "Double",
-                value: 2
-            }, StatusCodes.Good, date_add(today, { seconds: 60 * 2 }));
-            node.setValueFromSource({
-                dataType: "Double",
-                value: 3
-            }, StatusCodes.Good, date_add(today, { seconds: 60 * 3 }));
-            node.setValueFromSource({
-                dataType: "Double",
-                value: 4
-            }, StatusCodes.Good, date_add(today, { seconds: 60 * 4 }));
-            node.setValueFromSource({
-                dataType: "Double",
-                value: 5
-            }, StatusCodes.Good, date_add(today, { seconds: 60 * 5 }));
-            node.setValueFromSource({
-                dataType: "Double",
-                value: 6
-            }, StatusCodes.Good, date_add(today, { seconds: 60 * 6 }));
-
+            node.setValueFromSource(
+                {
+                    dataType: "Double",
+                    value: 0
+                },
+                StatusCodes.Good,
+                date_add(today, { seconds: 0 })
+            );
+            node.setValueFromSource(
+                {
+                    dataType: "Double",
+                    value: 1
+                },
+                StatusCodes.Good,
+                date_add(today, { seconds: 60 * 1 })
+            );
+            node.setValueFromSource(
+                {
+                    dataType: "Double",
+                    value: 2
+                },
+                StatusCodes.Good,
+                date_add(today, { seconds: 60 * 2 })
+            );
+            node.setValueFromSource(
+                {
+                    dataType: "Double",
+                    value: 3
+                },
+                StatusCodes.Good,
+                date_add(today, { seconds: 60 * 3 })
+            );
+            node.setValueFromSource(
+                {
+                    dataType: "Double",
+                    value: 4
+                },
+                StatusCodes.Good,
+                date_add(today, { seconds: 60 * 4 })
+            );
+            node.setValueFromSource(
+                {
+                    dataType: "Double",
+                    value: 5
+                },
+                StatusCodes.Good,
+                date_add(today, { seconds: 60 * 5 })
+            );
+            node.setValueFromSource(
+                {
+                    dataType: "Double",
+                    value: 6
+                },
+                StatusCodes.Good,
+                date_add(today, { seconds: 60 * 6 })
+            );
         });
 
         it("HRRM-1 should be possible to retrieve the start date of a time series", async () => {
-
             const historyReadDetails = new ReadRawModifiedDetails({
                 endTime: undefined,
                 isReadModified: false,
@@ -323,21 +377,20 @@ describe("Testing Historical Data Node", () => {
             });
             const indexRange = null;
             const dataEncoding = null;
-            const continuationPoint = undefined;
+            const continuationPoint: ContinuationPoint | null = null;
 
-            const historyReadResult = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+            const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint
+            });
 
             const dataValues = (historyReadResult.historyData as HistoryData).dataValues!;
 
             dataValues.length.should.eql(1);
             should.not.exist(historyReadResult.continuationPoint, "expecting no continuation points in our case");
 
-            dataValues[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 0 }));
-
+            should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: 0 }));
         });
         it("HRRM-2 should be possible to retrieve the end date of a time series", async () => {
-
             const historyReadDetails = new ReadRawModifiedDetails({
                 endTime: date_add(today, { seconds: 100 * 60 }),
                 isReadModified: false,
@@ -347,20 +400,22 @@ describe("Testing Historical Data Node", () => {
             });
             const indexRange = null;
             const dataEncoding = null;
-            const continuationPoint = undefined;
+            const continuationPoint: ContinuationPoint | null = null;
 
-            const historyReadResult = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+            const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint
+            });
 
             const dataValues = (historyReadResult.historyData as HistoryData).dataValues!;
             dataValues.length.should.eql(1);
             should.not.exist(historyReadResult.continuationPoint, "expecting no continuation points in our case");
-            dataValues[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 6 * 60 }));
+            should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: 6 * 60 }));
         });
 
-        it("HRRM-3 should be possible to retrieve a limited number of value between " +
-            "a start date  and a end date of a time series", async () => {
-
+        it(
+            "HRRM-3 should be possible to retrieve a limited number of value between " +
+                "a start date  and a end date of a time series",
+            async () => {
                 const historyReadDetails = new ReadRawModifiedDetails({
                     endTime: date_add(today, { seconds: 60 * 8 }),
                     isReadModified: false,
@@ -371,23 +426,24 @@ describe("Testing Historical Data Node", () => {
                 const indexRange = null;
                 const dataEncoding = null;
 
-                let continuationPoint: any;
-
-                const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding);
+                const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                    continuationPoint: null
+                });
                 historyReadResult.statusCode.should.eql(StatusCodes.Good);
 
                 const dataValues = (historyReadResult.historyData as HistoryData).dataValues!;
                 dataValues.length.should.eql(3);
                 should.exist(historyReadResult.continuationPoint, "expecting a continuation point in our case");
 
-                continuationPoint = historyReadResult.continuationPoint;
-                dataValues[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 0 }));
-                dataValues[1].sourceTimestamp!.should.eql(date_add(today, { seconds: 1 * 60 }));
-                dataValues[2].sourceTimestamp!.should.eql(date_add(today, { seconds: 2 * 60 }));
+                const continuationPoint: ContinuationPoint | undefined = historyReadResult.continuationPoint;
+                should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: 0 }));
+                should(dataValues[1].sourceTimestamp).eql(date_add(today, { seconds: 1 * 60 }));
+                should(dataValues[2].sourceTimestamp).eql(date_add(today, { seconds: 2 * 60 }));
 
                 //  make_first_continuation_read(callback) {
-                const historyReadResult2 = await node.historyRead(
-                    context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+                const historyReadResult2 = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                    continuationPoint
+                });
 
                 historyReadResult2.statusCode.should.eql(StatusCodes.Good);
 
@@ -395,14 +451,22 @@ describe("Testing Historical Data Node", () => {
                 dataValues2.length.should.eql(3);
                 should.exist(historyReadResult2.continuationPoint, "expecting a continuation point in our case");
 
-                continuationPoint = historyReadResult2.continuationPoint;
-                dataValues2[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 3 * 60 }));
-                dataValues2[1].sourceTimestamp!.should.eql(date_add(today, { seconds: 4 * 60 }));
-                dataValues2[2].sourceTimestamp!.should.eql(date_add(today, { seconds: 5 * 60 }));
+                const continuationPoint2: ContinuationPoint | undefined = historyReadResult2.continuationPoint;
+                should(continuationPoint2).not.eql(null);
+                should(continuationPoint2).eql(continuationPoint);
+
+                should(dataValues2[0].sourceTimestamp).eql(date_add(today, { seconds: 3 * 60 }));
+                should(dataValues2[1].sourceTimestamp).eql(date_add(today, { seconds: 4 * 60 }));
+                should(dataValues2[2].sourceTimestamp).eql(date_add(today, { seconds: 5 * 60 }));
 
                 // make_second_continuation_read(callback) {
                 const historyReadResult3 = await node.historyRead(
-                    context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+                    context,
+                    historyReadDetails,
+                    indexRange,
+                    dataEncoding,
+                    { continuationPoint } // this continuation point is not valid any
+                );
 
                 historyReadResult3.statusCode.should.eql(StatusCodes.Good);
 
@@ -410,11 +474,20 @@ describe("Testing Historical Data Node", () => {
                 dataValues3.length.should.eql(1);
                 should.not.exist(historyReadResult3.continuationPoint, "expecting no continuation point");
 
-                dataValues3[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 6 * 60 }));
+                should(dataValues3[0].sourceTimestamp).eql(date_add(today, { seconds: 6 * 60 }));
 
-            });
+                //
+                const historyReadResult4 = await node.historyRead(
+                    context,
+                    historyReadDetails,
+                    indexRange,
+                    dataEncoding,
+                    { continuationPoint } // this continuation point is not valid any
+                );
+                historyReadResult4.statusCode.should.eql(StatusCodes.BadContinuationPointInvalid);
+            }
+        );
         it("HRRM-4 should be possible to retrieve values in reverse order (no continuation point)", async () => {
-
             const historyReadDetails = new ReadRawModifiedDetails({
                 endTime: date_add(today, { seconds: -1000000 }),
                 isReadModified: false,
@@ -424,26 +497,26 @@ describe("Testing Historical Data Node", () => {
             });
             const indexRange = null;
             const dataEncoding = null;
-            const continuationPoint = undefined;
+            const continuationPoint: ContinuationPoint | null = null;
 
-            const historyReadResult1 = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+            const historyReadResult1 = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint
+            });
 
             const dataValues = (historyReadResult1.historyData as HistoryData).dataValues!;
             dataValues.length.should.eql(7);
             should.not.exist(historyReadResult1.continuationPoint, "expecting no continuation points in our case");
 
-            dataValues[6].sourceTimestamp!.should.eql(date_add(today, { seconds: 0 }));
-            dataValues[5].sourceTimestamp!.should.eql(date_add(today, { seconds: 1 * 60 }));
-            dataValues[4].sourceTimestamp!.should.eql(date_add(today, { seconds: 2 * 60 }));
-            dataValues[3].sourceTimestamp!.should.eql(date_add(today, { seconds: 3 * 60 }));
-            dataValues[2].sourceTimestamp!.should.eql(date_add(today, { seconds: 4 * 60 }));
-            dataValues[1].sourceTimestamp!.should.eql(date_add(today, { seconds: 5 * 60 }));
-            dataValues[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 6 * 60 }));
+            should(dataValues[6].sourceTimestamp).eql(date_add(today, { seconds: 0 }));
+            should(dataValues[5].sourceTimestamp).eql(date_add(today, { seconds: 1 * 60 }));
+            should(dataValues[4].sourceTimestamp).eql(date_add(today, { seconds: 2 * 60 }));
+            should(dataValues[3].sourceTimestamp).eql(date_add(today, { seconds: 3 * 60 }));
+            should(dataValues[2].sourceTimestamp).eql(date_add(today, { seconds: 4 * 60 }));
+            should(dataValues[1].sourceTimestamp).eql(date_add(today, { seconds: 5 * 60 }));
+            should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: 6 * 60 }));
         });
         it("HRRM-5 should be possible to retrieve values in reverse order (and continuation points)", async () => {
-
-            let continuationPoint: any;
+            let continuationPoint: ContinuationPoint | undefined;
 
             const indexRange = null;
             const dataEncoding = null;
@@ -455,8 +528,9 @@ describe("Testing Historical Data Node", () => {
                 startTime: date_add(today, { seconds: +1000000 })
             });
 
-            const historyReadResult1 = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding);
+            const historyReadResult1 = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint: null
+            });
 
             const dataValues1 = (historyReadResult1.historyData as HistoryData).dataValues!;
             dataValues1.length.should.eql(3);
@@ -464,12 +538,13 @@ describe("Testing Historical Data Node", () => {
 
             continuationPoint = historyReadResult1.continuationPoint;
 
-            dataValues1[2].sourceTimestamp!.should.eql(date_add(today, { seconds: 4 * 60 }));
-            dataValues1[1].sourceTimestamp!.should.eql(date_add(today, { seconds: 5 * 60 }));
-            dataValues1[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 6 * 60 }));
+            should(dataValues1[2].sourceTimestamp).eql(date_add(today, { seconds: 4 * 60 }));
+            should(dataValues1[1].sourceTimestamp).eql(date_add(today, { seconds: 5 * 60 }));
+            should(dataValues1[0].sourceTimestamp).eql(date_add(today, { seconds: 6 * 60 }));
 
-            const historyReadResult2 = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+            const historyReadResult2 = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint
+            });
 
             const dataValues2 = (historyReadResult2.historyData as HistoryData).dataValues!;
             dataValues2.length.should.eql(3);
@@ -477,23 +552,21 @@ describe("Testing Historical Data Node", () => {
 
             continuationPoint = historyReadResult2.continuationPoint;
 
-            dataValues2[2].sourceTimestamp!.should.eql(date_add(today, { seconds: 1 * 60 }));
-            dataValues2[1].sourceTimestamp!.should.eql(date_add(today, { seconds: 2 * 60 }));
-            dataValues2[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 3 * 60 }));
+            should(dataValues2[2].sourceTimestamp).eql(date_add(today, { seconds: 1 * 60 }));
+            should(dataValues2[1].sourceTimestamp).eql(date_add(today, { seconds: 2 * 60 }));
+            should(dataValues2[0].sourceTimestamp).eql(date_add(today, { seconds: 3 * 60 }));
 
-            const historyReadResult3 = await
-                node.historyRead(
-                    context, historyReadDetails, indexRange, dataEncoding, continuationPoint);
+            const historyReadResult3 = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint
+            });
 
             const dataValues3 = (historyReadResult3.historyData as HistoryData).dataValues!;
             dataValues3.length.should.eql(1);
             should.not.exist(historyReadResult3.continuationPoint, "expecting no continuation points in our case");
 
-            dataValues3[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 0 }));
-
+            should(dataValues3[0].sourceTimestamp).eql(date_add(today, { seconds: 0 }));
         });
         it("HRRM-6 should return some data if endTime & numValuesPerNode, are specified (no startTime)", async () => {
-
             const indexRange = null;
             const dataEncoding = null;
             const historyReadDetails = new ReadRawModifiedDetails({
@@ -504,25 +577,24 @@ describe("Testing Historical Data Node", () => {
                 startTime: undefined
             });
 
-            const historyReadResult1 = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding);
+            const historyReadResult1 = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint: null
+            });
 
             const dataValues = (historyReadResult1.historyData as HistoryData).dataValues!;
             dataValues.length.should.eql(7);
             should.not.exist(historyReadResult1.continuationPoint, "expecting no continuation points in our case");
 
-            dataValues[6].sourceTimestamp!.should.eql(date_add(today, { seconds: 0 }));
-            dataValues[5].sourceTimestamp!.should.eql(date_add(today, { seconds: 1 * 60 }));
-            dataValues[4].sourceTimestamp!.should.eql(date_add(today, { seconds: 2 * 60 }));
-            dataValues[3].sourceTimestamp!.should.eql(date_add(today, { seconds: 3 * 60 }));
-            dataValues[2].sourceTimestamp!.should.eql(date_add(today, { seconds: 4 * 60 }));
-            dataValues[1].sourceTimestamp!.should.eql(date_add(today, { seconds: 5 * 60 }));
-            dataValues[0].sourceTimestamp!.should.eql(date_add(today, { seconds: 6 * 60 }));
-
+            should(dataValues[6].sourceTimestamp).eql(date_add(today, { seconds: 0 }));
+            should(dataValues[5].sourceTimestamp).eql(date_add(today, { seconds: 1 * 60 }));
+            should(dataValues[4].sourceTimestamp).eql(date_add(today, { seconds: 2 * 60 }));
+            should(dataValues[3].sourceTimestamp).eql(date_add(today, { seconds: 3 * 60 }));
+            should(dataValues[2].sourceTimestamp).eql(date_add(today, { seconds: 4 * 60 }));
+            should(dataValues[1].sourceTimestamp).eql(date_add(today, { seconds: 5 * 60 }));
+            should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: 6 * 60 }));
         });
 
         it("HRRM-7 should return an error if less than two constraints are specified (no endTime, no startTime)", async () => {
-
             const indexRange = null;
             const dataEncoding = null;
             const historyReadDetails = new ReadRawModifiedDetails({
@@ -533,17 +605,18 @@ describe("Testing Historical Data Node", () => {
                 startTime: undefined
             });
 
-            const historyReadResult = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding);
+            const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint: null
+            });
 
             historyReadResult.statusCode.should.eql(StatusCodes.BadHistoryOperationUnsupported);
             should.not.exist(historyReadResult.continuationPoint, "expecting no continuation points in our case");
-
         });
 
-        it("HRRM-8 should return an error if less than two constraints are specified " +
-            "(endTime, no numValuesPerNode, no startTime)", async () => {
-
+        it(
+            "HRRM-8 should return an error if less than two constraints are specified " +
+                "(endTime, no numValuesPerNode, no startTime)",
+            async () => {
                 const indexRange = null;
                 const dataEncoding = null;
                 const historyReadDetails = new ReadRawModifiedDetails({
@@ -554,52 +627,132 @@ describe("Testing Historical Data Node", () => {
                     startTime: undefined
                 });
 
-                const historyReadResult = await node.historyRead(
-                    context, historyReadDetails, indexRange, dataEncoding);
+                const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                    continuationPoint: null
+                });
 
                 historyReadResult.statusCode.should.eql(StatusCodes.BadHistoryOperationUnsupported);
 
                 should.not.exist(historyReadResult.continuationPoint, "expecting no continuation points in our case");
-            });
+            }
+        );
 
         it("HRED-1 [TODO] implement ReadEventDetails", async () => {
-
             const historyReadDetails = new ReadEventDetails({});
             const indexRange = null;
             const dataEncoding = null;
 
-            const historyReadResult = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding);
+            const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint: null
+            });
 
             historyReadResult.statusCode.should.eql(StatusCodes.BadHistoryOperationUnsupported);
             should.not.exist(historyReadResult.continuationPoint, "expecting no continuation points in our case");
         });
 
         it("HRPD-1 [TODO] implement ReadProcessedDetails", async () => {
-
             const historyReadDetails = new ReadProcessedDetails({});
             const indexRange = null;
             const dataEncoding = null;
 
-            const historyReadResult = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding);
+            const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint: null
+            });
 
             historyReadResult.statusCode.should.eql(StatusCodes.BadHistoryOperationUnsupported);
             should.not.exist(historyReadResult.continuationPoint, "expecting no continuation points in our case");
         });
 
         it("HRPD-1 [TODO] implement ReadAtTimeDetails", async () => {
-
             const historyReadDetails = new ReadAtTimeDetails({});
             const indexRange = null;
             const dataEncoding = null;
 
-            const historyReadResult = await node.historyRead(
-                context, historyReadDetails, indexRange, dataEncoding);
+            const historyReadResult = await node.historyRead(context, historyReadDetails, indexRange, dataEncoding, {
+                continuationPoint: null
+            });
 
             historyReadResult.statusCode.should.eql(StatusCodes.BadHistoryOperationUnsupported);
             should.not.exist(historyReadResult.continuationPoint, "expecting no continuation points in our case");
         });
+    });
 
+    describe("HRRB HistoryReadRaw returnBounds", () => {
+        let node: UAVariable;
+        const today = new Date(2011, 0, 1, 0, 0, 0);
+
+        before(() => {
+            node = addressSpace.getOwnNamespace().addVariable({
+                browseName: "MyVarBounds",
+                componentOf: addressSpace.rootFolder.objects.server.vendorServerInfo,
+                dataType: "Double"
+            });
+            addressSpace.installHistoricalDataNode(node, {
+                maxOnlineValues: 100
+            });
+            for (let i = 0; i <= 6; i++) {
+                node.setValueFromSource({ dataType: "Double", value: i }, StatusCodes.Good, date_add(today, { seconds: 60 * i }));
+            }
+        });
+
+        async function readRaw(startTime: Date, endTime: Date, numValuesPerNode = 0): Promise<DataValue[]> {
+            const historyReadDetails = new ReadRawModifiedDetails({
+                endTime,
+                isReadModified: false,
+                numValuesPerNode,
+                returnBounds: true,
+                startTime
+            });
+            const historyReadResult = await node.historyRead(context, historyReadDetails, null, null, {
+                continuationPoint: null
+            });
+            historyReadResult.statusCode.should.eql(StatusCodes.Good);
+            return (historyReadResult.historyData as HistoryData).dataValues!;
+        }
+
+        it("HRRB-1 should interpolate a bounding value when no sample exists exactly at the boundary", async () => {
+            // start (60*0 + 30s) falls between the samples at minute 0 (value 0) and minute 1
+            // (value 1); end (60*3 + 30s) falls between minute 3 (value 3) and minute 4 (value 4)
+            const dataValues = await readRaw(date_add(today, { seconds: 30 }), date_add(today, { seconds: 3 * 60 + 30 }));
+
+            dataValues.length.should.eql(5);
+
+            should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: 30 }));
+            dataValues[0].value.value.should.eql(0.5);
+            should(dataValues[0].statusCode.value & extraStatusCodeBits.HistorianInterpolated).not.eql(0);
+
+            dataValues[1].value.value.should.eql(1);
+            dataValues[2].value.value.should.eql(2);
+            dataValues[3].value.value.should.eql(3);
+
+            should(dataValues[4].sourceTimestamp).eql(date_add(today, { seconds: 3 * 60 + 30 }));
+            dataValues[4].value.value.should.eql(3.5);
+            should(dataValues[4].statusCode.value & extraStatusCodeBits.HistorianInterpolated).not.eql(0);
+        });
+
+        it("HRRB-2 should not add a bounding value when a sample exists exactly at each boundary", async () => {
+            const dataValues = await readRaw(date_add(today, { seconds: 0 }), date_add(today, { seconds: 3 * 60 }));
+
+            dataValues.length.should.eql(4);
+            dataValues[0].value.value.should.eql(0);
+            dataValues[3].value.value.should.eql(3);
+            // the boundary samples are the actual raw values: no Interpolated bit
+            should(dataValues[0].statusCode.value & extraStatusCodeBits.HistorianInterpolated).eql(0);
+            should(dataValues[3].statusCode.value & extraStatusCodeBits.HistorianInterpolated).eql(0);
+        });
+
+        it("HRRB-3 should return Bad_BoundNotFound when the requested range reaches beyond the archive", async () => {
+            const dataValues = await readRaw(date_add(today, { seconds: -60 }), date_add(today, { seconds: 6 * 60 + 60 }));
+
+            // 7 raw samples (minute 0 to 6) plus a not-found bound on each side
+            dataValues.length.should.eql(9);
+            dataValues[0].statusCode.should.eql(StatusCodes.BadBoundNotFound);
+            should(dataValues[0].sourceTimestamp).eql(date_add(today, { seconds: -60 }));
+            should(dataValues[0].value.dataType).eql(DataType.Null);
+
+            dataValues[8].statusCode.should.eql(StatusCodes.BadBoundNotFound);
+            should(dataValues[8].sourceTimestamp).eql(date_add(today, { seconds: 6 * 60 + 60 }));
+            should(dataValues[8].value.dataType).eql(DataType.Null);
+        });
     });
 });

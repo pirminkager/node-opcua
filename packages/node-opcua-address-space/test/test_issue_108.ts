@@ -1,30 +1,23 @@
-"use strict";
 /* global describe,it,before*/
 
-import * as fs from "fs";
+import fs from "node:fs";
 import { assert } from "node-opcua-assert";
-import * as should from "should";
-
 import { standardUnits } from "node-opcua-data-access";
-import * as nodesets from "node-opcua-nodesets";
-import {
-    AddressSpace,
-    generateAddressSpace,
-    RootFolder,
-    UAAnalogItem,
-    UAObject,
-    UAObjectType,
-} from "..";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { constructNodesetFilename, nodesets } from "node-opcua-nodesets";
+import type { DataType } from "node-opcua-variant";
+import should from "should";
+import { AddressSpace, type UAAnalogItem, type UAObject, type UAObjectType, type UARootFolder } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
 
 interface MyCustomType extends UAObjectType {
-    temperature: UAAnalogItem;
+    temperature: UAAnalogItem<number, DataType.Double>;
 }
 interface MyCustom extends UAObject {
-    temperature: UAAnalogItem;
+    temperature: UAAnalogItem<number, DataType.Double>;
 }
 
 function createCustomType(addressSpace: AddressSpace): MyCustomType {
-
     const namespace = addressSpace.getOwnNamespace();
     // -------------------------------------------- MachineType
     const customTypeNode = namespace.addObjectType({ browseName: "CustomType" }) as MyCustomType;
@@ -41,27 +34,22 @@ function createCustomType(addressSpace: AddressSpace): MyCustomType {
         valuePrecision: 0.01
     });
 
-    customTypeNode.getComponentByName("Temperature")!.browseName.toString().should.eql("1:Temperature");
+    should(customTypeNode.getComponentByName("Temperature")?.browseName.toString()).eql("1:Temperature");
 
-    assert(customTypeNode.temperature!.browseName.toString() === "1:Temperature");
+    assert(customTypeNode.temperature?.browseName.toString() === "1:Temperature");
     return customTypeNode;
 }
-
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
-describe("testing add new DataType ", function (this: any) {
-
-    this.timeout(Math.max(300000, this._timeout));
+describe("testing add new DataType ", function (this: Mocha.Context) {
+    this.timeout(Math.max(300000, this.timeout()));
 
     let addressSpace: AddressSpace;
 
     before(async () => {
         addressSpace = AddressSpace.create();
-        const xml_file = nodesets.standard_nodeset_file;
+        const xml_file = nodesets.standard;
         fs.existsSync(xml_file).should.be.eql(true);
         await generateAddressSpace(addressSpace, xml_file);
         addressSpace.registerNamespace("Private");
-
     });
     after(async () => {
         if (addressSpace) {
@@ -70,13 +58,12 @@ describe("testing add new DataType ", function (this: any) {
     });
 
     it("should instantiate an object whose type defines an analog item", () => {
-
         const customType = createCustomType(addressSpace);
         customType.temperature.browseName.toString().should.eql("1:Temperature");
-        customType.temperature.valuePrecision!.browseName.toString().should.eql("ValuePrecision");
-        customType.temperature.instrumentRange!.browseName.toString().should.eql("InstrumentRange");
-        customType.temperature.instrumentRange!.readValue().value.value.low.should.eql(-70);
-        customType.temperature.instrumentRange!.readValue().value.value.high.should.eql(120);
+        should(customType.temperature.valuePrecision?.browseName.toString()).eql("ValuePrecision");
+        should(customType.temperature.instrumentRange?.browseName.toString()).eql("InstrumentRange");
+        should(customType.temperature.instrumentRange?.readValue().value.value.low).eql(-70);
+        should(customType.temperature.instrumentRange?.readValue().value.value.high).eql(120);
 
         const customNode1 = customType.instantiate({
             browseName: "TestNode",
@@ -86,25 +73,22 @@ describe("testing add new DataType ", function (this: any) {
         customNode1.browseName.toString().should.eql("1:TestNode");
         customNode1.temperature.browseName.toString().should.eql("1:Temperature");
 
-        customNode1.temperature.valuePrecision!.browseName.toString().should.eql("ValuePrecision");
-        customNode1.temperature.instrumentRange!.browseName.toString().should.eql("InstrumentRange");
-        customNode1.temperature.instrumentRange!.readValue().value.value.low.should.eql(-70);
-        customNode1.temperature.instrumentRange!.readValue().value.value.high.should.eql(120);
-
+        should(customNode1.temperature.valuePrecision?.browseName.toString()).eql("ValuePrecision");
+        should(customNode1.temperature.instrumentRange?.browseName.toString()).eql("InstrumentRange");
+        should(customNode1.temperature.instrumentRange?.readValue().value.value.low).eql(-70);
+        should(customNode1.temperature.instrumentRange?.readValue().value.value.high).eql(120);
     });
 });
 
 describe("issue #108", () => {
-
     it("should verify that UAObjectType.instantiate works for complex ObjectTypes like DI and ADI (reading from old 1.02 NodeSet)", async () => {
-
         const addressSpace = AddressSpace.create();
 
         const xml_files = [
-            nodesets.standard_nodeset_file,
-            nodesets.constructNodesetFilename("1.02/Opc.Ua.Di.NodeSet2.xml"),
-            nodesets.constructNodesetFilename("1.02/Opc.Ua.Adi.NodeSet2.xml"),
-            nodesets.constructNodesetFilename("1.02/FTNIR.NodeSet2.xml")
+            nodesets.standard,
+            constructNodesetFilename("1.02/Opc.Ua.Di.NodeSet2.xml"),
+            constructNodesetFilename("1.02/Opc.Ua.Adi.NodeSet2.xml"),
+            constructNodesetFilename("1.02/FTNIR.NodeSet2.xml")
         ];
 
         fs.existsSync(xml_files[0]).should.be.eql(true);
@@ -115,9 +99,7 @@ describe("issue #108", () => {
 
         await generateAddressSpace(addressSpace, xml_files);
 
-        const deviceSet = addressSpace.findNode("RootFolder")! as RootFolder;
-
-        // xx Object.keys(addressSpace._objectTypeMap).forEach(function(a) { console.log(a); });
+        const deviceSet = addressSpace.findNode("RootFolder")! as UARootFolder;
 
         const ftnirType = addressSpace.findObjectType("3:FTNIRSimulatorDeviceType")!;
 
@@ -129,6 +111,5 @@ describe("issue #108", () => {
         ftnirInstance.nodeId.namespace.should.eql(addressSpace.getOwnNamespace().index);
 
         addressSpace.dispose();
-
     });
 });

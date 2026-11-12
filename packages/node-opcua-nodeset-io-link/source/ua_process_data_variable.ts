@@ -1,0 +1,23 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { Byte } from "node-opcua-basic-types";
+import type { UABaseDataVariable, UABaseDataVariable_Base } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/IOLink/                         |
+ * |nodeClass       |VariableType                                                |
+ * |typedDefinition |ProcessDataVariableType i=2002                              |
+ * |dataType        |Variant                                                     |
+ * |dataType Name   |VariantOptions[] i=24                                       |
+ * |value rank      |1                                                           |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAProcessDataVariable_Base<T, DT extends DataType>  extends UABaseDataVariable_Base<T, DT> {
+    pdDescriptor?: UAProperty<Byte[], DataType.Byte>;
+    processDataLength: UAProperty<Byte, DataType.Byte>;
+}
+export interface UAProcessDataVariable<T, DT extends DataType> extends UABaseDataVariable<T, DT>, UAProcessDataVariable_Base<T, DT> {}

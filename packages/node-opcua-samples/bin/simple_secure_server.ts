@@ -1,52 +1,21 @@
-#!/usr/bin/env ts-node
+#!/usr/bin/env tsx
 /* eslint no-process-exit: 0 */
-// tslint:disable:no-console
-import * as chalk from "chalk";
-import * as  path from "path";
-import * as yargs from "yargs";
+import os from "node:os";
 
+import chalk from "chalk";
+import commandLineArgs from "command-line-args";
+import type commandLineUsage from "command-line-usage";
 import {
-    makeApplicationUrn,
     MessageSecurityMode,
+    makeApplicationUrn,
     nodesets,
     OPCUAServer,
+    type OPCUAServerOptions,
     SecurityPolicy,
-    ServerSession
+    type ServerSession
 } from "node-opcua";
 
 Error.stackTraceLimit = Infinity;
-
-function constructFilename(filename: string): string {
-    return path.join(__dirname, "../", filename);
-}
-
-const argv = yargs(process.argv)
-.wrap(132)
-
-  .option("alternateHostname", {
-      alias: "a",
-      describe: "alternateHostname"
-  })
-
-  .option("port", {
-      alias: "p",
-      default: 26543
-  })
-
-  .option("silent", {
-      alias: "s",
-      default: false,
-      describe: "silent - no trace"
-  })
-  .option("maxAllowedSessionNumber", {
-      alias: "m",
-      default: 10,
-  })
-
-  .help(true)
-  .argv;
-
-const port = argv.port || 26543;
 
 const userManager = {
     isValidUser: (userName: string, password: string) => {
@@ -60,56 +29,54 @@ const userManager = {
     }
 };
 
-const server_certificate_file = constructFilename("certificates/server_selfsigned_cert_2048.pem");
-const server_certificate_privatekey_file = constructFilename("certificates/server_key_2048.pem");
-
-const server_options = {
-
-    securityPolicies: [
-        SecurityPolicy.Basic128Rsa15,
-        SecurityPolicy.Basic256
-    ],
-
-    securityModes: [
-        MessageSecurityMode.Sign,
-        MessageSecurityMode.SignAndEncrypt
-    ],
-
-    certificateFile: server_certificate_file,
-    privateKeyFile: server_certificate_privatekey_file,
-
-    port,
-
-    nodeset_filename: [
-        nodesets.standard_nodeset_file,
-        nodesets.di_nodeset_filename
-    ],
-
-    serverInfo: {
-        applicationName: {text: "NodeOPCUA", locale: "en"},
-        applicationUri: makeApplicationUrn("%FQDN%", "NodeOPCUA-Server"),
-        productUri: "NodeOPCUA-Server",
-
-        discoveryProfileUri: null,
-        discoveryUrls: [],
-        gatewayServerUri: null,
-    },
-
-    buildInfo: {
-        buildDate: new Date(),
-        buildNumber: "1234",
-    },
-
-    userManager,
-
-    isAuditing: false
-};
-
-process.title = "Node OPCUA Server on port : " + server_options.port;
-
-// server_options.alternateHostname = argv.alternateHostname;
-
 async function main() {
+    const optionDefinitions: commandLineUsage.OptionDefinition[] = [
+        { name: "alternateHostname", alias: "a", type: String, description: "alternateHostname" },
+        { name: "port", alias: "p", type: Number, defaultValue: 26543 },
+        { name: "silent", alias: "s", type: Boolean, defaultValue: false, description: "silent - no trace" },
+        { name: "maxSessions", alias: "m", type: Number, defaultValue: 10 }
+    ];
+    const argv = commandLineArgs(optionDefinitions);
+
+    const port = argv.port || 26543;
+    // server_options.alternateHostname = argv.alternateHostname;
+
+    const server_options: OPCUAServerOptions = {
+        securityPolicies: [SecurityPolicy.Basic256Sha256, SecurityPolicy.Basic256],
+
+        securityModes: [MessageSecurityMode.Sign, MessageSecurityMode.SignAndEncrypt],
+
+        port,
+
+        nodeset_filename: [nodesets.standard, nodesets.di],
+
+        serverInfo: {
+            applicationName: { text: "NodeOPCUA", locale: "en" },
+            applicationUri: makeApplicationUrn(os.hostname(), "NodeOPCUA-SecureServer"),
+            productUri: "NodeOPCUA-SecureServer",
+
+            discoveryProfileUri: null,
+            discoveryUrls: [],
+            gatewayServerUri: null
+        },
+
+        buildInfo: {
+            buildDate: new Date(),
+            buildNumber: "1234"
+        },
+
+        serverCapabilities: {
+            maxSessions: argv.maxSessions
+        },
+
+        maxConnectionsPerEndpoint: argv.maxSessions,
+
+        userManager,
+
+        isAuditing: false
+    };
+
+    process.title = `Node OPCUA Server on port : ${server_options.port}`;
 
     const server = new OPCUAServer(server_options);
 
@@ -122,7 +89,7 @@ async function main() {
 
     await server.start();
 
-    const endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl!;
+    const endpointUrl = server.getEndpointUrl();
     console.log(chalk.yellow("  server on port      :"), chalk.cyan(server.endpoints[0].port.toString()));
     console.log(chalk.yellow("  endpointUrl         :"), chalk.cyan(endpointUrl));
 
@@ -130,24 +97,24 @@ async function main() {
 
     if (argv.silent) {
         console.log("silent");
-        console.log = (...args: [any?, ... any[]]) => {
+        console.log = (..._args: unknown[]) => {
             /* silent */
         };
     }
 
     server.on("create_session", (session: ServerSession) => {
         console.log(" SESSION CREATED");
-        console.log(chalk.cyan("    client application URI: "), session.clientDescription!.applicationUri);
-        console.log(chalk.cyan("        client product URI: "), session.clientDescription!.productUri);
-        console.log(chalk.cyan("   client application name: "), session.clientDescription!.applicationName.toString());
-        console.log(chalk.cyan("   client application type: "), session.clientDescription!.applicationType.toString());
+        console.log(chalk.cyan("    client application URI: "), session.clientDescription?.applicationUri);
+        console.log(chalk.cyan("        client product URI: "), session.clientDescription?.productUri);
+        console.log(chalk.cyan("   client application name: "), session.clientDescription?.applicationName.toString());
+        console.log(chalk.cyan("   client application type: "), session.clientDescription?.applicationType.toString());
         console.log(chalk.cyan("              session name: "), session.sessionName ? session.sessionName.toString() : "<null>");
         console.log(chalk.cyan("           session timeout: "), session.sessionTimeout);
         console.log(chalk.cyan("                session id: "), session.nodeId);
     });
 
-    server.on("session_closed", (session: ServerSession, reason: string) => {
-        console.log(" SESSION CLOSED :", reason);
+    server.on("session_closed", (session: ServerSession, deleteSubscriptions: boolean) => {
+        console.log(" SESSION CLOSED :", deleteSubscriptions);
         console.log(chalk.cyan("              session name: "), session.sessionName ? session.sessionName.toString() : "<null>");
     });
 
@@ -159,6 +126,5 @@ async function main() {
         console.error(chalk.red.bold(" shot down ..."));
         process.exit(1);
     });
-
 }
 main();

@@ -1,0 +1,13 @@
+import type { UAInterruptedEvent, UAInterruptedEvent_Base } from "./ua_interrupted_event.js";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Glass/Flat/                     |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |EmergencyButtonPressedEventType i=1038                      |
+ * |isAbstract      |true                                                        |
+ */
+export type UAEmergencyButtonPressedEvent_Base = UAInterruptedEvent_Base;
+export interface UAEmergencyButtonPressedEvent extends UAInterruptedEvent, UAEmergencyButtonPressedEvent_Base {}

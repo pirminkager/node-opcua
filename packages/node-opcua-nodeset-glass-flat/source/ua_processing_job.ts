@@ -1,0 +1,41 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { UAString } from "node-opcua-basic-types";
+import type { LocalizedText } from "node-opcua-data-model";
+import type { UAAnalogUnit } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { UABaseMaterial } from "./ua_base_material.js";
+import type { UAProductionJob, UAProductionJob_Base } from "./ua_production_job.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAProcessingJob_$InputMaterial$ extends Omit<UABaseMaterial, "$description"|"identifier"|"location"|"materialIdentifier"|"weight"|"x"|"y"|"z"> { // Object
+      "$description"?: UAProperty<LocalizedText, DataType.LocalizedText>;
+      identifier: UAProperty<UAString, DataType.String>;
+      location: UAProperty<UAString, DataType.String>;
+      materialIdentifier: UAProperty<UAString, DataType.String>;
+      weight?: UAAnalogUnit<number, DataType.Double>;
+      x?: UAAnalogUnit<number, DataType.Double>;
+      y?: UAAnalogUnit<number, DataType.Double>;
+      z?: UAAnalogUnit<number, DataType.Double>;
+}
+export interface UAProcessingJob_$OutputMaterial$ extends Omit<UABaseMaterial, "$description"|"identifier"|"location"|"materialIdentifier"|"weight"|"x"|"y"|"z"> { // Object
+      "$description"?: UAProperty<LocalizedText, DataType.LocalizedText>;
+      identifier: UAProperty<UAString, DataType.String>;
+      location: UAProperty<UAString, DataType.String>;
+      materialIdentifier: UAProperty<UAString, DataType.String>;
+      weight?: UAAnalogUnit<number, DataType.Double>;
+      x?: UAAnalogUnit<number, DataType.Double>;
+      y?: UAAnalogUnit<number, DataType.Double>;
+      z?: UAAnalogUnit<number, DataType.Double>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Glass/Flat/                     |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ProcessingJobType i=1009                                    |
+ * |isAbstract      |false                                                       |
+ */
+export type UAProcessingJob_Base = UAProductionJob_Base;
+export interface UAProcessingJob extends UAProductionJob, UAProcessingJob_Base {}

@@ -1,31 +1,25 @@
 {
     "name": "node-opcua-service-session",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -service-session",
+    "type": "module",
+    "version": "2.187.19",
+    "description": "pure nodejs OPCUA SDK - module service-session",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "scripts": {
-        "test": "mocha test",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "build": "tsc -b"
+        "test": "mocha",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "build": "tsc -b",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "engines": {
+        "node": ">=22.13.0"
     },
     "dependencies": {
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-basic-types": "^2.6.0-alpha.1",
-        "node-opcua-binary-stream": "^2.6.0-alpha.1",
-        "node-opcua-extension-object": "^2.6.0-alpha.1",
-        "node-opcua-factory": "^2.6.0-alpha.1",
-        "node-opcua-nodeid": "^2.6.0-alpha.1",
-        "node-opcua-service-endpoints": "^2.6.0-alpha.1",
-        "node-opcua-service-secure-channel": "^2.6.0-alpha.1",
-        "node-opcua-types": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
+        "node-opcua-factory": "2.187.0",
+        "node-opcua-types": "2.187.19"
     },
     "devDependencies": {
-        "node-opcua-data-model": "^2.6.0-alpha.1",
-        "node-opcua-generator": "^2.6.0-alpha.1",
-        "node-opcua-service-endpoints": "2.5.10",
-        "should": "^13.2.3"
+        "node-opcua-service-endpoints": "2.187.19"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -42,5 +36,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

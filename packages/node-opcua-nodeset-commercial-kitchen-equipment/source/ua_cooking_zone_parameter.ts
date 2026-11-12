@@ -1,0 +1,57 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { Int32, UAString } from "node-opcua-basic-types";
+import type { EUInformation } from "node-opcua-data-access";
+import type { DTRange } from "node-opcua-nodeset-ua/dist/dt_range.js";
+import type { UAAnalogItem } from "node-opcua-nodeset-ua/dist/ua_analog_item.js";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { EnumCurrentState } from "./enum_current_state.js";
+import type { UAKitchenDeviceParameter, UAKitchenDeviceParameter_Base } from "./ua_kitchen_device_parameter.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UACookingZoneParameter_actualPower<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UACookingZoneParameter_actualProcessTime<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UACookingZoneParameter_actualTemperature<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UACookingZoneParameter_nominalPower<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UACookingZoneParameter_setPowerValue<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UACookingZoneParameter_setTemperature<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/CommercialKitchenEquipment/     |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |CookingZoneParameterType i=1029                             |
+ * |isAbstract      |false                                                       |
+ */
+export interface UACookingZoneParameter_Base extends UAKitchenDeviceParameter_Base {
+    actualPower?: UACookingZoneParameter_actualPower<number, DataType.Float>;
+    actualProcessTime?: UACookingZoneParameter_actualProcessTime<Int32, DataType.Int32>;
+    actualTemperature?: UACookingZoneParameter_actualTemperature<number, DataType.Float>;
+    cookingZoneName?: UABaseDataVariable<UAString, DataType.String>;
+    currentState?: UABaseDataVariable<EnumCurrentState, DataType.Int32>;
+    isPanDetected?: UABaseDataVariable<boolean, DataType.Boolean>;
+    nominalPower: UACookingZoneParameter_nominalPower<Int32, DataType.Int32>;
+    setPowerValue?: UACookingZoneParameter_setPowerValue<Int32, DataType.Int32>;
+    setTemperature?: UACookingZoneParameter_setTemperature<number, DataType.Float>;
+}
+export interface UACookingZoneParameter extends UAKitchenDeviceParameter, UACookingZoneParameter_Base {}

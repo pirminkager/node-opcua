@@ -1,5 +1,4 @@
-// tslint:disable: no-console
-import { Benchmarker, ITestRun } from "..";
+import { Benchmarker, type ITestRun } from "../dist/index.js";
 
 describe("Testing Benchmarker", () => {
     it("forEach vs simple loops", (done) => {
@@ -12,23 +11,22 @@ describe("Testing Benchmarker", () => {
 
         bench
             .add("for simple loop", () => {
-                let sum = 0;
-                // tslint:disable-next-line: prefer-for-of
+                let _sum = 0;
                 for (let i = 0; i < values.length; i++) {
-                    sum += values[i];
+                    _sum += values[i];
                 }
             })
             .add("forEach        ", () => {
-                let sum = 0;
+                let _sum = 0;
                 values.forEach((e) => {
-                    sum += e;
+                    _sum += e;
                 });
             })
             .on("cycle", (message) => {
                 console.log(message);
             })
             .on("complete", (fastest: ITestRun, speedUp: number) => {
-                console.log(" Fastest is " + fastest.name);
+                console.log(` Fastest is ${fastest.name}`);
                 console.log(" Speed Up : x", speedUp);
                 console.log(" count    :  ", fastest.result!.count);
                 console.log(" ops/s    :  ", fastest.result!.ops);
@@ -38,32 +36,34 @@ describe("Testing Benchmarker", () => {
     });
 
     it("should benchmark async function ", async () => {
-
         const bench = new Benchmarker();
 
         async function test1() {
-            await new Promise((resolve) => setImmediate(() => {
-                resolve();
-            }));
+            await new Promise<void>((resolve) =>
+                setImmediate(() => {
+                    resolve();
+                })
+            );
         }
         async function test2() {
-            await new Promise((resolve) => process.nextTick(() => {
-                resolve();
-            }));
+            await new Promise<void>((resolve) =>
+                process.nextTick(() => {
+                    resolve();
+                })
+            );
         }
         await bench
-            .add("test1", test1)
-            .add("test2", test2)
+            .add("test1 - setImmediate", test1)
+            .add("test2 - process.nextTick", test2)
             .on("cycle", (message) => {
                 console.log(message);
             })
             .on("complete", (fastest: ITestRun, speedUp: number) => {
-                console.log(" Fastest is " + fastest.name);
+                console.log(` Fastest is ${fastest.name}`);
                 console.log(" Speed Up : x", speedUp);
                 console.log(" count    :  ", fastest.result!.count);
                 console.log(" ops/s    :  ", fastest.result!.ops);
             })
             .run({ max_time: 0.25 });
     });
-
 });

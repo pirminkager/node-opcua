@@ -1,0 +1,109 @@
+{
+    "extends": "../tsconfig.common.json",
+    "compilerOptions": {
+        "rootDir": "",
+        "outDir": "dist",
+        "composite": true,
+        "incremental": true
+    },
+    "include": [
+        "api/**/*.ts",
+        "impl/**/*.ts"
+    ],
+    "references": [
+        {
+            "path": "../node-opcua-address-space-base"
+        },
+        {
+            "path": "../node-opcua-address-space-store"
+        },
+        {
+            "path": "../node-opcua-assert"
+        },
+        {
+            "path": "../node-opcua-basic-types"
+        },
+        {
+            "path": "../node-opcua-binary-stream"
+        },
+        {
+            "path": "../node-opcua-client-dynamic-extension-object"
+        },
+        {
+            "path": "../node-opcua-constants"
+        },
+        {
+            "path": "../node-opcua-data-access"
+        },
+        {
+            "path": "../node-opcua-data-model"
+        },
+        {
+            "path": "../node-opcua-data-value"
+        },
+        {
+            "path": "../node-opcua-date-time"
+        },
+        {
+            "path": "../node-opcua-debug"
+        },
+        {
+            "path": "../node-opcua-enum"
+        },
+        {
+            "path": "../node-opcua-extension-object"
+        },
+        {
+            "path": "../node-opcua-factory"
+        },
+        {
+            "path": "../node-opcua-nodeid"
+        },
+        {
+            "path": "../node-opcua-nodeset-ua"
+        },
+        {
+            "path": "../node-opcua-numeric-range"
+        },
+        {
+            "path": "../node-opcua-object-registry"
+        },
+        {
+            "path": "../node-opcua-pseudo-session"
+        },
+        {
+            "path": "../node-opcua-service-browse"
+        },
+        {
+            "path": "../node-opcua-service-call"
+        },
+        {
+            "path": "../node-opcua-service-history"
+        },
+        {
+            "path": "../node-opcua-service-translate-browse-path"
+        },
+        {
+            "path": "../node-opcua-service-write"
+        },
+        {
+            "path": "../node-opcua-status-code"
+        },
+        {
+            "path": "../node-opcua-types"
+        },
+        {
+            "path": "../node-opcua-utils"
+        },
+        {
+            "path": "../node-opcua-variant"
+        },
+        {
+            "path": "../node-opcua-xml2json"
+        }
+    ],
+    "exclude": [
+        "node_modules",
+        "dist"
+    ]
+}

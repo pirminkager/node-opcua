@@ -1,30 +1,26 @@
 // compile with  tsc --lib es2018 client_with_custom_datatype.ts
 // tslint:disable:no-console
-import * as os from "os";
+import os from "node:os";
 
+import { types } from "node:util";
 import {
-    BrowseDescriptionLike,
-    BrowseResult,
-    ConnectionStrategyOptions,
+    type BrowseDescriptionLike,
+    type ConnectionStrategyOptions,
     DataType,
-    DataValueT,
     MessageSecurityMode,
     OPCUAClient,
-    OPCUAClientOptions,
+    type OPCUAClientOptions,
     SecurityPolicy,
-    StatusCode,
-    StatusCodes,
-    UserTokenType, Variant
+    Variant
 } from "node-opcua-client";
 
 // this test requires UA C++ Demo Server
 const addNodeMethodNodeId = "ns=2;s=Demo.Massfolder_Static.AddNodes";
-const endpointUri = "opc.tcp://" + os.hostname() + ":48010";
+const endpointUri = `opc.tcp://${os.hostname()}:48010`;
 
-const doDebug = true;
+const _doDebug = false;
 
 async function main() {
-
     const connectionStrategy: ConnectionStrategyOptions = {
         initialDelay: 1000,
         maxRetry: 1
@@ -55,7 +51,6 @@ async function main() {
         ],
         methodId: addNodeMethodNodeId,
         objectId: "ns=2;s=Demo.Massfolder_Static"
-
     });
     console.log(result.toString());
 
@@ -65,17 +60,15 @@ async function main() {
     };
 
     try {
-
         let browseResult = await session.browse(nodeToBrowse);
         console.log("BrowseResult = ", browseResult.toString());
-        if (browseResult.statusCode === StatusCodes.Good) {
+        if (browseResult.statusCode.isGood()) {
             // console.log(browseResult.toString());
-            console.log("reading initial ", browseResult.references!.length, "elements");
+            console.log("reading initial ", browseResult.references?.length, "elements");
             let continuationPoint = browseResult.continuationPoint;
             while (continuationPoint) {
-
                 browseResult = await session.browseNext(continuationPoint, false);
-                console.log("reading extra ", browseResult.references!.length);
+                console.log("reading extra ", browseResult.references?.length);
 
                 continuationPoint = browseResult.continuationPoint;
             }
@@ -83,7 +76,9 @@ async function main() {
             console.log("BrowseResult = ", browseResult.statusCode.toString());
         }
     } catch (err) {
-        console.log("err", err.message);
+        if (types.isNativeError(err)) {
+            console.log("err", err.message);
+        }
         console.log(err);
     }
 

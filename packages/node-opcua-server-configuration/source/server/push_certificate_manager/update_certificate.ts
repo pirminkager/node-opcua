@@ -1,0 +1,301 @@
+import { createPublicKey } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { assert } from "node-opcua-assert";
+import type { ByteString } from "node-opcua-basic-types";
+import type { CertificateManager, OPCUACertificateManager } from "node-opcua-certificate-manager";
+import { _toExportableKeyObject, exploreCertificate } from "node-opcua-crypto";
+import {
+    type Certificate,
+    certificateMatchesPrivateKey,
+    coercePEMorDerToPrivateKey,
+    coercePrivateKeyPem,
+    combine_der,
+    extractPublicKeyFromCertificateSync,
+    makeSHA1Thumbprint,
+    type PrivateKey,
+    toPem
+} from "node-opcua-crypto/web";
+import { checkDebugFlag, make_debugLog, make_warningLog } from "node-opcua-debug";
+import type { NodeId } from "node-opcua-nodeid";
+import { StatusCodes } from "node-opcua-status-code";
+
+import type { UpdateCertificateResult } from "../../push_certificate_manager.js";
+import { validateCertificateAndChain } from "../certificate_validation.js";
+import type { PushCertificateManagerInternalContext } from "./internal_context.js";
+import { findCertificateGroupName, resolveCertificateGroupContext, validateCertificateType } from "./util.js";
+
+const warningLog = make_warningLog("ServerConfiguration");
+const debugLog = make_debugLog("ServerConfiguration");
+const doDebug = checkDebugFlag("ServerConfiguration");
+
+// Helper: Stage issuer certificates to temporary files
+async function preInstallIssuerCertificates(
+    serverImpl: PushCertificateManagerInternalContext,
+    certificateManager: CertificateManager,
+    issuerCertificates: ByteString[] | undefined
+): Promise<void> {
+    if (issuerCertificates && issuerCertificates.length > 0) {
+        const issuerFolder = certificateManager.issuersCertFolder;
+        await fs.promises.mkdir(issuerFolder, { recursive: true });
+
+        for (let i = 0; i < issuerCertificates.length; i++) {
+            const issuerCert = issuerCertificates[i];
+            const thumbprint = makeSHA1Thumbprint(issuerCert).toString("hex");
+
+            const finalIssuerFileDER = path.join(issuerFolder, `issuer_${thumbprint}.der`);
+            const finalIssuerFilePEM = path.join(issuerFolder, `issuer_${thumbprint}.pem`);
+            const issuerCertPEM = toPem(issuerCert, "CERTIFICATE");
+
+            await serverImpl.fileTransactionManager.stageFile(finalIssuerFileDER, issuerCert);
+            await serverImpl.fileTransactionManager.stageFile(finalIssuerFilePEM, issuerCertPEM, "utf-8");
+
+            doDebug && debugLog(`Staged issuer certificate ${i + 1}/${issuerCertificates.length}: ${thumbprint}`);
+        }
+    }
+}
+
+// Helper: Stage main certificate to temporary files
+//
+// The PEM file contains the full chain (leaf + issuer CAs) so that
+// getCertificateChain() returns the complete chain.  This allows
+// OpenSecureChannel and CreateSession to present the full chain to
+// connecting clients, enabling them to build and verify the trust
+// path without needing all CA certificates pre-installed.
+async function preInstallCertificate(
+    serverImpl: PushCertificateManagerInternalContext,
+    certificateManager: CertificateManager,
+    certificate: Certificate,
+    issuerCertificates?: Certificate[]
+): Promise<void> {
+    const certFolder = certificateManager.ownCertFolder;
+    const destPEM = path.join(certFolder, "certificate.pem");
+
+    // Build the full chain: leaf first, then issuer CAs
+    const certificateChain: Certificate[] = [certificate, ...(issuerCertificates ?? [])];
+    const certificatePEM = toPem(combine_der(certificateChain), "CERTIFICATE");
+
+    await serverImpl.fileTransactionManager.stageFile(destPEM, certificatePEM, "utf-8");
+
+    // Clean up any leftover certificate.der from previous installations.
+    // Since DER is no longer written, a stale file would be misleading.
+    const legacyDER = path.join(certFolder, "certificate.der");
+    if (fs.existsSync(legacyDER)) {
+        serverImpl.fileTransactionManager.stageFileRemoval(legacyDER);
+    }
+}
+
+/**
+ * Encode `privateKeyObj` as a PKCS#8 PEM string, encrypted with `passphrase`
+ * (aes-256-cbc — same cipher `writePrivateKeyFile` uses) when given, plaintext
+ * otherwise. Never touches disk — the caller stages the resulting string via
+ * `FileTransactionManager.stageFile()`, so an encrypted key is the only form
+ * that is ever written, whether to the staging temp file or the final
+ * destination.
+ */
+function encodePrivateKeyPem(privateKeyObj: PrivateKey, passphrase: string | undefined): string {
+    if (!passphrase) {
+        return coercePrivateKeyPem(privateKeyObj);
+    }
+    const keyObject = _toExportableKeyObject(privateKeyObj);
+    return keyObject.export({ type: "pkcs8", format: "pem", cipher: "aes-256-cbc", passphrase }) as string;
+}
+
+// Helper: Stage private key to temporary file
+async function preInstallPrivateKey(
+    serverImpl: PushCertificateManagerInternalContext,
+    certificateManager: CertificateManager,
+    privateKeyFormat: string,
+    privateKey: Buffer | string | undefined
+): Promise<void> {
+    assert(privateKeyFormat.toUpperCase() === "PEM");
+
+    if (privateKey) {
+        const privateKeyObj = coercePEMorDerToPrivateKey(privateKey as string | Buffer);
+        // If the certificate manager is configured with a privateKeyPassphrase,
+        // the staged (and later applied) key must be encrypted with it — never
+        // written back to disk in clear.
+        const passphrase = await (certificateManager as OPCUACertificateManager).getPrivateKeyPassphrase?.();
+        const privateKeyPEM = encodePrivateKeyPem(privateKeyObj, passphrase);
+        await serverImpl.fileTransactionManager.stageFile(certificateManager.privateKey, privateKeyPEM, "utf-8");
+    }
+}
+
+// Main Execute Function
+export async function executeUpdateCertificate(
+    serverImpl: PushCertificateManagerInternalContext,
+    certificateGroupId: NodeId | string,
+    certificateTypeId: NodeId | string,
+    certificate: Buffer,
+    issuerCertificates: ByteString[],
+    privateKeyFormat?: string,
+    privateKey?: Buffer | string
+): Promise<UpdateCertificateResult> {
+    if (serverImpl.operationInProgress) {
+        return { statusCode: StatusCodes.BadTooManyOperations, applyChangesRequired: false };
+    }
+
+    serverImpl.operationInProgress = true;
+    try {
+        const context = resolveCertificateGroupContext(serverImpl, certificateGroupId);
+        if (context.statusCode.isNotGood() || !context.certificateManager) {
+            // c8 ignore next
+            doDebug && debugLog(" cannot find group ", certificateGroupId);
+            return { statusCode: StatusCodes.BadInvalidArgument, applyChangesRequired: false };
+        }
+
+        const { certificateManager, allowedTypes } = context;
+
+        if (!validateCertificateType(certificate, certificateTypeId, allowedTypes ?? [], warningLog)) {
+            try {
+                const info = exploreCertificate(certificate);
+                const groupName = findCertificateGroupName(certificateGroupId);
+                const certInfoStr = `subject: ${info.tbsCertificate.subject.commonName}, issuer: ${info.tbsCertificate.issuer.commonName}, validFrom: ${info.tbsCertificate.validity.notBefore.toISOString()}, validTo: ${info.tbsCertificate.validity.notAfter.toISOString()}`;
+
+                warningLog(
+                    `Certificate type ${certificateTypeId} does not match expected certificateTypeId for group '${groupName}' (${certificateGroupId.toString()})\n allowed types: ${allowedTypes?.map((t) => t.toString()).join(", ")} \n provided certificate: ${certInfoStr}`
+                );
+            } catch (err) {
+                // Fallback if certificate parsing fails
+                warningLog(
+                    `Certificate type ${certificateTypeId} does not match expected certificateTypeId for group '${certificateGroupId.toString()}'\n allowed types: ${allowedTypes?.map((t) => t.toString()).join(", ")} \n certificate could not be explored. ${(err as Error).message}`
+                );
+            }
+            return { statusCode: StatusCodes.BadCertificateInvalid, applyChangesRequired: false };
+        }
+
+        const isApplicationGroup = certificateManager === serverImpl.applicationGroup;
+        const validationResult = await validateCertificateAndChain(
+            certificateManager as OPCUACertificateManager,
+            isApplicationGroup,
+            certificate,
+            issuerCertificates
+        );
+
+        if (validationResult.statusCode !== StatusCodes.Good) {
+            await serverImpl.fileTransactionManager.abortTransaction();
+            return { statusCode: validationResult.statusCode, applyChangesRequired: false };
+        }
+
+        doDebug && debugLog(" updateCertificate ", makeSHA1Thumbprint(certificate).toString("hex"));
+
+        const hasPrivateKeyFormat = privateKeyFormat !== undefined && privateKeyFormat !== null && privateKeyFormat !== "";
+        const hasPrivateKey =
+            privateKey !== undefined &&
+            privateKey !== null &&
+            privateKey !== "" &&
+            !(privateKey instanceof Buffer && privateKey.length === 0);
+
+        if (hasPrivateKeyFormat !== hasPrivateKey) {
+            warningLog("privateKeyFormat and privateKey must both be provided or both be omitted");
+            await serverImpl.fileTransactionManager.abortTransaction();
+            return { statusCode: StatusCodes.BadInvalidArgument, applyChangesRequired: false };
+        }
+
+        if (!hasPrivateKeyFormat && !hasPrivateKey) {
+            if (!serverImpl.tmpCertificateManager && certificateManager.isPrivateKeyOpaque()) {
+                // Opaque (HSM/KMS-held) key: there is no material to compare, so the
+                // certificate is checked against the provider's public half (SPKI)
+                // instead. A provider without getPublicKey could not have produced
+                // the CSR in the first place (the opaque CSR path needs the public
+                // key), so an unverifiable certificate is refused rather than
+                // installed blind - a mismatched pair would break every handshake.
+                const keyOperations = certificateManager.getKeyOperations();
+                if (!keyOperations.getPublicKey) {
+                    warningLog(
+                        "updateCertificate: the key-operations provider does not implement getPublicKey():" +
+                            " cannot verify that the certificate matches the (opaque) private key"
+                    );
+                    await serverImpl.fileTransactionManager.abortTransaction();
+                    return { statusCode: StatusCodes.BadNotSupported, applyChangesRequired: false };
+                }
+                const providerSpki = Buffer.from(await keyOperations.getPublicKey());
+                const certificateSpki = createPublicKey(extractPublicKeyFromCertificateSync(certificate)).export({
+                    type: "spki",
+                    format: "der"
+                });
+                if (!providerSpki.equals(certificateSpki)) {
+                    warningLog("certificate doesn't match the (opaque) private key");
+                    await serverImpl.fileTransactionManager.abortTransaction();
+                    return { statusCode: StatusCodes.BadSecurityChecksFailed, applyChangesRequired: false };
+                }
+
+                await preInstallIssuerCertificates(serverImpl, certificateManager, issuerCertificates);
+                await preInstallCertificate(serverImpl, certificateManager, certificate, issuerCertificates);
+                serverImpl.emit("certificateUpdated", certificateGroupId, certificate);
+                return { statusCode: StatusCodes.Good, applyChangesRequired: true };
+            }
+            // Resolve via getPrivateKey(), for two independent reasons:
+            // - CertificateManager.getPrivateKey() caches the decoded key for the lifetime of the
+            //   instance (see node-opcua-pki). createCertificateRequest()/createSelfSignedCertificate()
+            //   both go through that cache, so the CSR that produced `certificate` was necessarily
+            //   signed with the *cached* key. Comparing against a fresh disk read (readPrivateKey
+            //   on the file path) would compare against whatever is currently on disk instead — which
+            //   can differ right after a previous updateCertificate() call replaced the private key
+            //   file directly (bypassing the cache), causing a spurious BadSecurityChecksFailed.
+            // - the on-disk file may be an encrypted PKCS#8 key (privateKeyPassphrase); a raw
+            //   readPrivateKey without the manager's passphrase would fail on it.
+            const privateKeyObj = await (serverImpl.tmpCertificateManager ?? certificateManager).getPrivateKey();
+
+            if (!certificateMatchesPrivateKey(certificate, privateKeyObj)) {
+                warningLog("certificate doesn't match privateKey");
+                await serverImpl.fileTransactionManager.abortTransaction();
+                return { statusCode: StatusCodes.BadSecurityChecksFailed, applyChangesRequired: false };
+            }
+
+            await preInstallIssuerCertificates(serverImpl, certificateManager, issuerCertificates);
+            await preInstallCertificate(serverImpl, certificateManager, certificate, issuerCertificates);
+            serverImpl.emit("certificateUpdated", certificateGroupId, certificate);
+            return { statusCode: StatusCodes.Good, applyChangesRequired: true };
+        } else {
+            if (certificateManager.isPrivateKeyOpaque()) {
+                // The server's key is inside an HSM/KMS: private-key material
+                // cannot be installed, only certificates over the existing key.
+                warningLog("updateCertificate: cannot install a private key when the server's key is opaque (HSM/KMS-held)");
+                await serverImpl.fileTransactionManager.abortTransaction();
+                return { statusCode: StatusCodes.BadNotSupported, applyChangesRequired: false };
+            }
+            if (privateKeyFormat !== "PEM" && privateKeyFormat !== "PFX") {
+                warningLog(` the private key format is invalid privateKeyFormat =${privateKeyFormat}`);
+                await serverImpl.fileTransactionManager.abortTransaction();
+                return { statusCode: StatusCodes.BadNotSupported, applyChangesRequired: false };
+            }
+            if (privateKeyFormat !== "PEM") {
+                warningLog(`in NodeOPCUA we only support PEM for the moment privateKeyFormat =${privateKeyFormat}`);
+                await serverImpl.fileTransactionManager.abortTransaction();
+                return { statusCode: StatusCodes.BadNotSupported, applyChangesRequired: false };
+            }
+
+            let privateKeyObj: PrivateKey | undefined;
+            let tempPrivateKey = privateKey;
+
+            if (tempPrivateKey instanceof Buffer || typeof tempPrivateKey === "string") {
+                if (tempPrivateKey instanceof Buffer) {
+                    assert(privateKeyFormat === "PEM");
+                    tempPrivateKey = tempPrivateKey.toString("utf-8");
+                }
+                privateKeyObj = coercePEMorDerToPrivateKey(tempPrivateKey);
+            }
+
+            if (!privateKeyObj) {
+                await serverImpl.fileTransactionManager.abortTransaction();
+                return { statusCode: StatusCodes.BadNotSupported, applyChangesRequired: false };
+            }
+
+            if (!certificateMatchesPrivateKey(certificate, privateKeyObj)) {
+                warningLog("certificate doesn't match privateKey");
+                await serverImpl.fileTransactionManager.abortTransaction();
+                return { statusCode: StatusCodes.BadSecurityChecksFailed, applyChangesRequired: false };
+            }
+
+            await preInstallPrivateKey(serverImpl, certificateManager, privateKeyFormat, tempPrivateKey);
+            await preInstallIssuerCertificates(serverImpl, certificateManager, issuerCertificates);
+            await preInstallCertificate(serverImpl, certificateManager, certificate, issuerCertificates);
+
+            serverImpl.emit("certificateUpdated", certificateGroupId, certificate);
+            return { statusCode: StatusCodes.Good, applyChangesRequired: true };
+        }
+    } finally {
+        serverImpl.operationInProgress = false;
+    }
+}

@@ -1,46 +1,61 @@
-/* istanbul ignore file */
-// tslint:disable:no-console
-import * as os from "os";
+/* c8 ignore start */
+import { createRequire } from "node:module";
 
-import { Namespace } from "node-opcua-address-space";
+// `require` does not exist in an ES module. It is kept rather than replaced by import()
+// because import() is async and resolves against the emitted .js, neither of which is
+// safe to assume at a call site a tool has not read. Converting one by hand is fine.
+const require = createRequire(import.meta.url);
+
+import os from "node:os";
+
+import { types } from "node:util";
+import type { Namespace } from "node-opcua-address-space";
 import { assert } from "node-opcua-assert";
 import { ObjectIds } from "node-opcua-constants";
-import { ServerEngine } from "node-opcua-server";
+import { make_warningLog } from "node-opcua-debug";
+import { type OPCUAServer, ServerEngine } from "node-opcua-server";
 import { StatusCodes } from "node-opcua-status-code";
 import { DataType, Variant } from "node-opcua-variant";
-// tslint:disable:no-var-requires
-const humanize = require("humanize");
+
+const warningLog = make_warningLog("vendor_diagnostic_nodes");
+
+import humanize from "humanize";
+
+interface UsageResult {
+    memory: number;
+    cpu: number;
+}
 
 /**
- * @method addVariableWithHumanizeText
+
  * @param namespace
  * @param options
  * @param options.browseName
  * @private
  */
+// This helper is unreachable in practice (install_optional_cpu_and_memory_usage_node has no callers
+// anywhere in the workspace) and its body doesn't actually match AddVariableOptions — it assumes
+// options.browseName is always a QualifiedNameOptions object (`.name.toString()`), but every call
+// site in this file passes a plain string. Typing this precisely would mean fixing that pre-existing
+// bug, which is out of scope for a lint pass on dead code.
+// biome-ignore lint/suspicious/noExplicitAny: see comment above
 function addVariableWithHumanizeText(namespace: Namespace, options: any) {
-
     assert(options.componentOf || options.organizedBy);
     assert(typeof options.description === "string");
 
     const variable = namespace.addVariable(options);
     // add the xxxAsText property
     namespace.addVariable({
-
         propertyOf: variable,
 
-        browseName: options.browseName.name.toString() + "AsText",
+        browseName: `${options.browseName.name.toString()}AsText`,
         dataType: "String",
-        description: options.description + " as text",
+        description: `${options.description} as text`,
         minimumSamplingInterval: options.minimumSamplingInterval,
         value: {
             get() {
                 const v = options.value.get();
-                if (v instanceof Variant) {
-                    return new Variant({ dataType: DataType.String, value: humanize.filesize(v.value) });
-                } else {
-                    return v;
-                }
+                return new Variant({ dataType: DataType.String, value: humanize.filesize(v.value) });
             }
         }
     });
@@ -50,51 +65,61 @@ function addVariableWithHumanizeText(namespace: Namespace, options: any) {
  *
  * optionally install a CPU Usage and Memory Usage node
  * ( condition : running on linux and require("usage")
- * @method install_optional_cpu_and_memory_usage_node
+
  * @param server {OPCUAServer}
  *
  */
-export function install_optional_cpu_and_memory_usage_node(server: any) {
-
+export function install_optional_cpu_and_memory_usage_node(server: OPCUAServer) {
     const engine = server.engine;
     assert(engine instanceof ServerEngine);
 
-    let usage: any;
+    let usage: {
+        lookup(pid: number, options: { keepHistory: boolean }, callback: (err: Error | null, result: UsageResult) => void): void;
+    } | null;
     try {
-        usage = require("usage");
+        const usage_module = "usage"; // we use a variable here to prevent error in webpack
+        usage = require(usage_module); // a warning will be generated here with webpack as the module name is not a litteral
     } catch (err) {
-        console.log("err", err.message);
+        if (types.isNativeError(err)) {
+            warningLog("err", err.message);
+        }
         usage = null;
         // xx return;
     }
 
     const addressSpace = engine.addressSpace;
+    if (!addressSpace) {
+        throw new Error("engine.addressSpace must be initialized");
+    }
 
     const namespace = addressSpace.getOwnNamespace();
 
     const vendorServerInfo = addressSpace.findNode(ObjectIds.Server_VendorServerInfo);
+    if (!vendorServerInfo) {
+        throw new Error("Server_VendorServerInfo node must exist in the address space");
+    }
 
     let usage_result = { memory: 0, cpu: 100 };
 
-    const pid = process.pid;
+    const pid = typeof process === "object" ? process.pid || 0 : 0;
 
     if (usage) {
-
         const options = { keepHistory: true };
         setInterval(() => {
-            usage.lookup(pid, options, (err: Error | null, result: any) => {
+            usage.lookup(pid, options, (err: Error | null, result: UsageResult) => {
                 usage_result = result;
-                console.log("result Used Memory: ", humanize.filesize(result.memory), " CPU ", Math.round(result.cpu), " %");
-                if (err) { console.log("err ", err); }
+                warningLog("result Used Memory: ", humanize.filesize(result.memory), " CPU ", Math.round(result.cpu), " %");
+                if (err) {
+                    warningLog("err ", err);
+                }
             });
         }, 1000);
 
         namespace.addVariable({
-
             componentOf: vendorServerInfo,
 
             browseName: "CPUUsage",
-            dataType: "Double",
+            dataType: DataType.Double,
             description: "Current CPU usage of the server process",
 
             minimumSamplingInterval: 1000,
@@ -113,7 +138,7 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
             componentOf: vendorServerInfo,
 
             browseName: "MemoryUsage",
-            dataType: "Number",
+            dataType: DataType.UInt32,
             description: "Current memory usage of the server process",
             minimumSamplingInterval: 1000,
             nodeId: "s=MemoryUsage",
@@ -126,22 +151,21 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
                 }
             }
         });
-
     } else {
-        console.log("skipping installation of cpu_usage and memory_usage nodes");
+        warningLog("skipping installation of cpu_usage and memory_usage nodes");
     }
 
     namespace.addVariable({
         componentOf: vendorServerInfo,
 
         browseName: "PercentageMemoryUsed",
-        dataType: "Number",
+        dataType: DataType.Double,
         description: "% of  memory used by the server",
         minimumSamplingInterval: 1000,
         nodeId: "s=PercentageMemoryUsed",
         value: {
             get() {
-                const percent_used = Math.round((os.totalmem() - os.freemem()) / os.totalmem() * 100);
+                const percent_used = Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100);
                 return new Variant({ dataType: DataType.Double, value: percent_used });
             }
         }
@@ -152,7 +176,7 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
 
         accessLevel: "CurrentRead",
         browseName: "SystemMemoryTotal",
-        dataType: "Number",
+        dataType: DataType.UInt64,
         description: "Total Memory usage of the server",
         minimumSamplingInterval: 1000,
         nodeId: "s=SystemMemoryTotal",
@@ -169,7 +193,7 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
 
         accessLevel: "CurrentRead",
         browseName: "SystemMemoryFree",
-        dataType: "Number",
+        dataType: "UInt64",
         description: "Free Memory usage of the server in MB",
         minimumSamplingInterval: 1000,
         nodeId: "s=SystemMemoryFree",
@@ -186,7 +210,7 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
 
         accessLevel: "CurrentRead",
         browseName: "NumberOfCPUs",
-        dataType: "Number",
+        dataType: "UInt32",
         description: "Number of cpus on the server",
         minimumSamplingInterval: 1000,
         nodeId: "s=NumberOfCPUs",
@@ -218,7 +242,7 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
 
         accessLevel: "CurrentRead",
         browseName: "BytesWritten",
-        dataType: "Number",
+        dataType: "UInt64",
         description: "number of bytes written by the server",
         minimumSamplingInterval: 1000,
         nodeId: "s=BytesWritten",
@@ -234,7 +258,7 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
 
         accessLevel: "CurrentRead",
         browseName: "BytesRead",
-        dataType: "Number",
+        dataType: "UInt64",
         description: "number of bytes read by the server",
         minimumSamplingInterval: 1000,
         nodeId: "s=BytesRead",
@@ -250,7 +274,7 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
 
         accessLevel: "CurrentRead",
         browseName: "TransactionsCount",
-        dataType: "Number",
+        dataType: "UInt32",
         description: "total number of transactions performed the server",
         minimumSamplingInterval: 1000,
         nodeId: "s=TransactionsCount",
@@ -276,5 +300,5 @@ export function install_optional_cpu_and_memory_usage_node(server: any) {
             }
         }
     });
-
 }
+/* c8 ignore stop */

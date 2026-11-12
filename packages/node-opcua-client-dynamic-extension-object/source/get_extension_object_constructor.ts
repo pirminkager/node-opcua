@@ -1,0 +1,34 @@
+import { AttributeIds, type QualifiedName } from "node-opcua-data-model";
+import type { NodeId } from "node-opcua-nodeid";
+import type { IBasicSessionAsync2 } from "node-opcua-pseudo-session";
+import type { AnyConstructorFunc } from "node-opcua-schemas";
+//
+import { getExtraDataTypeManager } from "./get_extra_data_type_manager.js";
+import { readDataTypeDefinitionAndBuildType } from "./private/populate_data_type_manager_104.js";
+
+/**
+ *
+ */
+export async function getExtensionObjectConstructor(
+    session: IBasicSessionAsync2,
+    dataTypeNodeId: NodeId
+): Promise<AnyConstructorFunc> {
+    const dataTypeManager = await getExtraDataTypeManager(session);
+
+    const dataTypeFactory = dataTypeManager.getDataTypeFactory(dataTypeNodeId.namespace);
+    const structureInfo = dataTypeFactory.getStructureInfoForDataType(dataTypeNodeId);
+    if (structureInfo) {
+        return structureInfo.constructor as unknown as AnyConstructorFunc;
+    }
+    const dataValue = await session.read({
+        nodeId: dataTypeNodeId,
+        attributeId: AttributeIds.BrowseName
+    });
+    const browseName = dataValue.value.value as QualifiedName;
+    if (!browseName.name) {
+        throw new Error(`Unexpected: BrowseName has no name for nodeId ${dataTypeNodeId.toString()}`);
+    }
+    await readDataTypeDefinitionAndBuildType(session, dataTypeNodeId, browseName.name, dataTypeManager, {});
+
+    return await dataTypeManager.getExtensionObjectConstructorFromDataType(dataTypeNodeId);
+}

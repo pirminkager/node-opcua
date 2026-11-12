@@ -1,5 +1,5 @@
 /**
- * @module node-opca-aggregates
+ * @module node-opcua-aggregates
  */
 //  excerpt from OPC Unified Architecture, Part 13 21 Release 1.04
 //
@@ -37,19 +37,18 @@
 // Bound Bad                   Does not return a Bad bound except as noted above
 // Bound Uncertain             Returned Uncertain_DataSubNormal if any Bad value(s) was/were skipped to
 //                             calculate the bounding value.
-import { UAVariable } from "node-opcua-address-space";
+import type { UAVariable } from "node-opcua-address-space";
 import { assert } from "node-opcua-assert";
 import { DataValue } from "node-opcua-data-value";
 import { StatusCode, StatusCodes } from "node-opcua-status-code";
 
-import { getAggregateData, interpolateValue } from "./common";
+import { getAggregateData, interpolateValue } from "./common.js";
 import {
     _findGoodDataValueBefore,
+    type AggregateConfigurationOptionsEx,
     adjustProcessingOptions,
-    AggregateConfigurationOptionsEx,
-    Interval, isBad,
-    isGood
-} from "./interval";
+    type Interval
+} from "./interval.js";
 
 /*
  For any intervals containing regions where the StatusCodes are Bad,
@@ -62,13 +61,12 @@ import {
  If for an interval neither ratio applies then that interval is Uncertain_DataSubNormal.
   */
 export function interpolatedValue(interval: Interval, options: AggregateConfigurationOptionsEx): DataValue {
-
     options = adjustProcessingOptions(options);
 
-    assert(options.hasOwnProperty("useSlopedExtrapolation"));
-    assert(options.hasOwnProperty("treatUncertainAsBad"));
+    assert(Object.hasOwn(options, "useSlopedExtrapolation"));
+    assert(Object.hasOwn(options, "treatUncertainAsBad"));
 
-    const bTreatUncertainAsBad = options.treatUncertainAsBad!;
+    const bTreatUncertainAsBad = options.treatUncertainAsBad || false;
 
     const steppedValue = (previousDataValue: DataValue): DataValue => {
         if (!previousDataValue.statusCode) {
@@ -77,10 +75,9 @@ export function interpolatedValue(interval: Interval, options: AggregateConfigur
         const interpValue = new DataValue({
             sourceTimestamp: interval.startTime,
             statusCode: StatusCodes.Bad,
-            value: previousDataValue.value,
+            value: previousDataValue.value
         });
-        interpValue.statusCode =
-            StatusCode.makeStatusCode(StatusCodes.UncertainDataSubNormal, "HistorianInterpolated");
+        interpValue.statusCode = StatusCode.makeStatusCode(StatusCodes.UncertainDataSubNormal, "HistorianInterpolated");
         return interpValue;
     };
 
@@ -93,7 +90,7 @@ export function interpolatedValue(interval: Interval, options: AggregateConfigur
             return new DataValue({
                 sourceTimestamp: interval.startTime,
                 statusCode: StatusCodes.BadNoData,
-                value: undefined,
+                value: undefined
             });
         }
         if (!options.useSlopedExtrapolation) {
@@ -108,19 +105,17 @@ export function interpolatedValue(interval: Interval, options: AggregateConfigur
         // else interpolate
         const interpVal = interpolateValue(prev2.dataValue, prev1.dataValue, interval.startTime);
 
-        // tslint:disable:no-bitwise
         if (prev2.index + 1 < prev1.index || prev1.index < interval.dataValues.length - 1) {
             // some bad data exist in between = change status code
-            const mask = 0x0000FFFFFF;
+            const mask = 0x0000ffffff;
             const extraBits = interpVal.statusCode.value & mask;
             interpVal.statusCode = StatusCode.makeStatusCode(StatusCodes.UncertainDataSubNormal, extraBits);
         }
 
         return interpVal;
-
     }
 
-    /* istanbul ignore next */
+    /* c8 ignore next */
     if (interval.index < 0 && interval.count === 0) {
         return new DataValue({
             sourceTimestamp: interval.startTime,
@@ -131,14 +126,14 @@ export function interpolatedValue(interval: Interval, options: AggregateConfigur
     const dataValue1 = interval.dataValues[interval.index];
 
     // if a non-Bad Raw value exists at the timestamp then it is the bounding value;
-    if (!isBad(dataValue1.statusCode) && interval.hasRawDataAsStart()) {
+    if (!dataValue1.statusCode.isBad() && interval.hasRawDataAsStart()) {
         return dataValue1;
-    }   
+    }
     // find the first non-Bad Raw value before the timestamp;
 
     // find previous good value
     const before = interval.beforeStartDataValue(bTreatUncertainAsBad);
-    if (isBad(before.dataValue.statusCode)) {
+    if (before.dataValue.statusCode.isBad()) {
         return new DataValue({
             sourceTimestamp: interval.startTime,
             statusCode: StatusCodes.BadNoData
@@ -166,16 +161,11 @@ export function interpolatedValue(interval: Interval, options: AggregateConfigur
     //   x is a value at ‘x’ and Tx is the timestamp associated with Vx.
     const interpolatedDataValue = interpolateValue(before.dataValue, next.dataValue, interval.startTime);
 
-    if (before.index + 1 < next.index
-        || !isGood(next.dataValue.statusCode)
-        || !isGood(before.dataValue.statusCode)
-    ) {
-        // tslint:disable:no-bitwise
+    if (before.index + 1 < next.index || !next.dataValue.statusCode.isGood() || !before.dataValue.statusCode.isGood()) {
         // some bad data exist in between = change status code
-        const mask = 0x0000FFFFFF;
+        const mask = 0x0000ffffff;
         const extraBits = interpolatedDataValue.statusCode.value & mask;
-        interpolatedDataValue.statusCode =
-            StatusCode.makeStatusCode(StatusCodes.UncertainDataSubNormal, extraBits);
+        interpolatedDataValue.statusCode = StatusCode.makeStatusCode(StatusCodes.UncertainDataSubNormal, extraBits);
     }
     // check if uncertain or bad value exist between before/next
     // todo
@@ -196,6 +186,6 @@ export function getInterpolatedData(
     startDate: Date,
     endDate: Date,
     callback: (err: Error | null, dataValues?: DataValue[]) => void
-) {
-    return getAggregateData(node, processingInterval, startDate, endDate, interpolatedValue, callback);
+): void {
+    getAggregateData(node, processingInterval, startDate, endDate, interpolatedValue, callback);
 }

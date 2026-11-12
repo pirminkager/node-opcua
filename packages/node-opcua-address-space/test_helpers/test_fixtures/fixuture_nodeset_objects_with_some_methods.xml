@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<UANodeSet Version="1.02" LastModified="2013-03-06T05:36:44.0862658Z" 
+<UANodeSet Version="1.02" LastModified="2013-03-06T05:36:44.0862658Z"
     xmlns="http://opcfoundation.org/UA/2011/03/UANodeSet.xsd">
-
+    <NamespaceUris>
+        <Uri>http://acme.com/UA/ACME</Uri>
+    </NamespaceUris>
     <Aliases>
         <Alias Alias="Boolean">i=1</Alias>
         <Alias Alias="SByte">i=2</Alias>
@@ -92,6 +94,13 @@
         <DisplayName>BaseDataType</DisplayName>
         <Description>Describes a value that can have any valid DataType.</Description>
         <References/>
+    </UADataType>
+
+    <UADataType NodeId="i=29" BrowseName="Enumeration" IsAbstract="true">
+        <DisplayName>Enumeration</DisplayName>
+        <References>
+            <Reference ReferenceType="HasSubtype" IsForward="false">i=24</Reference>
+        </References>
     </UADataType>
 
     <UADataType NodeId="i=26" BrowseName="Number" IsAbstract="true">
@@ -350,6 +359,14 @@
             <Reference ReferenceType="HasSubtype" IsForward="false">i=58</Reference>
         </References>
     </UAObjectType>
-
+    
+    <UAReferenceType NodeId="i=38" BrowseName="HasEncoding">
+        <DisplayName>HasEncoding</DisplayName>
+        <Documentation>https://reference.opcfoundation.org/v104/Core/docs/Part5/11.13</Documentation>
+        <References>
+          <Reference ReferenceType="HasSubtype" IsForward="false">i=32</Reference>
+        </References>
+        <InverseName>EncodingOf</InverseName>
+      </UAReferenceType>
 
 </UANodeSet>

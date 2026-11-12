@@ -1,35 +1,34 @@
-/* istanbul ignore file */
+/* c8 ignore start */
 /**
  * @module node-opcua-generator
  */
-// tslint:disable:max-line-length
-// tslint:disable:no-console
-import * as fs from "fs";
-import * as path from "path";
-import * as ts from "typescript";
-import { promisify } from "util";
+import fs from "node:fs";
 
+// node 14 onward : import { mkdir } from "fs/promises";
+const { mkdir } = fs.promises;
+
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { assert } from "node-opcua-assert";
 import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
-import { ConstructorFunc } from "node-opcua-factory";
+import type { ConstructorFunc } from "node-opcua-factory";
+// the classic compiler API, which TypeScript 7 no longer exposes: an aliased 5.x copy
+import ts from "typescript-5";
 
-import { get_class_tscript_filename, produce_tscript_code } from "./factory_code_generator";
+import { get_class_TScript_filename, produce_TScript_code } from "./factory_code_generator.js";
 
-const debugLog = make_debugLog(__filename);
-const doDebug = checkDebugFlag(__filename);
+const here = import.meta.dirname;
 
-const fileExists = promisify(fs.exists);
-const mkdir = promisify(fs.mkdir);
+const debugLog = make_debugLog("generator");
+const doDebug = checkDebugFlag("generator");
+doDebug;
 
 /**
  * @module opcua.miscellaneous
- * @class Factory
- * @static
  */
 
-function compileTscriptCode(typescriptFilename: string): string {
-
-    const content = fs.readFileSync(typescriptFilename, "ascii");
+function _compileTScriptCode(typescriptFilename: string): string {
+    const content = fs.readFileSync(typescriptFilename, "utf-8");
 
     const compilerOptions = {
         module: ts.ModuleKind.CommonJS,
@@ -48,13 +47,17 @@ function compileTscriptCode(typescriptFilename: string): string {
     const res1 = ts.transpileModule(content, { compilerOptions, moduleName: "myModule2" });
 
     const javascriptFilename = typescriptFilename.replace(/\.ts$/, ".js");
-    const sourcemapFilename = typescriptFilename.replace(/\.ts$/, ".js.map");
+    const sourceMapFilename = typescriptFilename.replace(/\.ts$/, ".js.map");
 
-    fs.writeFileSync(javascriptFilename, res1.outputText, "ascii");
-    fs.writeFileSync(sourcemapFilename, res1.sourceMapText!, "ascii");
+    fs.writeFileSync(javascriptFilename, res1.outputText, "utf-8");
+    if (!res1.sourceMapText) {
+        throw new Error("transpileModule did not produce a source map (sourceMap: true is set above)");
+    }
+    fs.writeFileSync(sourceMapFilename, res1.sourceMapText, "utf-8");
 
     return res1.outputText;
 }
+_compileTScriptCode;
 
 export const verbose = false;
 
@@ -62,7 +65,7 @@ function get_caller_source_filename() {
     // let's find source code where schema file is described
     // to do make change this
     // the line has the following shape:
-    //      'at blah (/home/toto/myfile.js:53:34)'
+    //      'at blah (/home/toto/myFile.js:53:34)'
     const err = new Error("");
     const re = /.*\((.*):[0-9]*:[0-9]*\)/g;
     if (!err.stack) {
@@ -82,13 +85,12 @@ function get_caller_source_filename() {
     return schemaFile;
 }
 
-export async function generateCode(schemaName: string, localSchemaFile: string, generatedCodeFolder?: string) {
-
-    const schemaTypescriptFile = schemaName + "_Schema.ts";
+export async function generateCode(schemaName: string, localSchemaFile: string, generatedCodeFolder?: string): Promise<void> {
+    const schemaTypescriptFile = `${schemaName}_Schema.ts`;
 
     const currentFolder = process.cwd();
     //
-    const localSchemaFileExists = await fileExists(localSchemaFile);
+    const localSchemaFileExists = fs.existsSync(localSchemaFile);
 
     if (!localSchemaFileExists) {
         throw new Error(`Cannot find source file for schema ${schemaTypescriptFile}`);
@@ -98,65 +100,66 @@ export async function generateCode(schemaName: string, localSchemaFile: string, 
         generatedCodeFolder = path.join(currentFolder, "_generated_");
     }
 
-    const generatedCodeFolderExists = await fileExists(generatedCodeFolder);
+    const generatedCodeFolderExists = fs.existsSync(generatedCodeFolder);
     if (!generatedCodeFolderExists) {
         await mkdir(generatedCodeFolder);
     }
 
-    const generatedTypescriptSource = path.join(generatedCodeFolder, "_" + schemaName + ".ts");
+    const generatedTypescriptSource = path.join(generatedCodeFolder, `_${schemaName}.ts`);
 
-    const generatedSourceExists = await fileExists(generatedTypescriptSource);
+    const generatedSourceExists = fs.existsSync(generatedTypescriptSource);
 
     let schemaFileIsNewer = false;
     let codeGeneratorIsNewer = true;
 
     if (generatedSourceExists) {
-
         const generatedSourceMtime = new Date(fs.statSync(generatedTypescriptSource).mtime).getTime();
 
         const schemaFileMtime = new Date(fs.statSync(localSchemaFile).mtime).getTime();
 
-        schemaFileIsNewer = (generatedSourceMtime <= schemaFileMtime);
+        schemaFileIsNewer = generatedSourceMtime <= schemaFileMtime;
 
-        let codeGeneratorScript = path.join(__dirname, "factory_code_generator.ts");
+        let codeGeneratorScript = path.join(here, "factory_code_generator.ts");
         if (!fs.existsSync(codeGeneratorScript)) {
-            codeGeneratorScript = path.join(__dirname, "factory_code_generator.js");
+            codeGeneratorScript = path.join(here, "factory_code_generator.js");
         }
 
-        assert(fs.existsSync(codeGeneratorScript), "cannot get code factory_code_generator" + codeGeneratorScript);
+        assert(fs.existsSync(codeGeneratorScript), `cannot get code factory_code_generator${codeGeneratorScript}`);
         const codeGeneratorScriptMtime = new Date(fs.statSync(codeGeneratorScript).mtime).getTime();
 
-        codeGeneratorIsNewer = (generatedSourceMtime <= codeGeneratorScriptMtime);
+        codeGeneratorIsNewer = generatedSourceMtime <= codeGeneratorScriptMtime;
     }
-    const generatedSourceIsOutdated = (!generatedSourceExists || codeGeneratorIsNewer || schemaFileIsNewer);
+    const generatedSourceIsOutdated = !generatedSourceExists || codeGeneratorIsNewer || schemaFileIsNewer;
 
     if (generatedSourceIsOutdated) {
-
-        const module = await import(localSchemaFile);
-        const schema = module[schemaName + "_Schema"];
+        // a file URL, not the path: an absolute Windows path starts "C:", which the ESM
+        // loader reads as a URL scheme and rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME. POSIX
+        // paths start with "/" and happen to resolve, which is why CI never saw this.
+        const module = await import(pathToFileURL(localSchemaFile).href);
+        const schema = module[`${schemaName}_Schema`];
 
         if (!schema) {
             throw new Error(`module must export a Schema with name ${schemaName}_Schema  in ${generatedTypescriptSource}`);
         }
 
-        debugLog(" generated_source_is_outdated ", schemaName, " to ", generatedTypescriptSource);
-        if (exports.verbose) {
+        // c8 ignore next
+        doDebug && debugLog(" generated_source_is_outdated ", schemaName, " to ", generatedTypescriptSource);
+        if (verbose) {
             console.log(" generating ", schemaName, " in ", generatedTypescriptSource);
         }
-        const localSchemaFile1 = path.join("../schemas", schemaName + "_schema");
-        produce_tscript_code(schema, localSchemaFile1, generatedTypescriptSource);
+        const localSchemaFile1 = path.join("../schemas", `${schemaName}_schema`);
+        produce_TScript_code(schema, localSchemaFile1, generatedTypescriptSource);
     }
 }
 
-export async function generateTypeScriptCodeFromSchema(schemaName: string) {
+export async function generateTypeScriptCodeFromSchema(schemaName: string): Promise<void> {
     const currentFolder = process.cwd();
-    const schemafilename = path.join(currentFolder, "schemas", schemaName + "_schema.ts");
+    const schemaFilename = path.join(currentFolder, "schemas", `${schemaName}_schema.ts`);
     const generatedCodeFolder = path.join(process.cwd(), "_generated_");
-    await generateCode(schemaName, schemafilename, generatedCodeFolder);
+    await generateCode(schemaName, schemaFilename, generatedCodeFolder);
 }
 
 export async function registerObject(schema: string, generateCodeFolder?: string): Promise<ConstructorFunc | null> {
-
     if (!schema.split) {
         console.log("error !", schema);
         // xx process.exit(1);
@@ -169,31 +172,29 @@ export async function registerObject(schema: string, generateCodeFolder?: string
 
         const defaultHint = path.join(path.dirname(callerFolder), "schemas");
         hintSchema.unshift(defaultHint);
-        generateCodeFolder = generateCodeFolder
-            ? generateCodeFolder
-            : path.join(path.dirname(callerFolder), "_generated_");
+        generateCodeFolder = generateCodeFolder ? generateCodeFolder : path.join(path.dirname(callerFolder), "_generated_");
     }
 
     const folderHint = hintSchema[0];
     schema = hintSchema[1];
 
-    const schemaName = schema + "_Schema";
-    const schemaFile = path.join(folderHint, schema + "_schema.ts");
-    const module = await import(schemaFile);
+    const schemaName = `${schema}_Schema`;
+    const schemaFile = path.join(folderHint, `${schema}_schema.ts`);
+    const module = await import(pathToFileURL(schemaFile).href);
     if (!module) {
-        throw new Error("cannot find " + schemaFile);
+        throw new Error(`cannot find ${schemaFile}`);
     }
-    const schemaObj = module[schemaName];
 
     await generateCode(schemaName, schemaFile, generateCodeFolder);
 
     return null;
 }
 
-export function unregisterObject(schema: any, folder: string) {
-    const generateTypeScriptSource = get_class_tscript_filename(schema.name, folder);
+export function unregisterObject(schema: { name: string }, folder: string): void {
+    const generateTypeScriptSource = get_class_TScript_filename(schema.name, folder);
     if (fs.existsSync(generateTypeScriptSource)) {
         fs.unlinkSync(generateTypeScriptSource);
         assert(!fs.existsSync(generateTypeScriptSource));
     }
 }
+/* c8 ignore stop */

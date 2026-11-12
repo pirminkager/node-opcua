@@ -1,130 +1,266 @@
 /**
  * @module node-opcua-secure-channel
  */
-// tslint:disable:variable-name
-// tslint:disable:no-console
-// tslint:disable:max-line-length
 
-import * as chalk from "chalk";
-import * as _ from "underscore";
-
+import { types } from "node:util";
+import chalk from "chalk";
 import { assert } from "node-opcua-assert";
 import { decodeExpandedNodeId, decodeString } from "node-opcua-basic-types";
 import { BinaryStream } from "node-opcua-binary-stream";
+import { SequenceHeader } from "node-opcua-chunkmanager";
 import {
     decryptBufferWithDerivedKeys,
-    DerivedKeys,
-    exploreCertificateInfo,
+    type IKeyOperations,
     makeSHA1Thumbprint,
-    PrivateKeyPEM,
-    reduceLength,
-    removePadding,
     verifyChunkSignatureWithDerivedKeys
-} from "node-opcua-crypto";
-import { checkDebugFlag, hexDump, make_debugLog } from "node-opcua-debug";
-import { BaseUAObject, constructObject, hasConstructor } from "node-opcua-factory";
-import { ExpandedNodeId } from "node-opcua-nodeid";
+} from "node-opcua-crypto/web";
+import { checkDebugFlag, hexDump, make_debugLog, make_warningLog } from "node-opcua-debug";
+import { type BaseUAObject, getStandardDataTypeFactory } from "node-opcua-factory";
+import type { ExpandedNodeId, NodeId } from "node-opcua-nodeid";
 import { analyseExtensionObject } from "node-opcua-packet-analyzer";
+import type { PacketInfo } from "node-opcua-packet-assembler";
 import {
     AsymmetricAlgorithmSecurityHeader,
+    CloseSecureChannelRequest,
     coerceMessageSecurityMode,
-    MessageSecurityMode,
-    CloseSecureChannelRequest
+    MessageSecurityMode
 } from "node-opcua-service-secure-channel";
-import { decodeStatusCode } from "node-opcua-status-code";
-import { MessageBuilderBase } from "node-opcua-transport";
+import { decodeStatusCode, type StatusCode, StatusCodes } from "node-opcua-status-code";
+import { doTraceChunk, MessageBuilderBase, type MessageBuilderBaseOptions, StatusCodes2 } from "node-opcua-transport";
+import { timestamp } from "node-opcua-utils";
+import { retainEncodedBody } from "./encoded_message_body.js";
 
-import { SequenceHeader } from "node-opcua-chunkmanager";
-import { chooseSecurityHeader, SymmetricAlgorithmSecurityHeader } from "./secure_channel_service";
-
-import { SecurityHeader } from "./secure_message_chunk_manager";
+import { retainEncodedNodesToWrite } from "./encoded_nodes_to_write.js";
+import { SymmetricAlgorithmSecurityHeader } from "./secure_channel_service.js";
+import { chooseSecurityHeader, type SecurityHeader } from "./secure_message_chunk_manager.js";
 import {
-    asymmetricVerifyChunk, coerceSecurityPolicy,
-    CryptoFactory,
-    // DerivedKeys,
-    fromURI,
+    asymmetricDecryptWithKeyOps,
+    asymmetricDecryptWithKeyOpsSync,
+    asymmetricVerifyChunk,
+    type CryptoFactory,
+    coerceSecurityPolicy,
     getCryptoFactory,
     SecurityPolicy
-} from "./security_policy";
+} from "./security_policy.js";
+import type { IDerivedKeyProvider } from "./token_stack.js";
+import { reduceLength, removePadding } from "./utils.js";
 
-const debugLog = make_debugLog(__filename);
-const doDebug = checkDebugFlag(__filename);
+const debugLog = make_debugLog("SecureChannel");
+const doDebug = checkDebugFlag("SecureChannel");
+const warningLog = make_warningLog("SecureChannel");
 
-export interface SecurityToken {
-    tokenId: number;
-    expired?: boolean;
-    revisedLifetime: number;
+/**
+ * construct the message to decode. The object is decoded right away, so its fields are not
+ * initialised from the schema (the generated constructors, and the hand-written ones such as
+ * QualifiedName, take `null` for that). A constructor that does not take `null` gets the usual call.
+ */
+function constructForDecoding(binaryEncodingNodeId: NodeId): BaseUAObject {
+    const factory = getStandardDataTypeFactory();
+    const Constructor = factory.getConstructor(binaryEncodingNodeId) as (new (options?: null) => BaseUAObject) | null;
+    if (!Constructor) {
+        return factory.constructObject(binaryEncodingNodeId) as BaseUAObject; // throws as it always did
+    }
+    try {
+        return new Constructor(null);
+    } catch {
+        return new Constructor();
+    }
 }
 
 const defaultObjectFactory = {
-    constructObject,
-    hasConstructor
+    constructObject(binaryEncodingNodeId: NodeId): BaseUAObject {
+        return constructForDecoding(binaryEncodingNodeId);
+    },
+    hasConstructor(binaryEncodingNodeId: ExpandedNodeId): boolean {
+        return getStandardDataTypeFactory().hasConstructor(binaryEncodingNodeId);
+    }
 };
 
 export interface ObjectFactory {
-    constructObject: (expandedNodeId: ExpandedNodeId) => BaseUAObject;
-    hasConstructor: (expandedNodeId: ExpandedNodeId) => boolean;
+    constructObject: (binaryEncodingNodeId: ExpandedNodeId) => BaseUAObject;
+    hasConstructor: (binaryEncodingNodeId: ExpandedNodeId) => boolean;
 }
-
-export interface MessageBuilderOptions {
-    securityMode?: MessageSecurityMode;
-    privateKey?: PrivateKeyPEM;
-    objectFactory?: ObjectFactory;
-    signatureLength?: number;
-    name?: string;
-}
-
-export interface SecurityTokenAndDerivedKeys {
-    securityToken: SecurityToken;
-    derivedKeys: DerivedKeys | null;
-}
-
-const invalidPrivateKey = "<invalid>";
-let counter = 0;
 
 /**
- * @class MessageBuilder
- * @extends MessageBuilderBase
- * @constructor
- *
- * @param options
- * @param options.securityMode {MessageSecurityMode} the security Mode
- * @param [options.objectFactory=factories] a object that provides a constructObject(id) method
+ * @internal node-opcua plumbing: may change in a minor release. Applications
+ * configure security through OPCUAClient/OPCUAServer options, not here.
  */
-export class MessageBuilder extends MessageBuilderBase {
+export interface MessageBuilderOptions extends MessageBuilderBaseOptions {
+    securityMode?: MessageSecurityMode;
+    /**
+     * The receiver's key as an opaque sign/decrypt object, used to decrypt
+     * encrypted OpenSecureChannel chunks. The MessageBuilder never sees raw
+     * key material. A provider with the synchronous fast path (local keys)
+     * decrypts inline; an asynchronous-only provider (HSM/KMS) is awaited
+     * through the chunk pump, later chunks queuing in arrival order.
+     */
+    keyOperations?: IKeyOperations;
+    objectFactory?: ObjectFactory;
+    signatureLength?: number;
+    name: string;
+}
 
+let counter = 0;
+
+export interface MessageBuilder extends MessageBuilderBase {
+    on(eventName: "startChunk", eventHandler: (info: PacketInfo, data: Buffer) => void): this;
+    on(eventName: "chunk", eventHandler: (chunk: Buffer) => void): this;
+    on(eventName: "error", eventHandler: (err: Error, statusCode: StatusCode, requestId: number | null) => void): this;
+    on(eventName: "full_message_body", eventHandler: (fullMessageBody: Buffer) => void): this;
+    on(
+        eventName: "message",
+        eventHandler: (
+            obj: BaseUAObject,
+            msgType: string,
+            securityHeader: SecurityHeader,
+            requestId: number,
+            channelId: number
+        ) => void
+    ): this;
+    on(eventName: "abandon", eventHandler: (requestId: number) => void): this;
+
+    on(eventName: "invalid_message", eventHandler: (obj: BaseUAObject) => void): this;
+    on(eventName: "invalid_sequence_number", eventHandler: (expectedSequenceNumber: number, sequenceNumber: number) => void): this;
+    on(eventName: "new_token", eventHandler: (tokenId: number) => void): this;
+
+    once(eventName: "startChunk", eventHandler: (info: PacketInfo, data: Buffer) => void): this;
+    once(eventName: "chunk", eventHandler: (chunk: Buffer) => void): this;
+    once(eventName: "error", eventHandler: (err: Error, statusCode: StatusCode, requestId: number | null) => void): this;
+    once(eventName: "full_message_body", eventHandler: (fullMessageBody: Buffer) => void): this;
+    once(
+        eventName: "message",
+        eventHandler: (
+            obj: BaseUAObject,
+            msgType: string,
+            securityHeader: SecurityHeader,
+            requestId: number,
+            channelId: number
+        ) => void
+    ): this;
+    once(eventName: "abandon", eventHandler: (requestId: number) => void): this;
+
+    once(eventName: "invalid_message", eventHandler: (obj: BaseUAObject) => void): this;
+    once(
+        eventName: "invalid_sequence_number",
+        eventHandler: (expectedSequenceNumber: number, sequenceNumber: number) => void
+    ): this;
+    once(eventName: "new_token", eventHandler: (tokenId: number) => void): this;
+
+    prependListener(eventName: "startChunk", eventHandler: (info: PacketInfo, data: Buffer) => void): this;
+    prependListener(eventName: "chunk", eventHandler: (chunk: Buffer) => void): this;
+    prependListener(eventName: "error", eventHandler: (err: Error, statusCode: StatusCode, requestId: number | null) => void): this;
+    prependListener(eventName: "full_message_body", eventHandler: (fullMessageBody: Buffer) => void): this;
+    prependListener(
+        eventName: "message",
+        eventHandler: (
+            obj: BaseUAObject,
+            msgType: string,
+            securityHeader: SecurityHeader,
+            requestId: number,
+            channelId: number
+        ) => void
+    ): this;
+    prependListener(eventName: "abandon", eventHandler: (requestId: number) => void): this;
+
+    prependListener(eventName: "invalid_message", eventHandler: (obj: BaseUAObject) => void): this;
+    prependListener(
+        eventName: "invalid_sequence_number",
+        eventHandler: (expectedSequenceNumber: number, sequenceNumber: number) => void
+    ): this;
+    prependListener(eventName: "new_token", eventHandler: (tokenId: number) => void): this;
+
+    prependOnceListener(eventName: "startChunk", eventHandler: (info: PacketInfo, data: Buffer) => void): this;
+    prependOnceListener(eventName: "chunk", eventHandler: (chunk: Buffer) => void): this;
+    prependOnceListener(
+        eventName: "error",
+        eventHandler: (err: Error, statusCode: StatusCode, requestId: number | null) => void
+    ): this;
+    prependOnceListener(eventName: "full_message_body", eventHandler: (fullMessageBody: Buffer) => void): this;
+    prependOnceListener(
+        eventName: "message",
+        eventHandler: (
+            obj: BaseUAObject,
+            msgType: string,
+            securityHeader: SecurityHeader,
+            requestId: number,
+            channelId: number
+        ) => void
+    ): this;
+    prependOnceListener(eventName: "abandon", eventHandler: (requestId: number) => void): this;
+
+    prependOnceListener(eventName: "invalid_message", eventHandler: (obj: BaseUAObject) => void): this;
+    prependOnceListener(
+        eventName: "invalid_sequence_number",
+        eventHandler: (expectedSequenceNumber: number, sequenceNumber: number) => void
+    ): this;
+    prependOnceListener(eventName: "new_token", eventHandler: (tokenId: number) => void): this;
+
+    emit(eventName: "startChunk", info: PacketInfo, data: Buffer): boolean;
+    emit(eventName: "chunk", chunk: Buffer): boolean;
+    emit(eventName: "error", err: Error, statusCode: StatusCode, requestId: number | null): boolean;
+    emit(eventName: "full_message_body", fullMessageBody: Buffer): boolean;
+    emit(
+        eventName: "message",
+        obj: BaseUAObject,
+        msgType: string,
+        securityHeader: SecurityHeader,
+        requestId: number,
+        channelId: number
+    ): boolean;
+    emit(eventName: "invalid_message", object: BaseUAObject): boolean;
+    emit(eventName: "invalid_sequence_number", expectedSequenceNumber: number, sequenceNumber: number): boolean;
+    emit(eventName: "new_token", tokenId: number): boolean;
+    emit(eventName: "abandon"): boolean;
+}
+
+/**
+ * @internal node-opcua plumbing: may change in a minor release.
+ */
+// biome-ignore lint/suspicious/noUnsafeDeclarationMerging: interface adds typed members/overloads for this class
+export class MessageBuilder extends MessageBuilderBase {
     public securityPolicy: SecurityPolicy;
     public securityMode: MessageSecurityMode;
-    public cryptoFactory: CryptoFactory | null;
     public securityHeader?: SecurityHeader;
 
     protected id: string;
-    private readonly objectFactory: ObjectFactory;
-    private _previousSequenceNumber: number;
-    private _tokenStack: SecurityTokenAndDerivedKeys[];
-    private privateKey: PrivateKeyPEM;
+    /**
+     * @internal a MSG request its server answers from its bytes, without its objects: called with the
+     * numeric id of its type (namespace 0), the message body and the offset of its fields; true when it did
+     */
+    public rawRequestHandler: ((typeId: number, body: Buffer, offset: number) => boolean) | null = null;
+    readonly #objectFactory: ObjectFactory;
+    #previousSequenceNumber: number;
+    readonly #derivedKeyProvider: IDerivedKeyProvider;
+    #keyOperations: IKeyOperations | null;
 
-    constructor(options: MessageBuilderOptions) {
-
+    /**
+     *
+     * @param derivedKeyProvider the key for client signing verification
+     * @param options
+     */
+    constructor(derivedKeyProvider: IDerivedKeyProvider, options: MessageBuilderOptions) {
         super(options);
+
+        this.#derivedKeyProvider = derivedKeyProvider;
+
         options = options || {};
 
         this.id = (options.name ? options.name : "Id") + counter++;
 
-        this.privateKey = options.privateKey || invalidPrivateKey;
-
-        this.cryptoFactory = null;
-
-        this.securityPolicy = SecurityPolicy.Invalid; // not known yet
+        this.#keyOperations = options.keyOperations || null;
+        this.securityPolicy = SecurityPolicy.Invalid; // not known yet, we will need to call setSecurity
         this.securityMode = options.securityMode || MessageSecurityMode.Invalid; // not known yet
-        this.objectFactory = options.objectFactory || defaultObjectFactory;
-        assert(_.isFunction(this.objectFactory.constructObject), " the objectFactory must provide a constructObject method");
-        this._previousSequenceNumber = -1; // means unknown
-        assert(_.isFinite(this._previousSequenceNumber));
-        this._tokenStack = [];
+        this.#objectFactory = options.objectFactory || defaultObjectFactory;
+        assert(
+            typeof this.#objectFactory.constructObject === "function",
+            " the objectFactory must provide a constructObject method"
+        );
+        this.#previousSequenceNumber = -1; // means unknown
+        assert(Number.isFinite(this.#previousSequenceNumber));
     }
 
-    public setSecurity(securityMode: MessageSecurityMode, securityPolicy: SecurityPolicy) {
+    public setSecurity(securityMode: MessageSecurityMode, securityPolicy: SecurityPolicy): void {
+        // can only be called once
         assert(this.securityMode === MessageSecurityMode.Invalid, "security already set");
         this.securityPolicy = coerceSecurityPolicy(securityPolicy);
         this.securityMode = coerceMessageSecurityMode(securityMode);
@@ -132,158 +268,237 @@ export class MessageBuilder extends MessageBuilderBase {
         assert(this.securityMode !== MessageSecurityMode.Invalid);
     }
 
-    public dispose() {
+    public dispose(): void {
         super.dispose();
-        // xx this.securityPolicy = undefined;
-        // xx this.securityMode = null;
-        // xx this.objectFactory = null;
-        this.cryptoFactory = null;
         this.securityHeader = undefined;
-        this._tokenStack = [];
-        this.privateKey = invalidPrivateKey;
-
+        this.#keyOperations = null;
     }
 
-    public pushNewToken(securityToken: SecurityToken, derivedKeys: DerivedKeys | null) {
+    protected override _read_headersEx(binaryStream: BinaryStream): boolean | Promise<boolean> {
+        if (!super._read_headers(binaryStream)) {
+            return false;
+        }
 
-        assert(securityToken.hasOwnProperty("tokenId"));
+        /* c8 ignore next */
+        if (!this.messageHeader) {
+            throw new Error("internal error");
+        }
 
-        // TODO: make sure this list doesn't grow indefinitely
-        this._tokenStack = this._tokenStack || [];
-        assert(this._tokenStack.length === 0 || this._tokenStack[0].securityToken.tokenId !== securityToken.tokenId);
-        this._tokenStack.push({
-            derivedKeys,
-            securityToken
-        });
-        /* istanbul ignore next */
-        if (doDebug) {
-            debugLog("id=", this.id, chalk.cyan("Pushing new token with id "), securityToken.tokenId, this.tokenIds());
+        try {
+            const msgType = this.messageHeader.msgType;
+
+            if (msgType === "HEL" || msgType === "ACK") {
+                this.securityPolicy = SecurityPolicy.None;
+            } else if (msgType === "ERR") {
+                // extract Error StatusCode and additional message
+                binaryStream.length = 8;
+                const errorCode = decodeStatusCode(binaryStream);
+                const message = decodeString(binaryStream);
+
+                /* c8 ignore next */
+                if (doDebug) {
+                    debugLog(chalk.red.bold(" ERROR RECEIVED FROM SENDER"), chalk.cyan(errorCode.toString()), message);
+                    debugLog(hexDump(binaryStream.buffer));
+                }
+                if (doTraceChunk) {
+                    warningLog(
+                        timestamp(),
+                        chalk.red("   >$$ "),
+                        chalk.red(this.messageHeader.msgType),
+                        chalk.red(`nbChunk = ${this.messageChunks.length.toString().padStart(3)}`),
+                        chalk.red(`totalLength = ${this.totalMessageSize.toString().padStart(8)}`),
+                        "l=",
+                        this.messageHeader.length.toString().padStart(6),
+                        errorCode.toString(),
+                        message
+                    );
+                }
+                return true;
+            } else {
+                this.securityHeader = chooseSecurityHeader(msgType);
+                this.securityHeader.decode(binaryStream);
+
+                if (msgType === "OPN") {
+                    const asymmetricAlgorithmSecurityHeader = this.securityHeader as AsymmetricAlgorithmSecurityHeader;
+
+                    const securityPolicyFromResponse = coerceSecurityPolicy(asymmetricAlgorithmSecurityHeader.securityPolicyUri);
+                    if (securityPolicyFromResponse === SecurityPolicy.Invalid) {
+                        warningLog("Invalid Security Policy", this.securityPolicy);
+                        return this._report_error(StatusCodes2.BadSecurityChecksFailed, "Invalid Security Policy (1)");
+                    }
+                    if (this.securityPolicy === SecurityPolicy.Invalid) {
+                        this.securityPolicy = securityPolicyFromResponse;
+                    }
+                    if (securityPolicyFromResponse !== this.securityPolicy) {
+                        warningLog("Invalid Security Policy", this.securityPolicy);
+                        return this._report_error(StatusCodes2.BadSecurityChecksFailed, "Invalid Security Policy (2)");
+                    }
+                }
+
+                const decrypted = this.#_decrypt(binaryStream);
+                if (decrypted instanceof Promise) {
+                    // remote (async-only) key-operations provider: finish the
+                    // header processing once the OPN payload is decrypted
+                    return decrypted.then(
+                        (ok) => (ok ? this.#_after_decrypt(binaryStream) : false),
+                        (err: Error) => {
+                            warningLog(chalk.red("Error"), err.message);
+                            return this._report_error(StatusCodes2.BadTcpInternalError, `Internal Error ${err.message}`);
+                        }
+                    );
+                }
+                if (!decrypted) {
+                    return false;
+                }
+                return this.#_after_decrypt(binaryStream);
+            }
+            return true;
+        } catch (err) {
+            warningLog(chalk.red("Error"), (err as Error).message);
+            return this._report_error(StatusCodes2.BadTcpInternalError, `Internal Error ${(err as Error).message}`);
         }
     }
 
-    protected _read_headers(binaryStream: BinaryStream): boolean {
-
-        super._read_headers(binaryStream);
-
-        assert(binaryStream.length === 12);
-
-        const msgType = this.messageHeader.msgType;
-
-        if (msgType === "HEL" || msgType === "ACK") {
-
-            this.securityPolicy = SecurityPolicy.None;
-        } else if (msgType === "ERR") {
-
-            // extract Error StatusCode and additional message
-            binaryStream.length = 8;
-            const errorCode = decodeStatusCode(binaryStream);
-            const message = decodeString(binaryStream);
-
-            /* istanbul ignore next */
-            if (doDebug) {
-                debugLog(chalk.red.bold(" ERROR RECEIVED FROM SENDER"), chalk.cyan(errorCode.toString()), message);
-                debugLog(hexDump(binaryStream.buffer));
+    /** the tail of header processing, once the (possibly awaited) decryption is done. */
+    #_after_decrypt(binaryStream: BinaryStream): boolean {
+        try {
+            // c8 ignore next
+            if (!this.messageHeader) {
+                throw new Error("internal error");
             }
-            return true;
-
-        } else {
-
-            this.securityHeader = chooseSecurityHeader(msgType);
-            this.securityHeader.decode(binaryStream);
-
-            if (msgType === "OPN") {
-                const asymmetricAlgorithmSecurityHeader = this.securityHeader as AsymmetricAlgorithmSecurityHeader;
-                this.securityPolicy = fromURI(asymmetricAlgorithmSecurityHeader.securityPolicyUri);
-                this.cryptoFactory = getCryptoFactory(this.securityPolicy);
-            }
-
-            if (!this._decrypt(binaryStream)) {
-                return false;
-            }
-
             this.sequenceHeader = new SequenceHeader();
             this.sequenceHeader.decode(binaryStream);
 
-            /* istanbul ignore next */
+            /* c8 ignore next */
             if (doDebug) {
                 debugLog(" Sequence Header", this.sequenceHeader);
             }
-
-            this._validateSequenceNumber(this.sequenceHeader.sequenceNumber);
+            /* c8 ignore next */
+            if (doTraceChunk) {
+                console.log(
+                    chalk.cyan(timestamp()),
+                    chalk.green("   >$$ "),
+                    chalk.green(this.messageHeader.msgType),
+                    chalk.green(`nbChunk = ${this.messageChunks.length.toString().padStart(3)}`),
+                    chalk.green(`totalLength = ${this.totalMessageSize.toString().padStart(8)}`),
+                    "l=",
+                    this.messageHeader.length.toString().padStart(6),
+                    "s=",
+                    this.sequenceHeader.sequenceNumber.toString().padEnd(4),
+                    "r=",
+                    this.sequenceHeader.requestId.toString().padEnd(4)
+                );
+            }
+            if (!this.#_validateSequenceNumber(this.sequenceHeader.sequenceNumber)) {
+                return false;
+            }
+            return true;
+        } catch (err) {
+            warningLog(chalk.red("Error"), (err as Error).message);
+            return this._report_error(StatusCodes2.BadTcpInternalError, `Internal Error ${(err as Error).message}`);
         }
-        return true;
     }
 
-    protected _decodeMessageBody(fullMessageBody: Buffer): boolean {
+    protected override _decodeMessageBody(fullMessageBody: Buffer): boolean {
+        // c8 ignore next
+        if (!this.messageHeader || !this.securityHeader) {
+            return this._report_error(StatusCodes2.BadTcpInternalError, "internal error");
+        }
 
-        const binaryStream = new BinaryStream(fullMessageBody);
         const msgType = this.messageHeader.msgType;
+        /* c8 ignore next */
+        if (msgType === "HEL" || msgType === "ACK" || msgType === "ERR") {
+            // invalid message type
+            return this._report_error(StatusCodes2.BadTcpMessageTypeInvalid, "Invalid message type ( HEL/ACK/ERR )");
+        }
+        if (!this.sequenceHeader) {
+            return this._report_error(StatusCodes2.BadTcpInternalError, "internal error: sequenceHeader not decoded yet");
+        }
+        const sequenceHeader = this.sequenceHeader;
 
-        if (msgType === "ERR") {
-            // invalid message type
-            this._report_error("ERROR RECEIVED");
-            return false;
-        }
-        if (msgType === "HEL" || msgType === "ACK") {
-            // invalid message type
-            this._report_error("Invalid message type ( HEL/ACK )");
-            return false;
-        }
-        if (msgType === "CLO" && fullMessageBody.length === 0) {
+        if (msgType === "CLO" && fullMessageBody.length === 0 && this.sequenceHeader) {
             // The Client closes the connection by sending a CloseSecureChannel request and closing the
             // socket gracefully. When the Server receives this Message, it shall release all resources
             // allocated for the channel. The body of the CloseSecureChannel request is empty. The Server
             // does not send a CloseSecureChannel response.
             const objMessage1 = new CloseSecureChannelRequest();
-            this.emit("message", objMessage1, msgType, this.sequenceHeader!.requestId, this.channelId);
+            this.emit("message", objMessage1, msgType, this.securityHeader, this.sequenceHeader.requestId, this.channelId);
             return true;
         }
+
+        const binaryStream = new BinaryStream(fullMessageBody);
+
         // read expandedNodeId:
-        const id = decodeExpandedNodeId(binaryStream);
-
-        if (!this.objectFactory.hasConstructor(id)) {
-            this._report_error("cannot construct object with nodeID " + id);
-            return false;
-        }
-
-        let objMessage;
+        let id: ExpandedNodeId;
+        let requestHeaderStart = 0;
         try {
-
-            // construct the object
-            objMessage = this.objectFactory.constructObject(id);
+            id = decodeExpandedNodeId(binaryStream);
+            requestHeaderStart = binaryStream.length;
         } catch (err) {
-            this._report_error("cannot construct object with nodeID " + id);
-            return false;
+            // this may happen if the message is not well formed or has been altered
+            // we better off reporting an error and abort the communication
+            return this._report_error(
+                StatusCodes2.BadTcpInternalError,
+                `decodeExpandedNodeId ${types.isNativeError(err) ? err.message : ""}`
+            );
         }
+
+        if (
+            this.rawRequestHandler &&
+            msgType === "MSG" &&
+            id.namespace === 0 &&
+            typeof id.value === "number" &&
+            this.rawRequestHandler(id.value, fullMessageBody, requestHeaderStart)
+        ) {
+            return true;
+        }
+
+        if (!this.#objectFactory.hasConstructor(id)) {
+            // the datatype NodeId is not supported by the server and unknown in the factory
+            // we better off reporting an error and abort the communication
+            return this._report_error(StatusCodes.BadNotSupported, `cannot construct object with nodeID ${id.toString()}`);
+        }
+
         // construct the object
+        const objMessage = this.#objectFactory.constructObject(id);
 
         if (!objMessage) {
-            this._report_error("cannot construct object with nodeID " + id);
-            return false;
-
+            return this._report_error(StatusCodes.BadNotSupported, `cannot construct object with nodeID ${id}`);
         } else {
-
-            if (this._safe_decode_message_body(fullMessageBody, objMessage, binaryStream)) {
-
-                /* istanbul ignore next */
-                if (!this.sequenceHeader) {
-                    throw new Error("internal error");
+            if (this.#_safe_decode_message_body(fullMessageBody, objMessage, binaryStream)) {
+                retainEncodedBody(objMessage, objMessage.schema.name, fullMessageBody);
+                const nodesToWrite = (objMessage as { nodesToWrite?: unknown[] | null }).nodesToWrite;
+                if (objMessage.schema.name === "WriteRequest" && nodesToWrite && nodesToWrite.length > 0) {
+                    try {
+                        retainEncodedNodesToWrite(nodesToWrite, fullMessageBody, requestHeaderStart);
+                    } catch {
+                        // without them, the WriteValues are encoded again where needed
+                    }
                 }
-
-                /* istanbul ignore next */
+                /* c8 ignore next */
                 if (doDebug) {
+                    const o = objMessage as BaseUAObject & {
+                        responseHeader?: { requestHandle: unknown };
+                        requestHeader?: { requestHandle: unknown };
+                    };
+                    const requestHandle = o.responseHeader
+                        ? o.responseHeader.requestHandle
+                        : o.requestHeader
+                          ? o.requestHeader.requestHandle
+                          : "";
 
-                    const o = (objMessage as any);
-                    const requestHandle = o.responseHeader ? o.responseHeader.requestHandle :
-                        (o.requestHeader ? o.requestHeader.requestHandle : "");
-
-                    debugLog(this.id, "message size =", ("" + this.totalMessageSize).padEnd(8),
-                        " body size   =", ("" + this.totalBodySize).padEnd(8),
-                        " requestHandle = ", requestHandle,
-                        objMessage.constructor.name);
+                    debugLog(
+                        this.id,
+                        "message size =",
+                        `${this.totalMessageSize}`.padEnd(8),
+                        " body size   =",
+                        `${this.totalBodySize}`.padEnd(8),
+                        " requestHandle = ",
+                        requestHandle,
+                        objMessage.constructor.name
+                    );
                 }
                 try {
-
                     /**
                      * notify the observers that a full message has been received
                      * @event message
@@ -291,45 +506,59 @@ export class MessageBuilder extends MessageBuilderBase {
                      * @param  msgType the message type ( "HEL","ACK","OPN","CLO" or "MSG" )
                      * @param  the request Id
                      */
-                    this.emit("message", objMessage, msgType, this.sequenceHeader.requestId, this.channelId);
+                    this.emit("message", objMessage, msgType, this.securityHeader, sequenceHeader.requestId, this.channelId);
                 } catch (err) {
                     // this code catches a uncaught exception somewhere in one of the event handler
                     // this indicates a bug in the code that uses this class
                     // please check the stack trace to find the problem
 
-                    /* istanbul ignore next */
+                    /* c8 ignore next */
                     if (doDebug) {
                         debugLog(err);
                     }
-                    debugLog(chalk.red("MessageBuilder : ERROR DETECTED IN event handler"));
-                    debugLog(err.stack);
+                    warningLog(chalk.red("MessageBuilder : ERROR DETECTED IN 'message' event handler"), (err as Error).message);
+                    if (types.isNativeError(err)) {
+                        warningLog(err.message);
+                        // warningLog(err.stack);
+                    }
                 }
             } else {
-                const message = "cannot decode message  for valid object of type " + id.toString() + " " + objMessage.constructor.name;
-                console.log(message);
-                this._report_error(message);
-                return false;
+                warningLog(`cannot decode message  for valid object of type ${id.toString()} ${objMessage.constructor.name}`);
+                this.emit("invalid_message", objMessage);
+                // c8 ignore next
+                doDebug &&
+                    debugLog(
+                        this.id,
+                        "message size =",
+                        `${this.totalMessageSize}`.padEnd(8),
+                        " body size   =",
+                        `${this.totalBodySize}`.padEnd(8),
+                        objMessage.constructor.name
+                    );
+                warningLog(objMessage.toString());
+
+                // we don't report an error here, we just ignore the message
+                return false; // this._report_error(message);
             }
         }
         return true;
     }
 
-    private _validateSequenceNumber(sequenceNumber: number) {
-
+    #_validateSequenceNumber(sequenceNumber: number): boolean {
         // checking that sequenceNumber is increasing
-        assert(_.isFinite(this._previousSequenceNumber));
-        assert(_.isFinite(sequenceNumber) && sequenceNumber >= 0);
+        assert(Number.isFinite(this.#previousSequenceNumber));
+        assert(Number.isFinite(sequenceNumber) && sequenceNumber >= 0);
 
-        let expectedSequenceNumber;
-        if (this._previousSequenceNumber !== -1) {
-
-            expectedSequenceNumber = this._previousSequenceNumber + 1;
+        let expectedSequenceNumber: number;
+        if (this.#previousSequenceNumber !== -1) {
+            expectedSequenceNumber = this.#previousSequenceNumber + 1;
 
             if (expectedSequenceNumber !== sequenceNumber) {
-                const errMessage = "Invalid Sequence Number found ( expected " + expectedSequenceNumber + ", got " + sequenceNumber + ")";
+                const errMessage = `Invalid Sequence Number found ( expected ${expectedSequenceNumber}, got ${sequenceNumber})`;
 
-                /* istanbul ignore next */
-                debugLog(chalk.red.bold(errMessage));
+                /* c8 ignore next */
+                // c8 ignore next
+                doDebug && debugLog(chalk.red.bold(errMessage));
                 /**
                  * notify the observers that a message with an invalid sequence number has been received.
                  * @event invalid_sequence_number
@@ -337,214 +566,226 @@ export class MessageBuilder extends MessageBuilderBase {
                  * @param  actual sequence Number
                  */
                 this.emit("invalid_sequence_number", expectedSequenceNumber, sequenceNumber);
+                return this._report_error(StatusCodes2.BadTcpInternalError, errMessage);
             }
             // todo : handle the case where sequenceNumber wraps back to < 1024
         }
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (doDebug) {
-            debugLog(chalk.yellow.bold("" + this.id + " Sequence Number = "), sequenceNumber);
+            debugLog(chalk.yellow.bold(`${this.id} Sequence Number = `), sequenceNumber);
         }
-        this._previousSequenceNumber = sequenceNumber;
+        this.#previousSequenceNumber = sequenceNumber;
+        return true;
     }
 
-    private _decrypt_OPN(binaryStream: BinaryStream): boolean {
-
+    #_decrypt_OPN(binaryStream: BinaryStream): boolean | Promise<boolean> {
         assert(this.securityPolicy !== SecurityPolicy.None);
         assert(this.securityPolicy !== SecurityPolicy.Invalid);
         assert(this.securityMode !== MessageSecurityMode.None);
         assert(this.securityHeader instanceof AsymmetricAlgorithmSecurityHeader);
 
-        const asymmetricAlgorithmSecurityHeader = this.securityHeader! as AsymmetricAlgorithmSecurityHeader;
+        const asymmetricAlgorithmSecurityHeader = this.securityHeader as AsymmetricAlgorithmSecurityHeader;
 
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (doDebug) {
             debugLog("securityHeader = {");
-            debugLog("             securityPolicyId: ", asymmetricAlgorithmSecurityHeader.securityPolicyUri);
-            debugLog("             senderCertificate: ",
-                makeSHA1Thumbprint(asymmetricAlgorithmSecurityHeader.senderCertificate).toString("hex"));
-
+            debugLog("              securityPolicyId: ", asymmetricAlgorithmSecurityHeader.securityPolicyUri);
+            debugLog(
+                "             senderCertificate: ",
+                makeSHA1Thumbprint(asymmetricAlgorithmSecurityHeader.senderCertificate).toString("hex")
+            );
             debugLog("};");
         }
 
-        // OpcUA part 2 V 1.02 page 15
-        // 4.11 OPC UA Security Related Services
-        // [...]
-        // The OPC UA Client sends its Public Key in a Digital Certificate and secret information with the
-        // OpenSecureChannel service Message to the Server. This Message is secured by applying
-        // Asymmetric Encryption with the Server's Public Key and by generating Asymmetric Signatures with
-        // the Client's Private Key. However the Digital Certificate is sent unencrypted so that the receiver can
-        // use it to verify the Asymmetric Signature.
-        // [...]
-        //
-
-        /* istanbul ignore next */
+        // c8 ignore next
         if (doDebug) {
+            // OpcUA part 2 V 1.02 page 15
+            // 4.11 OPC UA Security Related Services
+            // [...]
+            // The OPC UA Client sends its Public Key in a Digital Certificate and secret information with the
+            // OpenSecureChannel service Message to the Server. This Message is secured by applying
+            // Asymmetric Encryption with the Server's Public Key and by generating Asymmetric Signatures with
+            // the Client's Private Key. However the Digital Certificate is sent unencrypted so that the receiver can
+            // use it to verify the Asymmetric Signature.
+            // [...]
+            //
+
+            /* c8 ignore next */
             debugLog(chalk.cyan("EN------------------------------"));
             // xx debugLog(hexDump(binaryStream.buffer, 32, 0xFFFFFFFF));
             debugLog("---------------------- SENDER CERTIFICATE");
             debugLog("thumbprint ", makeSHA1Thumbprint(asymmetricAlgorithmSecurityHeader.senderCertificate).toString("hex"));
         }
+        // c8 ignore next
+        if (doTraceChunk) {
+            const thumb = makeSHA1Thumbprint(asymmetricAlgorithmSecurityHeader.senderCertificate).toString("hex");
+            warningLog(timestamp(), ` >$$ securityPolicyId:  ${asymmetricAlgorithmSecurityHeader.securityPolicyUri} ${thumb} `);
+        }
 
-        if (!this.cryptoFactory) {
-            this._report_error(" Security Policy " + this.securityPolicy + " is not implemented yet");
-            return false;
+        const cryptoFactory = getCryptoFactory(this.securityPolicy);
+        // c8 ignore next
+        if (!cryptoFactory) {
+            return this._report_error(
+                StatusCodes2.BadTcpInternalError,
+                ` Security Policy ${this.securityPolicy} is not implemented yet`
+            );
         }
 
         // The message has been signed  with sender private key and has been encrypted with receiver public key.
         // We shall decrypt it with the receiver private key.
-        const buf = binaryStream.buffer.slice(binaryStream.length);
+        const buf = binaryStream.buffer.subarray(binaryStream.length);
 
         if (asymmetricAlgorithmSecurityHeader.receiverCertificateThumbprint) {
+            if (this.securityMode === MessageSecurityMode.None) {
+                warningLog("receiverCertificateThumbprint is not null but securityMode is None");
+            }
             // this mean that the message has been encrypted ....
 
-            assert(this.privateKey !== invalidPrivateKey, "expecting a valid private key");
+            const keyOperations = this.#keyOperations;
+            if (!keyOperations) {
+                return this._report_error(
+                    StatusCodes2.BadTcpInternalError,
+                    "expecting key operations to decrypt an encrypted OpenSecureChannel message"
+                );
+            }
 
-            const decryptedBuffer = this.cryptoFactory.asymmetricDecrypt(buf, this.privateKey);
+            // the receiver's key size sets the plain block: above 256 bytes (keys larger than 2048 bits)
+            // the padding ends with an ExtraPaddingSize byte (OPC 10000-6 6.7.2.5)
+            const applyDecryptedBuffer = (decryptedBuffer: Buffer, modulusLength: number): boolean => {
+                // replace decrypted buffer in initial buffer
+                decryptedBuffer.copy(binaryStream.buffer, binaryStream.length);
+                // adjust length
+                binaryStream.buffer = binaryStream.buffer.subarray(0, binaryStream.length + decryptedBuffer.length);
 
-            // replace decrypted buffer in initial buffer
-            decryptedBuffer.copy(binaryStream.buffer, binaryStream.length);
+                /* c8 ignore next */
+                if (doDebug) {
+                    debugLog(chalk.cyan("DE-----------------------------"));
+                    // debugLog(hexDump(binaryStream.buffer));
+                    debugLog(chalk.cyan("-------------------------------"));
+                    const thumbprint = makeSHA1Thumbprint(asymmetricAlgorithmSecurityHeader.senderCertificate);
+                    debugLog("Certificate thumbprint:", thumbprint.toString("hex"));
+                }
+                const plainBlockSize = modulusLength - cryptoFactory.blockPaddingSize;
+                return this.#_decrypt_OPN_tail(
+                    binaryStream,
+                    asymmetricAlgorithmSecurityHeader,
+                    cryptoFactory,
+                    true,
+                    plainBlockSize
+                );
+            };
 
-            // adjust length
-            binaryStream.buffer = binaryStream.buffer.slice(0, binaryStream.length + decryptedBuffer.length);
+            if (typeof keyOperations.decryptBlockSync !== "function" || typeof keyOperations.getKeyMetadataSync !== "function") {
+                // remote (async-only) key-operations provider: decrypt through
+                // its asynchronous interface — the chunk pump holds later
+                // chunks in order while this settles
+                return Promise.all([
+                    asymmetricDecryptWithKeyOps(cryptoFactory, buf, keyOperations),
+                    keyOperations.getKeyMetadata()
+                ]).then(
+                    ([decryptedBuffer, { modulusLength }]) => applyDecryptedBuffer(decryptedBuffer, modulusLength),
+                    (err: Error) =>
+                        // Cannot asymmetrically decrypt, may be the certificate used by the other party to encrypt
+                        // this package is wrong
+                        this._report_error(StatusCodes2.BadTcpInternalError, `Cannot decrypt OPN package ${err.message}`)
+                );
+            }
 
-            /* istanbul ignore next */
-            if (doDebug) {
-                debugLog(chalk.cyan("DE-----------------------------"));
-                // debugLog(hexDump(binaryStream.buffer));
-                debugLog(chalk.cyan("-------------------------------"));
-                const thumbprint = makeSHA1Thumbprint(asymmetricAlgorithmSecurityHeader.senderCertificate);
-                debugLog("Certificate thumbprint:", thumbprint.toString("hex"));
+            try {
+                const decryptedBuffer = asymmetricDecryptWithKeyOpsSync(cryptoFactory, buf, keyOperations);
+                return applyDecryptedBuffer(decryptedBuffer, keyOperations.getKeyMetadataSync().modulusLength);
+            } catch (err) {
+                // Cannot asymmetrically decrypt, may be the certificate used by the other party to encrypt
+                // this package is wrong
+                return this._report_error(StatusCodes2.BadTcpInternalError, `Cannot decrypt OPN package ${(err as Error).message}`);
             }
         }
+        if (this.securityMode !== MessageSecurityMode.None) {
+            return this._report_error(
+                StatusCodes2.BadTcpInternalError,
+                "Expecting a encrypted OpenSecureChannel message as securityMode is not None"
+            );
+        }
 
-        const cert = exploreCertificateInfo(asymmetricAlgorithmSecurityHeader.senderCertificate);
-        // then verify the signature
-        const signatureLength = cert.publicKeyLength; // 1024 bits = 128Bytes or 2048=256Bytes or 3072 or 4096
-        assert(signatureLength === 128 ||
-            signatureLength === 256 ||
-            signatureLength === 384 ||
-            signatureLength === 512);
+        return this.#_decrypt_OPN_tail(binaryStream, asymmetricAlgorithmSecurityHeader, cryptoFactory, false);
+    }
 
+    /** signature verification and padding removal — the tail of OPN decryption, shared by the sync and async paths. */
+    #_decrypt_OPN_tail(
+        binaryStream: BinaryStream,
+        asymmetricAlgorithmSecurityHeader: AsymmetricAlgorithmSecurityHeader,
+        cryptoFactory: CryptoFactory,
+        wasEncrypted: boolean,
+        plainBlockSize = 0
+    ): boolean {
         const chunk = binaryStream.buffer;
 
-        const signatureIsOK = asymmetricVerifyChunk(this.cryptoFactory, chunk, asymmetricAlgorithmSecurityHeader.senderCertificate);
+        const { signatureLength, signatureIsOK } = asymmetricVerifyChunk(
+            cryptoFactory,
+            chunk,
+            asymmetricAlgorithmSecurityHeader.senderCertificate
+        );
 
         if (!signatureIsOK) {
-            /* istanbul ignore next */
+            /* c8 ignore next */
             if (doDebug) {
                 debugLog(hexDump(binaryStream.buffer));
             }
-            this._report_error("Sign and Encrypt asymmetricVerify : Invalid packet signature");
-            return false;
+            return this._report_error(
+                StatusCodes2.BadTcpInternalError,
+                "Sign and Encrypt asymmetricVerify : Invalid packet signature"
+            );
         }
 
         // remove signature
         binaryStream.buffer = reduceLength(binaryStream.buffer, signatureLength);
 
         // remove padding
-        if (asymmetricAlgorithmSecurityHeader.receiverCertificateThumbprint) {
-            binaryStream.buffer = removePadding(binaryStream.buffer);
+        if (wasEncrypted) {
+            binaryStream.buffer = removePadding(binaryStream.buffer, plainBlockSize);
         }
 
         return true; // success
     }
 
-    private tokenIds() {
-        return this._tokenStack.map((a) => a.securityToken.tokenId);
-    }
-
-    private _select_matching_token(tokenId: number): SecurityTokenAndDerivedKeys | null {
-
-        /* istanbul ignore next */
-        if (doDebug) {
-            debugLog("id=", this.id, " ", chalk.yellow("_select_matching_token : searching token "),
-                tokenId, "length = ", this._tokenStack.length, this.tokenIds());
+    #_decrypt_MSG(binaryStream: BinaryStream): boolean {
+        // c8 ignore next
+        if (!(this.securityHeader instanceof SymmetricAlgorithmSecurityHeader)) {
+            throw new Error("Internal error : expecting a SymmetricAlgorithmSecurityHeader");
         }
-        // this method select the security token matching the provided tokenId
-        // it also get rid of older security token
-        let gotNewToken = false;
-
-        while (this._tokenStack.length) {
-
-            const firstToken = this._tokenStack[0];
-
-            if (firstToken.securityToken.tokenId === tokenId) {
-                if (gotNewToken) {
-                    this.emit("new_token", tokenId);
-                }
-
-                /* istanbul ignore next */
-                if (doDebug) {
-                    debugLog("id=", this.id, chalk.red(" found token"), gotNewToken, firstToken.securityToken.tokenId, this.tokenIds());
-                }
-                return firstToken;
-            }
-            // remove first
-            this._tokenStack.shift();
-
-            /* istanbul ignore next */
-            if (doDebug) {
-                debugLog("id=", this.id, "Remove first token ", firstToken.securityToken.tokenId, this.tokenIds());
-            }
-            gotNewToken = true;
-        }
-
-        /* istanbul ignore next */
-        if (doDebug) {
-            debugLog("id=", this.id, " Cannot find token ", tokenId);
-        }
-        return null;
-    }
-
-    private _decrypt_MSG(binaryStream: BinaryStream): boolean {
-
-        assert(this.securityHeader instanceof SymmetricAlgorithmSecurityHeader);
         assert(this.securityMode !== MessageSecurityMode.None);
         assert(this.securityMode !== MessageSecurityMode.Invalid);
         assert(this.securityPolicy !== SecurityPolicy.None);
         assert(this.securityPolicy !== SecurityPolicy.Invalid);
 
-        const symmetricAlgorithmSecurityHeader = this.securityHeader as SymmetricAlgorithmSecurityHeader;
+        const symmetricAlgorithmSecurityHeader = this.securityHeader;
         // Check  security token
         // securityToken may have been renewed
-        const securityTokenData = this._select_matching_token(symmetricAlgorithmSecurityHeader.tokenId);
-        if (!securityTokenData) {
-            this._report_error("Security token data for token " + symmetricAlgorithmSecurityHeader.tokenId + " doesn't exist");
-            return false;
-        }
-
-        assert(securityTokenData.hasOwnProperty("derivedKeys"));
-
-        // SecurityToken may have expired, in this case the MessageBuilder shall reject the message
-        if (securityTokenData.securityToken.expired) {
-            this._report_error("Security token has expired : tokenId " + securityTokenData.securityToken.tokenId);
-            return false;
+        const derivedKeys = this.#derivedKeyProvider.getDerivedKey(symmetricAlgorithmSecurityHeader.tokenId);
+        // c8 ignore next
+        if (!derivedKeys || derivedKeys.signatureLength === 0) {
+            this.#derivedKeyProvider.getDerivedKey(symmetricAlgorithmSecurityHeader.tokenId);
+            return this._report_error(
+                StatusCodes2.BadSecureChannelTokenUnknown,
+                `Security token data for token ${symmetricAlgorithmSecurityHeader.tokenId} doesn't exist`
+            );
         }
 
         // We shall decrypt it with the receiver private key.
-        const buf = binaryStream.buffer.slice(binaryStream.length);
-
-        if (!securityTokenData.derivedKeys) {
-            console.log("xxxxxxx NO DERIVED KEYX");
-            return false;
-        }
-
-        const derivedKeys: DerivedKeys = securityTokenData.derivedKeys;
-
-        assert(derivedKeys !== null);
-        assert(derivedKeys.signatureLength > 0, " must provide a signature length");
+        const buf = binaryStream.buffer.subarray(binaryStream.length);
 
         if (this.securityMode === MessageSecurityMode.SignAndEncrypt) {
-
             const decryptedBuffer = decryptBufferWithDerivedKeys(buf, derivedKeys);
 
             // replace decrypted buffer in initial buffer
             decryptedBuffer.copy(binaryStream.buffer, binaryStream.length);
 
-            // adjust length
-            binaryStream.buffer = binaryStream.buffer.slice(0, binaryStream.length + decryptedBuffer.length);
+            // adjust length (symmetric decryption keeps it: no new view then)
+            if (decryptedBuffer.length !== buf.length) {
+                binaryStream.buffer = binaryStream.buffer.subarray(0, binaryStream.length + decryptedBuffer.length);
+            }
 
-            /* istanbul ignore next */
+            /* c8 ignore next */
             if (doDebug) {
                 debugLog(chalk.cyan("DE-----------------------------"));
                 debugLog(hexDump(binaryStream.buffer));
@@ -557,30 +798,35 @@ export class MessageBuilder extends MessageBuilderBase {
 
         const signatureIsOK = verifyChunkSignatureWithDerivedKeys(chunk, derivedKeys);
         if (!signatureIsOK) {
-            this._report_error("_decrypt_MSG : Sign and Encrypt : Invalid packet signature");
-            return false;
+            return this._report_error(
+                StatusCodes2.BadTcpInternalError,
+                "_decrypt_MSG : Sign and Encrypt (derived keys) : Invalid packet signature"
+            );
         }
 
-        // remove signature
-        binaryStream.buffer = reduceLength(binaryStream.buffer, derivedKeys.signatureLength);
-
+        // remove the signature, and the padding (OPC 10000-6 6.7.2.5: its last byte is PaddingSize, symmetric
+        // blocks are 16 bytes, so no ExtraPaddingSize) in one view
+        let end = chunk.length - derivedKeys.signatureLength;
         if (this.securityMode === MessageSecurityMode.SignAndEncrypt) {
-            // remove padding
-            binaryStream.buffer = removePadding(binaryStream.buffer);
+            end -= chunk[end - 1] + 1;
         }
+        binaryStream.buffer = chunk.subarray(0, end);
 
         return true;
     }
 
-    private _decrypt(binaryStream: BinaryStream) {
-
-        if (this.securityPolicy === SecurityPolicy.Invalid) {
-            // this._report_error("SecurityPolicy");
-            // return false;
-            return true;
+    #_decrypt(binaryStream: BinaryStream) {
+        /* c8 ignore next */
+        if (!this.messageHeader) {
+            throw new Error("internal error");
         }
-
         const msgType = this.messageHeader.msgType;
+
+        /* c8 ignore next */
+        if (msgType !== "OPN" && this.securityPolicy === SecurityPolicy.Invalid) {
+            throw new Error(`internal error : invalid securityPolicy${this.securityPolicy}`);
+        }
+        // note: securityPolicy might still be Invalid when MSGType == OPN
 
         // check if security is active or not
         if (this.securityPolicy === SecurityPolicy.None) {
@@ -588,33 +834,36 @@ export class MessageBuilder extends MessageBuilderBase {
             assert(this.securityMode === MessageSecurityMode.None, "expecting securityMode = None when securityPolicy is None");
             return true; // nothing to do
         }
-        assert(this.securityMode !== MessageSecurityMode.None);
 
         if (msgType === "OPN") {
-            return this._decrypt_OPN(binaryStream);
+            return this.#_decrypt_OPN(binaryStream);
         } else {
-            return this._decrypt_MSG(binaryStream);
+            return this.#_decrypt_MSG(binaryStream);
         }
-
     }
 
-    private _safe_decode_message_body(fullMessageBody: Buffer, objMessage: any, binaryStream: BinaryStream) {
+    #_safe_decode_message_body(fullMessageBody: Buffer, objMessage: BaseUAObject, binaryStream: BinaryStream) {
         try {
             // de-serialize the object from the binary stream
-            const options = this.objectFactory;
-            objMessage.decode(binaryStream, options);
+            objMessage.decode(binaryStream);
         } catch (err) {
-            console.log(err);
-            console.log(err.stack);
-            console.log(hexDump(fullMessageBody));
-            analyseExtensionObject(fullMessageBody, 0, 0);
+            if (types.isNativeError(err)) {
+                warningLog("Decode message error : ", err.message);
 
-            console.log(" ---------------- block");
-            let i = 0;
-            this.messageChunks.forEach((messageChunk) => {
-                console.log(" ---------------- chunk i=", i++);
-                console.log(hexDump(messageChunk));
-            });
+                // c8 ignore next
+                if (doDebug) {
+                    debugLog(err.stack);
+                    debugLog(hexDump(fullMessageBody));
+                    analyseExtensionObject(fullMessageBody, 0, 0);
+
+                    debugLog(" ---------------- block");
+                    let i = 0;
+                    this.messageChunks.forEach((messageChunk) => {
+                        debugLog(" ---------------- chunk i=", i++);
+                        debugLog(hexDump(messageChunk));
+                    });
+                }
+            }
             return false;
         }
         return true;

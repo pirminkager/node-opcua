@@ -1,0 +1,38 @@
+import type { UAObject, UAProperty } from "node-opcua-address-space-base";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * Base class for elements in a stacklight.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/IA/                             |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |StackElementType i=1005                                     |
+ * |isAbstract      |true                                                        |
+ */
+export interface UAStackElement_Base {
+    /**
+     * isPartOfBase
+     * Indicates, if the element is contained in the
+     * mounting base of the stacklight. All elements
+     * contained in the mounting base shall be at the
+     * beginning of the list of stack elements.
+     */
+    isPartOfBase?: UAProperty<boolean, DataType.Boolean>;
+    /**
+     * numberInList
+     * Enumerate the stacklight elements counting
+     * upwards beginning from the base of the stacklight.
+     */
+    numberInList: UAProperty<any, any>;
+    /**
+     * signalOn
+     * Indicates if the signal emitted by the stack
+     * element is currently switched on or not.
+     */
+    signalOn?: UAProperty<boolean, DataType.Boolean>;
+}
+export interface UAStackElement extends UAObject, UAStackElement_Base {}

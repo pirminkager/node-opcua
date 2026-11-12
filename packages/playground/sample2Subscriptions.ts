@@ -1,24 +1,28 @@
 // tslint:disable:no-console
-import * as chalk from "chalk";
+import chalk from "chalk";
 
 import {
     AttributeIds,
     ClientMonitoredItem,
-    ClientSession,
+    type ClientSession,
     ClientSubscription,
-    ConnectionStrategyOptions,
+    type ConnectionStrategyOptions,
     DataChangeFilter,
     DataChangeTrigger,
-    DataValue,
+    type DataValue,
     DeadbandType,
     EventFilter,
     MessageSecurityMode,
-    MonitoringParametersOptions, OPCUAClient, OPCUAClientOptions,
-    ReadValueIdLike, SecurityPolicy,
-    TimestampsToReturn, UserTokenType
+    type MonitoringParametersOptions,
+    OPCUAClient,
+    type OPCUAClientOptions,
+    type ReadValueIdOptions,
+    SecurityPolicy,
+    TimestampsToReturn,
+    UserTokenType
 } from "node-opcua-client";
 
-async function timeout(ms: number) {
+async function wait(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -37,20 +41,18 @@ const options: OPCUAClientOptions = {
 
 const client = OPCUAClient.create(options);
 
-client.on("backoff", (count: number, delay: number) => {
+client.on("backoff", (_count: number, _delay: number) => {
     console.log("backoff ");
 });
 
 async function test1() {
-
     try {
-
         await client.connect("opc.tcp://opcuademo.sterfive.com:26543");
 
         const session: ClientSession = await client.createSession({
             type: UserTokenType.UserName,
 
-            password: "password1",
+            password: (() => "password1")(),
             userName: "user1"
         });
 
@@ -77,19 +79,19 @@ async function test1() {
                 trigger: DataChangeTrigger.StatusValueTimestamp
             })
         };
-        const itemToMonitor1: ReadValueIdLike = {
+        const itemToMonitor1: ReadValueIdOptions = {
             attributeId: AttributeIds.Value,
             nodeId: "ns=1;s=FanSpeed"
         };
 
-        const item1 = await subscription.monitor(itemToMonitor1, parameters1, TimestampsToReturn.Both);
+        const item1 = await subscription.monitor(itemToMonitor1, parameters1, TimestampsToReturn.Source);
 
-        console.log(" Item1 = ", item1.result!.statusCode.toString());
+        console.log(" Item1 = ", item1.result?.statusCode.toString());
 
         item1.on("changed", (dataValue: DataValue) => {
             console.log(" Value1 has changed : ", dataValue.toString());
         });
-        const itemToMonitor2: ReadValueIdLike = {
+        const itemToMonitor2: ReadValueIdOptions = {
             attributeId: AttributeIds.EventNotifier,
             nodeId: "i=2258"
         };
@@ -99,36 +101,32 @@ async function test1() {
             queueSize: 100,
             samplingInterval: 0
         };
-        const item2 = subscription.monitor(itemToMonitor2, parameters2, TimestampsToReturn.Both);
+        const _item2 = subscription.monitor(itemToMonitor2, parameters2, TimestampsToReturn.Both);
 
-        await timeout(20000);
+        await wait(20000);
 
         await subscription.terminate();
 
         await client.disconnect();
 
         console.log(" Done!");
-
     } catch (e) {
         // Deal with the fact the chain failed
         console.log(chalk.red("Error !"), e);
         process.exit(-1);
     }
-
 }
 
 async function test2() {
-
     console.log("----------------------------------------------------");
 
     try {
-
         await client.connect("opc.tcp://opcuademo.sterfive.com:26543");
 
         const session: ClientSession = await client.createSession({
             type: UserTokenType.UserName,
 
-            password: "password1",
+            password: (() => "password1")(),
             userName: "user1"
         });
 
@@ -152,7 +150,7 @@ async function test2() {
             queueSize: 100,
             samplingInterval: 250
         };
-        const itemToMonitor1: ReadValueIdLike = {
+        const itemToMonitor1: ReadValueIdOptions = {
             attributeId: AttributeIds.Value,
             nodeId: "ns=1;s=PumpSpeed"
         };
@@ -166,7 +164,7 @@ async function test2() {
                 console.log("item1 has been terminated");
             });
 
-        const itemToMonitor2: ReadValueIdLike = {
+        const itemToMonitor2: ReadValueIdOptions = {
             attributeId: AttributeIds.Value,
             nodeId: "ns=1;s=FanSpeed"
         };
@@ -179,27 +177,24 @@ async function test2() {
                 console.log("item2 has been terminated");
             });
 
-        await timeout(10000);
+        await wait(10000);
 
         await subscription.terminate();
 
         await client.disconnect();
 
         console.log(" Done!");
-
     } catch (e) {
         // Deal with the fact the chain failed
         console.log(chalk.red("Error !"), e);
         process.exit(-1);
     }
-
 }
 
 (async () => {
-
     await test1();
 
     console.log(" ----------- sample2");
     await test2();
-
+    (" y");
 })();

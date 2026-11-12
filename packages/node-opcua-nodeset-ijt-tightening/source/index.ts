@@ -1,0 +1,1 @@
+export type * from "./ua_i_tightening_tool_parameters.js";

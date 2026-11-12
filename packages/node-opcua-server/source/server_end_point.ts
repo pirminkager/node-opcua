@@ -1,50 +1,83 @@
 /**
  * @module node-opcua-server
  */
-// tslint:disable:no-console
-import * as async from "async";
-import * as chalk from "chalk";
-import { EventEmitter } from "events";
-import * as net from "net";
-import { Server, Socket } from "net";
-import * as path from "path";
-import * as _ from "underscore";
+
+import { EventEmitter } from "node:events";
+import net, { type Server, type Socket } from "node:net";
+import chalk from "chalk";
 
 import { assert } from "node-opcua-assert";
 import {
-    ICertificateManager,
-    OPCUACertificateManager
-} from "node-opcua-certificate-manager";
-import {
-    Certificate,
-    convertPEMtoDER,
-    makeSHA1Thumbprint,
-    PrivateKeyPEM,
-    split_der
-} from "node-opcua-crypto";
-import { checkDebugFlag, make_debugLog, make_errorLog } from "node-opcua-debug";
+    getKeyOperationsFromProvider,
+    type ICertificateChainProvider,
+    type ICertificateStore,
+    StaticCertificateChainProvider
+} from "node-opcua-common";
+import { type Certificate, combine_der, type IKeyOperations, makeSHA1Thumbprint, type PrivateKey } from "node-opcua-crypto/web";
+import { checkDebugFlag, make_debugLog, make_errorLog, make_warningLog } from "node-opcua-debug";
 import { getFullyQualifiedDomainName, resolveFullyQualifiedDomainName } from "node-opcua-hostname";
 import {
     fromURI,
+    type IServerSessionBase,
+    type Message,
     MessageSecurityMode,
     SecurityPolicy,
-    ServerSecureChannelLayer, ServerSecureChannelParent,
+    ServerSecureChannelLayer,
+    type ServerSecureChannelParent,
     toURI
 } from "node-opcua-secure-channel";
-import { UserTokenType } from "node-opcua-service-endpoints";
-import { EndpointDescription } from "node-opcua-service-endpoints";
-import { ApplicationDescription } from "node-opcua-service-endpoints";
+import { ApplicationDescription, EndpointDescription, UserTokenType } from "node-opcua-service-endpoints";
+import type { StatusCode } from "node-opcua-status-code";
+import { type IHelloAckLimits, parseEndpointUrl } from "node-opcua-transport";
+import type { UserTokenPolicyOptions } from "node-opcua-types";
 
-const debugLog = make_debugLog(__filename);
-const errorLog = make_errorLog(__filename);
-const doDebug = checkDebugFlag(__filename);
+import type { IChannelData } from "./i_channel_data.js";
+import type { ISocketData } from "./i_socket_data.js";
 
-const default_transportProfileUri = "http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary";
+const debugLog = make_debugLog("server_end_point");
+const errorLog = make_errorLog("server_end_point");
+const warningLog = make_warningLog("server_end_point");
+const doDebug = checkDebugFlag("server_end_point");
+
+const UATCP_UASC_UABINARY = "http://opcfoundation.org/UA-Profile/Transport/uatcp-uasc-uabinary";
+
+function extractSocketData(socket: net.Socket, reason: string): ISocketData {
+    const { bytesRead, bytesWritten, remoteAddress, remoteFamily, remotePort, localAddress, localPort } = socket;
+    const data: ISocketData = {
+        bytesRead,
+        bytesWritten,
+        localAddress,
+        localPort,
+        remoteAddress,
+        remoteFamily,
+        remotePort,
+        timestamp: new Date(),
+        reason
+    };
+    return data;
+}
+
+function extractChannelData(channel: ServerSecureChannelLayer): IChannelData {
+    const { channelId, clientCertificate, securityMode, securityPolicy, timeout, transactionsCount } = channel;
+
+    const channelData: IChannelData = {
+        channelId,
+        clientCertificate,
+        securityMode,
+        securityPolicy,
+        timeout,
+        transactionsCount
+    };
+    return channelData;
+}
 
 function dumpChannelInfo(channels: ServerSecureChannelLayer[]): void {
-
+    function d(s: IServerSessionBase) {
+        return `[ status=${s.status} lastSeen=${s.clientLastContactTime.toFixed(0)}ms sessionName=${s.sessionName} timeout=${
+            s.sessionTimeout
+        } ]`;
+    }
     function dumpChannel(channel: ServerSecureChannelLayer): void {
-
         console.log("------------------------------------------------------");
         console.log("            channelId = ", channel.channelId);
         console.log("             timeout  = ", channel.timeout);
@@ -53,8 +86,11 @@ function dumpChannelInfo(channels: ServerSecureChannelLayer[]): void {
         console.log("");
         console.log("        bytesWritten  = ", channel.bytesWritten);
         console.log("        bytesRead     = ", channel.bytesRead);
+        console.log("        sessions      = ", Object.keys(channel.sessionTokens).length);
+        console.log(Object.values(channel.sessionTokens).map(d).join("\n"));
 
-        const socket = (channel as any).transport._socket;
+        // biome-ignore lint/suspicious/noExplicitAny: accessing internal transport for debug dump
+        const socket = (channel as any).transport?._socket;
         if (!socket) {
             console.log(" SOCKET IS CLOSED");
         }
@@ -63,29 +99,40 @@ function dumpChannelInfo(channels: ServerSecureChannelLayer[]): void {
     for (const channel of channels) {
         dumpChannel(channel);
     }
+    console.log("------------------------------------------------------");
 }
 
-const emptyCertificate = Buffer.alloc(0);
-const emptyPrivateKeyPEM = "";
+const emptyCertificateChain: Certificate[] = [];
+
+// biome-ignore lint/suspicious/noExplicitAny: deliberate null→PrivateKey sentinel
+const emptyPrivateKey = null as any as PrivateKey;
 
 let OPCUAServerEndPointCounter = 0;
 
+/**
+ * @internal node-opcua plumbing: may change in a minor release. Endpoints
+ * are created and configured through OPCUAServer options.
+ */
 export interface OPCUAServerEndPointOptions {
     /**
      * the tcp port
      */
     port: number;
     /**
-     * the DER certificate chain
+     * the tcp host
      */
-    certificateChain: Certificate;
-
+    host?: string;
+    /** share the port with other listeners (SO_REUSEPORT): see OPCUAServerEndpointOptions.reusePort */
+    reusePort?: boolean;
     /**
-     * privateKey
+     * The certificate chain and key of this endpoint, as a provider — the
+     * endpoint never holds raw private-key material. For an in-memory
+     * chain/key pair use a {@link StaticCertificateChainProvider}; the
+     * server passes its own resolved/opaque/disk provider.
      */
-    privateKey: PrivateKeyPEM;
+    certificateKeyPairProvider: ICertificateChainProvider;
 
-    certificateManager: OPCUACertificateManager;
+    certificateManager: ICertificateStore;
 
     /**
      *  the default secureToken lifetime @default=60000
@@ -106,34 +153,207 @@ export interface OPCUAServerEndPointOptions {
 
     serverInfo: ApplicationDescription;
 
-    objectFactory?: any;
+    objectFactory?: unknown;
+
+    transportSettings?: IServerTransportSettings;
+}
+
+export interface IServerTransportSettings {
+    adjustTransportLimits: (hello: IHelloAckLimits) => IHelloAckLimits;
 }
 
 export interface EndpointDescriptionParams {
-
-    allowAnonymous?: boolean;
     restricted?: boolean;
     allowUnsecurePassword?: boolean;
     resourcePath?: string;
     alternateHostname?: string[];
     hostname: string;
+    /**
+     * Override the port used in the endpoint URL.
+     * When set, the endpoint URL uses this port instead of the
+     * server's listen port. The server does NOT listen on this port.
+     * Useful for Docker port-mapping, reverse proxies, and NAT.
+     */
+    advertisedPort?: number;
+    securityPolicies: SecurityPolicy[];
+    userTokenTypes: UserTokenType[];
+}
 
+/**
+ * Per-URL security restrictions for advertised endpoints.
+ *
+ * All advertised URLs share the listener's socket: an entry can only make
+ * its URL stricter than the main endpoint, and it only binds clients that
+ * present that URL (a client presenting the main URL gets the main settings).
+ * See documentation/advertised_endpoints.md, "Security Model".
+ *
+ * When `advertisedEndpoints` contains a config object, the endpoint
+ * descriptions generated for that URL use the overridden security
+ * settings instead of inheriting from the main endpoint.
+ *
+ * Any field that is omitted falls back to the main endpoint's value.
+ *
+ * @example
+ * ```ts
+ * advertisedEndpoints: [
+ *     // Public: SignAndEncrypt only, no anonymous
+ *     {
+ *         url: "opc.tcp://public.example.com:4840",
+ *         securityModes: [MessageSecurityMode.SignAndEncrypt],
+ *         allowAnonymous: false
+ *     },
+ *     // Internal: inherits everything from main endpoint
+ *     "opc.tcp://internal:48480"
+ * ]
+ * ```
+ */
+export interface AdvertisedEndpointConfig {
+    /** The full endpoint URL, e.g. `"opc.tcp://public.example.com:4840"` */
+    url: string;
+    /** Restrict security modes (default: inherit from main endpoint); modes the main endpoint lacks are ignored */
+    securityModes?: MessageSecurityMode[];
+    /** Restrict security policies (default: inherit from main endpoint); policies the main endpoint lacks are ignored */
+    securityPolicies?: SecurityPolicy[];
+    /** `false` removes anonymous access for this URL (default: inherit from main endpoint); `true` cannot add it */
+    allowAnonymous?: boolean;
+    /**
+     * Restrict user token types (default: inherit from main endpoint).
+     *
+     * This list can only restrict the main endpoint list: token types that
+     * the main endpoint does not allow are ignored (with a warning).
+     *
+     * note: all URLs of a listener share the same socket and the server
+     * cannot verify which URL a client really used, so this restriction
+     * guides well-behaved clients but is not an authentication boundary:
+     * a client that presents the main URL gets the main list. To enforce a
+     * different list, give it its own listener (`endpoints: [{ port, userTokenTypes }]`).
+     */
+    userTokenTypes?: UserTokenType[];
+}
+
+/**
+ * An advertised endpoint entry — either a plain URL string (inherits
+ * all settings from the main endpoint) or a config object with
+ * per-URL security overrides.
+ */
+export type AdvertisedEndpoint = string | AdvertisedEndpointConfig;
+
+/**
+ * Normalize any `advertisedEndpoints` input into a uniform
+ * `AdvertisedEndpointConfig[]`.
+ *
+ * This coercion is done early so that all downstream code
+ * (endpoint generation, IP/hostname extraction) only deals
+ * with one type.
+ */
+export function normalizeAdvertisedEndpoints(raw?: AdvertisedEndpoint | AdvertisedEndpoint[]): AdvertisedEndpointConfig[] {
+    if (!raw) return [];
+    const arr = Array.isArray(raw) ? raw : [raw];
+    return arr.map((entry) => (typeof entry === "string" ? { url: entry } : entry));
 }
 
 export interface AddStandardEndpointDescriptionsParam {
-
-    securityModes?: MessageSecurityMode[];
-    securityPolicies?: SecurityPolicy[];
-    disableDiscovery?: boolean;
-
     allowAnonymous?: boolean;
+    disableDiscovery?: boolean;
+    securityModes?: MessageSecurityMode[];
+
     restricted?: boolean;
-    hostname?: string;
-    alternateHostname?: string[];
     allowUnsecurePassword?: boolean;
     resourcePath?: string;
+    alternateHostname?: string[];
+    hostname?: string;
+    securityPolicies?: SecurityPolicy[];
+    userTokenTypes?: UserTokenType[];
+
+    /**
+     * Additional endpoint URL(s) to advertise.
+     *
+     * Use when the server is behind Docker port-mapping,
+     * a reverse proxy, or a NAT gateway.
+     *
+     * Each entry can be a plain URL string (inherits all security
+     * settings from the main endpoint) or an
+     * `AdvertisedEndpointConfig` object with per-URL overrides.
+     *
+     * The server still listens on `port` — these are purely
+     * advertised aliases.
+     *
+     * @example Simple string (inherits main settings)
+     * ```ts
+     * advertisedEndpoints: "opc.tcp://localhost:48481"
+     * ```
+     *
+     * @example Mixed array with per-URL security overrides
+     * ```ts
+     * advertisedEndpoints: [
+     *     "opc.tcp://internal:48480",
+     *     {
+     *         url: "opc.tcp://public.example.com:4840",
+     *         securityModes: [MessageSecurityMode.SignAndEncrypt],
+     *         allowAnonymous: false
+     *     }
+     * ]
+     * ```
+     */
+    advertisedEndpoints?: AdvertisedEndpoint | AdvertisedEndpoint[];
 }
 
+/**
+ * Parse an `opc.tcp://hostname:port/path` URL and extract hostname, port and resource path.
+ * A path made of a single `/` is treated as no path.
+ * @internal
+ */
+export function parseOpcTcpUrl(url: string): { hostname: string; port: number; resourcePath: string } {
+    // URL class doesn't understand opc.tcp://, so swap to http://
+    const httpUrl = url.replace(/^opc\.tcp:\/\//i, "http://");
+    const parsed = new URL(httpUrl);
+    return {
+        hostname: parsed.hostname,
+        port: parsed.port ? Number.parseInt(parsed.port, 10) : 4840,
+        resourcePath: parsed.pathname === "/" ? "" : parsed.pathname
+    };
+}
+
+/**
+ * keep only the values of a per-URL setting that the main endpoint also has
+ * (a per-URL setting can restrict the main endpoint, never widen it).
+ * @internal
+ */
+function restrictToMain<T>(url: string, what: string, entry: T[] | undefined, main: T[], label: (value: T) => string): T[] {
+    if (!entry) {
+        return main;
+    }
+    const widening = entry.filter((v) => !main.includes(v));
+    if (widening.length > 0) {
+        warningLog(
+            `advertisedEndpoints ${url}: ${what} cannot add values that the main endpoint does not allow; ignoring`,
+            widening.map(label).join(", ")
+        );
+    }
+    return entry.filter((v) => main.includes(v));
+}
+
+function getUniqueName(name: string, collection: { [key: string]: number }) {
+    if (collection[name]) {
+        let counter = 0;
+        while (collection[`${name}_${counter.toString()}`]) {
+            counter++;
+        }
+        name = `${name}_${counter.toString()}`;
+        collection[name] = 1;
+        return name;
+    } else {
+        collection[name] = 1;
+        return name;
+    }
+}
+
+/**
+ * Stores the abort listener for channels in the pre-registration phase.
+ * Using a WeakMap instead of monkey-patching the channel object keeps
+ * this internal state invisible to debuggers and external code.
+ */
+const preregisterAbortListeners = new WeakMap<ServerSecureChannelLayer, () => void>();
 /**
  * OPCUAServerEndPoint a Server EndPoint.
  * A sever end point is listening to one port
@@ -141,12 +361,15 @@ export interface AddStandardEndpointDescriptionsParam {
  *   see OPCUA Release 1.03 part 4 page 108 7.1 ApplicationDescription
  */
 export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureChannelParent {
-
+    /** @internal see ServerSecureChannelParent.leanRequestHandler: set by the server that has one */
+    public leanRequestHandler?: ServerSecureChannelParent["leanRequestHandler"];
     /**
      * the tcp port
      */
     public port: number;
-    public certificateManager: OPCUACertificateManager;
+    public host: string | undefined;
+    public readonly reusePort: boolean;
+    public certificateManager: ICertificateStore;
     public defaultSecureTokenLifetime: number;
     public maxConnections: number;
     public timeout: number;
@@ -155,36 +378,78 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
     public transactionsCountOldChannels: number;
     public securityTokenCountOldChannels: number;
     public serverInfo: ApplicationDescription;
-    public objectFactory: any;
+    public objectFactory: unknown;
 
     public _on_new_channel?: (channel: ServerSecureChannelLayer) => void;
+    public _on_channel_secured?: (channel: ServerSecureChannelLayer) => void;
     public _on_close_channel?: (channel: ServerSecureChannelLayer) => void;
-    private _certificateChain: Certificate;
-    private _privateKey: PrivateKeyPEM;
+    public _on_connectionRefused?: (socketData: ISocketData) => void;
+    public _on_openSecureChannelFailure?: (socketData: ISocketData, channelData: IChannelData) => void;
+
+    /**
+     * Optional callback to adjust the certificate status code
+     * during OpenSecureChannel.
+     *
+     * When set (typically by `installPushCertificateManagementOnServer`),
+     * this callback is invoked whenever the base certificate check
+     * returns a non-Good status. It can choose to relax certain
+     * errors (e.g. untrusted/missing-CRL) based on application
+     * policy such as the server being in NoConfiguration state.
+     */
+    public onAdjustCertificateStatus?: (statusCode: StatusCode, certificate: Certificate) => StatusCode | Promise<StatusCode>;
+
+    /**
+     * Implements `ServerSecureChannelParent.adjustCertificateStatus`.
+     * Delegates to the `onAdjustCertificateStatus` callback if set.
+     */
+    public adjustCertificateStatus(statusCode: StatusCode, certificate: Certificate): StatusCode | Promise<StatusCode> {
+        if (this.onAdjustCertificateStatus) {
+            return this.onAdjustCertificateStatus(statusCode, certificate);
+        }
+        return statusCode;
+    }
+
+    /**
+     * Certificate chain provider — delegates all cert/key access.
+     * Stored in a `#` private field so secrets are not visible
+     * in the debugger's property list or JSON serialization.
+     */
+    #certProvider: ICertificateChainProvider;
+    /**
+     * Combined DER cache — invalidated whenever the cert provider
+     * changes so that `EndpointDescription.serverCertificate`
+     * getters don't call `combine_der()` on every access.
+     */
+    #combinedDerCache: Certificate | undefined;
     private _channels: { [key: string]: ServerSecureChannelLayer };
     private _server?: Server;
     private _endpoints: EndpointDescription[];
-    private _listen_callback: any;
-    private _started: boolean = false;
+    private _listen_callback?: (err?: Error) => void;
+    private _started = false;
     private _counter = OPCUAServerEndPointCounter++;
+    private _policy_deduplicator: { [key: string]: number } = {};
+    // every accepted socket, channel or not, so shutdown() can destroy the
+    // survivors and let the listener's 'close' event fire
+    #acceptedSockets = new Set<Socket>();
 
+    private transportSettings?: IServerTransportSettings;
     constructor(options: OPCUAServerEndPointOptions) {
-
         super();
 
-        assert(!options.hasOwnProperty("certificate"), "expecting a certificateChain instead");
-        assert(options.hasOwnProperty("certificateChain"), "expecting a certificateChain");
-        assert(options.hasOwnProperty("privateKey"));
+        assert(!Object.hasOwn(options, "certificate"), "expecting a certificateKeyPairProvider instead");
+        assert(!Object.hasOwn(options, "privateKey"), "raw privateKey is gone: pass a certificateKeyPairProvider");
+        assert(Object.hasOwn(options, "certificateKeyPairProvider"), "expecting a certificateKeyPairProvider");
 
         this.certificateManager = options.certificateManager;
 
         options.port = options.port || 0;
 
         this.port = parseInt(options.port.toString(), 10);
-        assert(_.isNumber(this.port));
+        this.host = options.host;
+        this.reusePort = options.reusePort ?? false;
+        assert(typeof this.port === "number");
 
-        this._certificateChain = options.certificateChain;
-        this._privateKey = options.privateKey;
+        this.#certProvider = options.certificateKeyPairProvider;
 
         this._channels = {};
 
@@ -208,15 +473,17 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
         this.securityTokenCountOldChannels = 0;
 
         this.serverInfo = options.serverInfo;
-        assert(_.isObject(this.serverInfo));
+        assert(this.serverInfo !== null && typeof this.serverInfo === "object");
+
+        this.transportSettings = options.transportSettings;
     }
 
-    public dispose() {
-
-        this._certificateChain = emptyCertificate;
-        this._privateKey = emptyPrivateKeyPEM;
+    public dispose(): void {
+        this.#certProvider = new StaticCertificateChainProvider(emptyCertificateChain, emptyPrivateKey);
+        this.#combinedDerCache = undefined;
 
         assert(Object.keys(this._channels).length === 0, "OPCUAServerEndPoint channels must have been deleted");
+
         this._channels = {};
         this.serverInfo = new ApplicationDescription({});
 
@@ -225,48 +492,127 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
         this._endpoints = [];
 
         this._server = undefined;
-        this._listen_callback = null;
+        this._listen_callback = undefined;
 
         this.removeAllListeners();
-
     }
 
     public toString(): string {
-
-        const privateKey1 = convertPEMtoDER(this.getPrivateKey());
-
         const txt =
-            " end point" + this._counter +
-            " port = " + this.port +
-            " l = " + this._endpoints.length +
-            " " + makeSHA1Thumbprint(this.getCertificateChain()).toString("hex") +
-            " " + makeSHA1Thumbprint(privateKey1).toString("hex");
+            " end point" +
+            this._counter +
+            " port = " +
+            this.port +
+            " l = " +
+            this._endpoints.length +
+            " " +
+            makeSHA1Thumbprint(this.getCertificate()).toString("hex");
         return txt;
     }
 
+    public toJSON(): Record<string, unknown> {
+        return {
+            port: this.port,
+            host: this.host,
+            maxConnections: this.maxConnections,
+            timeout: this.timeout,
+            currentChannelCount: this.currentChannelCount,
+            endpointDescriptions: this._endpoints.map((e) => e.endpointUrl)
+        };
+    }
+
+    public [Symbol.for("nodejs.util.inspect.custom")](): string {
+        return this.toString();
+    }
+
     public getChannels(): ServerSecureChannelLayer[] {
-        return _.values(this._channels);
+        return Object.values(this._channels);
     }
 
     /**
      * Returns the X509 DER form of the server certificate
      */
     public getCertificate(): Certificate {
-        return split_der(this.getCertificateChain())[0];
+        return this.getCertificateChain()[0];
     }
 
     /**
      * Returns the X509 DER form of the server certificate
      */
-    public getCertificateChain(): Certificate {
-        return this._certificateChain;
+    public getCertificateChain(): Certificate[] {
+        return this.#certProvider.getCertificateChain();
     }
 
     /**
-     * the private key
+     * Replace the certificate chain provider for this endpoint.
+     *
+     * Used by push certificate management to switch from the
+     * default static provider to a disk-based one that re-reads
+     * certificates on demand.
+     *
+     * Invalidates the cached `combine_der` result so that
+     * `EndpointDescription.serverCertificate` getters pick up
+     * the new chain immediately.
      */
-    public getPrivateKey(): PrivateKeyPEM {
-        return this._privateKey;
+    public setCertificateProvider(provider: ICertificateChainProvider): void {
+        this.#certProvider = provider;
+        this.#combinedDerCache = undefined;
+    }
+
+    /**
+     * Return the current certificate chain provider.
+     * Useful for calling `invalidate()` after certificate rotation.
+     */
+    public getCertificateProvider(): ICertificateChainProvider {
+        return this.#certProvider;
+    }
+
+    /**
+     * Invalidate the combined DER cache.
+     *
+     * Called after the underlying provider's chain changes
+     * (e.g. after `provider.invalidate()` or `provider.update()`).
+     * The next `EndpointDescription.serverCertificate` access
+     * will recompute the combined DER from the provider.
+     */
+    public invalidateCombinedDerCache(): void {
+        this.#combinedDerCache = undefined;
+    }
+
+    /**
+     * Convenience method: invalidate both the provider's cache
+     * (so it re-reads from disk) and the combined DER cache
+     * (so endpoint descriptions recompute `serverCertificate`).
+     *
+     * Prefer this over calling `getCertificateProvider().invalidate()`
+     * and `invalidateCombinedDerCache()` separately.
+     */
+    public invalidateCertificates(): void {
+        this.#certProvider.invalidate();
+        this.#combinedDerCache = undefined;
+    }
+
+    /**
+     * Get the combined DER certificate (all certs concatenated)
+     * for use in EndpointDescription.serverCertificate.
+     * Cached internally; invalidated by provider changes.
+     * @internal
+     */
+    public getCombinedCertificate(): Certificate | undefined {
+        const chain = this.#certProvider.getCertificateChain();
+        if (chain.length === 0) return undefined;
+        if (!this.#combinedDerCache) {
+            this.#combinedDerCache = combine_der(chain);
+        }
+        return this.#combinedDerCache;
+    }
+
+    /**
+     * The endpoint's key as an opaque sign/decrypt object — the endpoint's
+     * ONLY key access: raw private-key material never enters the endpoint.
+     */
+    public getKeyOperations(): IKeyOperations {
+        return getKeyOperationsFromProvider(this.#certProvider);
     }
 
     /**
@@ -277,21 +623,16 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
     }
 
     /**
-     * @method getEndpointDescription
-     * @param securityMode
-     * @param securityPolicy
-     * @return endpoint_description {EndpointDescription|null}
      */
     public getEndpointDescription(
         securityMode: MessageSecurityMode,
         securityPolicy: SecurityPolicy,
-        endpointUrl?: string
+        endpointUrl: string | null
     ): EndpointDescription | null {
-
         const endpoints = this.endpointDescriptions();
-        const arr = _.filter(endpoints, matching_endpoint.bind(this, securityMode, securityPolicy, endpointUrl));
+        const arr = endpoints.filter(matching_endpoint.bind(this, securityMode, securityPolicy, endpointUrl));
 
-        if (!(arr.length === 0 || arr.length === 1)) {
+        if (endpointUrl && endpointUrl.length > 0 && !(arr.length === 0 || arr.length === 1)) {
             errorLog("Several matching endpoints have been found : ");
             for (const a of arr) {
                 errorLog("   ", a.endpointUrl, MessageSecurityMode[securityMode], securityPolicy);
@@ -303,25 +644,17 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
     public addEndpointDescription(
         securityMode: MessageSecurityMode,
         securityPolicy: SecurityPolicy,
-        options?: EndpointDescriptionParams
-    ) {
-        if (!options) {
-            options = { hostname: getFullyQualifiedDomainName() };
-        }
-
-        options.allowAnonymous = (options.allowAnonymous === undefined) ? true : options.allowAnonymous;
-
-        // istanbul ignore next
+        options: EndpointDescriptionParams
+    ): void {
+        // c8 ignore next
         if (securityMode === MessageSecurityMode.None && securityPolicy !== SecurityPolicy.None) {
             throw new Error(" invalid security ");
         }
-        // istanbul ignore next
+        // c8 ignore next
         if (securityMode !== MessageSecurityMode.None && securityPolicy === SecurityPolicy.None) {
             throw new Error(" invalid security ");
         }
         //
-
-        const port = this.port;
 
         // resource Path is a string added at the end of the url such as "/UA/Server"
         const resourcePath = (options.resourcePath || "").replace(/\\/g, "/");
@@ -329,47 +662,61 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
         assert(resourcePath.length === 0 || resourcePath.charAt(0) === "/", "resourcePath should start with /");
 
         const hostname = options.hostname || getFullyQualifiedDomainName();
-        const endpointUrl = `opc.tcp://${hostname}:${port}${resourcePath}`;
+        const effectivePort = options.advertisedPort ?? this.port;
+        const endpointUrl = `opc.tcp://${hostname}:${effectivePort}${resourcePath}`;
 
         const endpoint_desc = this.getEndpointDescription(securityMode, securityPolicy, endpointUrl);
 
-        // istanbul ignore next
+        /* c8 ignore next */
         if (endpoint_desc) {
             throw new Error(" endpoint already exist");
         }
 
+        const userTokenTypes = options.userTokenTypes;
+
         // now build endpointUrl
-        this._endpoints.push(_makeEndpointDescription({
-            endpointUrl,
-            hostname,
-            port,
+        this._endpoints.push(
+            _makeEndpointDescription(
+                {
+                    collection: this._policy_deduplicator,
+                    hostname,
+                    server: this.serverInfo,
 
-            server: this.serverInfo,
-            serverCertificateChain: this.getCertificateChain(),
+                    securityMode,
+                    securityPolicy,
 
-            securityMode,
-            securityPolicy,
+                    allowUnsecurePassword: options.allowUnsecurePassword,
+                    resourcePath: options.resourcePath,
 
-            allowAnonymous: options.allowAnonymous,
-            allowUnsecurePassword: options.allowUnsecurePassword,
-            resourcePath: options.resourcePath,
+                    restricted: !!options.restricted,
+                    securityPolicies: options.securityPolicies || [],
 
-            restricted: !!options.restricted
-        }));
+                    advertisedPort: options.advertisedPort,
+                    userTokenTypes
+                },
+                this
+            )
+        );
     }
 
-    public addRestrictedEndpointDescription(options: EndpointDescriptionParams) {
-        options = _.clone(options);
+    public addRestrictedEndpointDescription(options: EndpointDescriptionParams): void {
+        options = { ...options };
         options.restricted = true;
-        return this.addEndpointDescription(MessageSecurityMode.None, SecurityPolicy.None, options);
+        this.addEndpointDescription(MessageSecurityMode.None, SecurityPolicy.None, options);
     }
 
-    public addStandardEndpointDescriptions(options?: AddStandardEndpointDescriptionsParam) {
-
+    public addStandardEndpointDescriptions(options?: AddStandardEndpointDescriptionsParam): void {
         options = options || {};
 
         options.securityModes = options.securityModes || defaultSecurityModes;
         options.securityPolicies = options.securityPolicies || defaultSecurityPolicies;
+        options.userTokenTypes = options.userTokenTypes || defaultUserTokenTypes;
+
+        options.allowAnonymous = options.allowAnonymous === undefined ? true : options.allowAnonymous;
+        // make sure we do not have anonymous
+        if (!options.allowAnonymous) {
+            options.userTokenTypes = options.userTokenTypes.filter((r) => r !== UserTokenType.Anonymous);
+        }
 
         const defaultHostname = options.hostname || getFullyQualifiedDomainName();
 
@@ -379,12 +726,18 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
         if (typeof options.alternateHostname === "string") {
             options.alternateHostname = [options.alternateHostname];
         }
-        hostnames = _.uniq(hostnames.concat(options.alternateHostname as string[]));
+        // remove duplicates if any (uniq)
+        hostnames = [...new Set(hostnames.concat(options.alternateHostname))];
 
         for (const alternateHostname of hostnames) {
-
-            const optionsE = options as EndpointDescriptionParams;
-            optionsE.hostname = alternateHostname;
+            const optionsE: EndpointDescriptionParams = {
+                hostname: alternateHostname,
+                securityPolicies: options.securityPolicies,
+                userTokenTypes: options.userTokenTypes,
+                allowUnsecurePassword: options.allowUnsecurePassword,
+                alternateHostname: options.alternateHostname,
+                resourcePath: options.resourcePath
+            };
 
             if (options.securityModes.indexOf(MessageSecurityMode.None) >= 0) {
                 this.addEndpointDescription(MessageSecurityMode.None, SecurityPolicy.None, optionsE);
@@ -405,50 +758,163 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
                 }
             }
         }
+
+        // ── Advertised endpoints (virtual — no TCP listener) ──────
+        // Normalize to AdvertisedEndpointConfig[] so downstream code
+        // only deals with one type.
+        const advertisedList = normalizeAdvertisedEndpoints(options.advertisedEndpoints);
+
+        // Main endpoint defaults (guaranteed non-null — assigned above)
+        const mainSecurityModes = options.securityModes || defaultSecurityModes;
+        const mainSecurityPolicies = options.securityPolicies || defaultSecurityPolicies;
+        const mainUserTokenTypes = options.userTokenTypes || defaultUserTokenTypes;
+
+        for (const config of advertisedList) {
+            const { hostname: advHostname, port: advPort, resourcePath: advPath } = parseOpcTcpUrl(config.url);
+            // the advertised URL's own path wins over the server-wide resourcePath
+            const mainResourcePath = (options.resourcePath || "").replace(/\\/g, "/");
+            const advResourcePath = advPath || mainResourcePath;
+            // Skip if this hostname+port+path combo was already covered
+            // by the regular hostname loop
+            if (
+                hostnames.some((h) => h.toLowerCase() === advHostname.toLowerCase()) &&
+                advPort === this.port &&
+                advResourcePath === mainResourcePath
+            ) {
+                continue;
+            }
+
+            // Per-URL security restrictions: fall back to main settings
+            // A per-URL security setting can only RESTRICT the main endpoint: the
+            // listener accepts every mode and policy offered by any of its URLs, so
+            // a wider per-URL setting would open the whole listener.
+            const entrySecurityModes = restrictToMain(
+                config.url,
+                "securityModes",
+                config.securityModes,
+                mainSecurityModes,
+                (m) => MessageSecurityMode[m] ?? String(m)
+            );
+            const entrySecurityPolicies = restrictToMain(
+                config.url,
+                "securityPolicies",
+                config.securityPolicies,
+                mainSecurityPolicies,
+                (p) => String(p)
+            );
+            // A per-URL list can only RESTRICT the main list, never widen it:
+            // all URLs of this listener share one socket, and the server cannot
+            // verify which URL a client really used (CreateSession endpointUrl is
+            // supplied by the client), so a wider list on one URL would be
+            // reachable by every client of the listener.
+            let entryUserTokenTypes = mainUserTokenTypes;
+            if (config.userTokenTypes) {
+                const widening = config.userTokenTypes.filter((t) => !mainUserTokenTypes.includes(t));
+                if (widening.length > 0) {
+                    warningLog(
+                        `advertisedEndpoints ${config.url}: userTokenTypes cannot add token types that the main endpoint does not allow; ignoring`,
+                        widening.map((t) => UserTokenType[t] ?? t).join(", ")
+                    );
+                }
+                entryUserTokenTypes = config.userTokenTypes.filter((t) => mainUserTokenTypes.includes(t));
+            }
+
+            // Handle allowAnonymous override: if explicitly false,
+            // filter out Anonymous even if the main config allows it
+            if (config.allowAnonymous === false) {
+                entryUserTokenTypes = entryUserTokenTypes.filter((t) => t !== UserTokenType.Anonymous);
+            }
+
+            const optionsE: EndpointDescriptionParams = {
+                hostname: advHostname,
+                advertisedPort: advPort,
+                securityPolicies: entrySecurityPolicies,
+                userTokenTypes: entryUserTokenTypes,
+                allowUnsecurePassword: options.allowUnsecurePassword,
+                alternateHostname: options.alternateHostname,
+                resourcePath: advResourcePath
+            };
+
+            if (entrySecurityModes.indexOf(MessageSecurityMode.None) >= 0) {
+                this.addEndpointDescription(MessageSecurityMode.None, SecurityPolicy.None, optionsE);
+            } else {
+                if (!options.disableDiscovery) {
+                    this.addRestrictedEndpointDescription(optionsE);
+                }
+            }
+            for (const securityMode of entrySecurityModes) {
+                if (securityMode === MessageSecurityMode.None) {
+                    continue;
+                }
+                for (const securityPolicy of entrySecurityPolicies) {
+                    if (securityPolicy === SecurityPolicy.None) {
+                        continue;
+                    }
+                    this.addEndpointDescription(securityMode, securityPolicy, optionsE);
+                }
+            }
+        }
     }
 
     /**
      * returns the list of end point descriptions.
      */
     public endpointDescriptions(): EndpointDescription[] {
-
         return this._endpoints;
-
     }
 
     /**
-     * @method listen
-     * @async
      */
-    public listen(callback: (err?: Error) => void) {
-
-        assert(_.isFunction(callback));
+    public listen(callback: (err?: Error) => void): void {
+        assert(typeof callback === "function");
         assert(!this._started, "OPCUAServerEndPoint is already listening");
+
+        if (!this._server) {
+            callback(new Error("Server is not initialized"));
+            return;
+        }
 
         this._listen_callback = callback;
 
-        this._server!.on("error", (err: Error) => {
-            debugLog(chalk.red.bold(" error") + " port = " + this.port, err);
+        this._server.on("error", (err: Error) => {
+            /* c8 ignore next */
+            doDebug && debugLog(`${chalk.red.bold(" error")} port = ${this.port}`, err);
             this._started = false;
             this._end_listen(err);
         });
-        this._server!.on("listening", () => {
-            debugLog("server is listening");
+        this._server.on("listening", () => {
+            // c8 ignore next
+            doDebug && debugLog("server is listening");
         });
-        this._server!.listen(this.port, /*"::",*/(err?: Error) => { // 'listening' listener
-            debugLog(chalk.green.bold("LISTENING TO PORT "), this.port, "err  ", err);
-            assert(!err, " cannot listen to port ");
-            this._started = true;
-            this._end_listen();
-        });
+
+        const listenOptions: net.ListenOptions = {
+            port: this.port,
+            host: this.host,
+            ...(this.reusePort ? { reusePort: true } : {})
+        };
+
+        this._server.listen(
+            listenOptions,
+            /*"::",*/ (err?: Error) => {
+                // 'listening' listener
+                debugLog(chalk.green.bold("LISTENING TO PORT "), this.port, "err  ", err);
+                assert(!err, " cannot listen to port ");
+                this._started = true;
+                if (!this.port) {
+                    const add = this._server?.address();
+                    this.port = typeof add !== "string" ? add?.port || 0 : this.port;
+                }
+                this._end_listen();
+            }
+        );
     }
 
-    public killClientSockets(callback: (err?: Error) => void) {
-
+    public killClientSockets(callback: (err?: Error) => void): void {
         for (const channel of this.getChannels()) {
-
-            const hacked_channel = channel as any;
-            if (hacked_channel.transport && hacked_channel.transport._socket) {
+            const hacked_channel = channel as unknown as {
+                transport: { _socket: { destroy: () => void; emit: (event: string, err: Error) => void } };
+            };
+            if (hacked_channel.transport?._socket) {
                 // hacked_channel.transport._socket.close();
                 hacked_channel.transport._socket.destroy();
                 hacked_channel.transport._socket.emit("error", new Error("EPIPE"));
@@ -457,108 +923,174 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
         callback();
     }
 
-    public suspendConnection(callback: (err?: Error) => void) {
-
-        if (!this._started) {
-            return callback(new Error("Connection already suspended !!"));
-        }
-
-        // Stops the server from accepting new connections and keeps existing connections.
-        // (note from nodejs doc: This function is asynchronous, the server is finally closed
-        // when all connections are ended and the server emits a 'close' event.
-        // The optional callback will be called once the 'close' event occurs.
-        // Unlike that event, it will be called with an Error as its only argument
-        // if the server was not open when it was closed.
-        this._server!.close(() => {
-            this._started = false;
-            debugLog("Connection has been closed !");
-        });
+    /**
+     * Stops the server accepting new connections and returns a promise that
+     * settles once node has emitted the 'close' event - the point where the
+     * listening handle is genuinely released and the port can be bound again.
+     * close() is asynchronous and finishes only once every accepted
+     * connection has ended, so callers decide what to do with the still
+     * connected sockets before (or while) awaiting the returned promise.
+     */
+    private _initiateListenerRelease(): Promise<void> {
         this._started = false;
-        callback();
+        const server = this._server;
+        if (!server) {
+            return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+            server.close(() => {
+                // c8 ignore next
+                doDebug && debugLog(`Connection has been closed !${this.port}`);
+                resolve();
+            });
+        });
     }
 
-    public restoreConnection(callback: (err?: Error) => void) {
+    public suspendConnection(callback: (err?: Error) => void): void {
+        if (!this._started || !this._server) {
+            callback(new Error("Connection already suspended !!"));
+            return;
+        }
+
+        // Stops the server accepting new connections while keeping the existing ones.
+        // close() is asynchronous: node finishes it once every connection has ended and
+        // the server emits 'close'. This used to call back immediately anyway, so
+        // restoreConnection() could re-listen on a port the old handle had not released
+        // yet - an EADDRINUSE from resumeEndPoints, seen during certificate rotation and
+        // reproducible on a loaded machine.
+        //
+        // The callback now waits for that event. It is guarded by a timer because
+        // suspend deliberately keeps existing connections alive, and a channel that
+        // stays open would otherwise hold close() - and the caller - open with it.
+        // Waiting a bounded time is what the caller needs; hanging is not.
+        let notified = false;
+        const notify = () => {
+            if (notified) {
+                return;
+            }
+            notified = true;
+            callback();
+        };
+        const guard = setTimeout(() => {
+            // c8 ignore next
+            doDebug && debugLog(`suspendConnection: still had connections on ${this.port}`);
+            notify();
+        }, 1000);
+        guard.unref();
+        this._initiateListenerRelease().then(() => {
+            clearTimeout(guard);
+            notify();
+        });
+    }
+
+    public restoreConnection(callback: (err?: Error) => void): void {
         this.listen(callback);
     }
 
-    public abruptlyInterruptChannels() {
-        const _channels = _.values(this._channels);
-        for (const channel of _channels) {
+    public abruptlyInterruptChannels(): void {
+        for (const channel of Object.values(this._channels)) {
             channel.abruptlyInterrupt();
         }
     }
 
     /**
-     * @method shutdown
-     * @async
      */
-    public shutdown(callback: (err?: Error) => void) {
+    public shutdown(callback: (err?: Error) => void): void {
+        // c8 ignore next
+        doDebug && debugLog("OPCUAServerEndPoint#shutdown ");
 
-        debugLog("OPCUAServerEndPoint#shutdown ");
-
-        if (this._started) {
-            // make sure we don't accept new connection any more ...
-            this.suspendConnection(() => {
-                // shutdown all opened channels ...
-                const _channels = _.values(this._channels);
-                async.each(_channels,
-                    (channel: ServerSecureChannelLayer, callback1: (err?: Error) => void) => {
-                        this.shutdown_channel(channel, callback1);
-                    }, (err?: Error | null) => {
-
-                        /* istanbul ignore next */
-                        if (!(Object.keys(this._channels).length === 0)) {
-                            errorLog(" Bad !");
-                        }
-                        assert(Object.keys(this._channels).length === 0, "channel must have unregistered themselves");
-                        callback(err || undefined);
-                    });
-            });
-        } else {
+        if (!this._started) {
             callback();
+            return;
         }
+        // Stop accepting new connections and start releasing the listening
+        // socket. Node emits 'close' only once every accepted socket has
+        // ended, so the release is awaited after the channels are shut down:
+        // calling back on the channels alone lets the next listen() race the
+        // still-held handle - an intermittent EADDRINUSE on rapid
+        // stop/start cycles, mostly seen on Windows where the release lags.
+        const listenerReleased = this._initiateListenerRelease();
+        const _channels = Object.values(this._channels);
+        const promises = _channels.map(
+            (channel) =>
+                new Promise<void>((resolve, reject) => {
+                    this.shutdown_channel(channel, (err?: Error) => {
+                        if (err) {
+                            reject(err);
+                        } else {
+                            resolve();
+                        }
+                    });
+                })
+        );
+        Promise.all(promises)
+            .then(() => {
+                /* c8 ignore next */
+                if (!(Object.keys(this._channels).length === 0)) {
+                    errorLog(" Bad !");
+                }
+                assert(Object.keys(this._channels).length === 0, "channel must have unregistered themselves");
+                // sockets that never completed the handshake are not in
+                // _channels yet still hold the 'close' event; sweep them so
+                // the wait below cannot hang.
+                for (const socket of this.#acceptedSockets) {
+                    socket.destroy();
+                }
+                return listenerReleased;
+            })
+            .then(() => {
+                callback();
+            })
+            .catch((err) => {
+                callback(err);
+            });
     }
 
     /**
-     * @method start
-     * @async
-     * @param callback
      */
     public start(callback: (err?: Error) => void): void {
-        assert(_.isFunction(callback));
+        assert(typeof callback === "function");
         this.listen(callback);
     }
 
     public get bytesWritten(): number {
-        const channels = _.values(this._channels);
-        return this.bytesWrittenInOldChannels + channels.reduce(
-            (accumulated: number, channel: ServerSecureChannelLayer) => {
+        const channels = Object.values(this._channels);
+        return (
+            this.bytesWrittenInOldChannels +
+            channels.reduce((accumulated: number, channel: ServerSecureChannelLayer) => {
                 return accumulated + channel.bytesWritten;
-            }, 0);
+            }, 0)
+        );
     }
 
     public get bytesRead(): number {
-        const channels = _.values(this._channels);
-        return this.bytesReadInOldChannels + channels.reduce(
-            (accumulated: number, channel: ServerSecureChannelLayer) => {
+        const channels = Object.values(this._channels);
+        return (
+            this.bytesReadInOldChannels +
+            channels.reduce((accumulated: number, channel: ServerSecureChannelLayer) => {
                 return accumulated + channel.bytesRead;
-            }, 0);
+            }, 0)
+        );
     }
 
     public get transactionsCount(): number {
-        const channels = _.values(this._channels);
-        return this.transactionsCountOldChannels + channels.reduce(
-            (accumulated: number, channel: ServerSecureChannelLayer) => {
+        const channels = Object.values(this._channels);
+        return (
+            this.transactionsCountOldChannels +
+            channels.reduce((accumulated: number, channel: ServerSecureChannelLayer) => {
                 return accumulated + channel.transactionsCount;
-            }, 0);
+            }, 0)
+        );
     }
 
     public get securityTokenCount(): number {
-        const channels = _.values(this._channels);
-        return this.securityTokenCountOldChannels + channels.reduce(
-            (accumulated: number, channel: ServerSecureChannelLayer) => {
+        const channels = Object.values(this._channels);
+        return (
+            this.securityTokenCountOldChannels +
+            channels.reduce((accumulated: number, channel: ServerSecureChannelLayer) => {
                 return accumulated + channel.securityTokenCount;
-            }, 0);
+            }, 0)
+        );
     }
 
     public get activeChannelCount(): number {
@@ -566,75 +1098,103 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
     }
 
     private _dump_statistics() {
-
-        const self = this;
-
-        self._server!.getConnections((err: Error | null, count: number) => {
-            debugLog(chalk.cyan("CONCURRENT CONNECTION = "), count);
+        this._server?.getConnections((_err: Error | null, count: number) => {
+            // c8 ignore next
+            doDebug && debugLog(chalk.cyan("CONCURRENT CONNECTION = "), count);
         });
-        debugLog(chalk.cyan("MAX CONNECTIONS = "), self._server!.maxConnections);
+        // c8 ignore next
+        doDebug && debugLog(chalk.cyan("MAX CONNECTIONS = "), this._server?.maxConnections);
     }
 
     private _setup_server() {
-
         assert(!this._server);
         this._server = net.createServer({ pauseOnConnect: true }, this._on_client_connection.bind(this));
 
         // xx console.log(" Server with max connections ", self.maxConnections);
         this._server.maxConnections = this.maxConnections + 1; // plus one extra
 
-        this._listen_callback = null;
-        this._server.on("connection", (socket: NodeJS.Socket) => {
-
-            // istanbul ignore next
-            if (doDebug) {
-                this._dump_statistics();
-                debugLog("server connected  with : " +
-                    (socket as any).remoteAddress + ":" + (socket as any).remotePort);
-            }
-
-        }).on("close", () => {
-            debugLog("server closed : all connections have ended");
-        }).on("error", (err: Error) => {
-            // this could be because the port is already in use
-            debugLog(chalk.red.bold("server error: "), err.message);
-        });
+        this._listen_callback = undefined;
+        this._server
+            .on("connection", (socket: Socket) => {
+                this.#acceptedSockets.add(socket);
+                socket.on("close", () => this.#acceptedSockets.delete(socket));
+                // c8 ignore next
+                if (doDebug) {
+                    this._dump_statistics();
+                    debugLog(`server connected  with : ${socket.remoteAddress}:${socket.remotePort}`);
+                }
+            })
+            .on("close", () => {
+                // c8 ignore next
+                doDebug && debugLog("server closed : all connections have ended");
+            })
+            .on("error", (err: Error) => {
+                // this could be because the port is already in use
+                // c8 ignore next
+                doDebug && debugLog(chalk.red.bold("server error: "), err.message);
+            });
     }
 
     private _on_client_connection(socket: Socket) {
-
         // a client is attempting a connection on the socket
-        (socket as any).setNoDelay(true);
+        socket.setNoDelay(true);
 
-        debugLog("OPCUAServerEndPoint#_on_client_connection", this._started);
+        // c8 ignore next
+        doDebug && debugLog("OPCUAServerEndPoint#_on_client_connection", this._started);
         if (!this._started) {
-            debugLog(chalk.bgWhite.cyan("OPCUAServerEndPoint#_on_client_connection " +
-                "SERVER END POINT IS PROBABLY SHUTTING DOWN !!! - Connection is refused"));
+            // c8 ignore next
+            doDebug &&
+                debugLog(
+                    chalk.bgWhite.cyan(
+                        "OPCUAServerEndPoint#_on_client_connection " +
+                            "SERVER END POINT IS PROBABLY SHUTTING DOWN !!! - Connection is refused"
+                    )
+                );
             socket.end();
             return;
         }
+        const deny_connection = () => {
+            console.log(
+                chalk.bgWhite.cyan(
+                    "OPCUAServerEndPoint#_on_client_connection " +
+                        "The maximum number of connection has been reached - Connection is refused"
+                )
+            );
+            const reason = `maxConnections reached (${this.maxConnections})`;
+            const socketData = extractSocketData(socket, reason);
+            this.emit("connectionRefused", socketData);
+
+            socket.end();
+            socket.destroy();
+        };
 
         const establish_connection = () => {
-
             const nbConnections = Object.keys(this._channels).length;
-            debugLog(" nbConnections ", nbConnections, " self._server.maxConnections",
-                this._server!.maxConnections, this.maxConnections);
             if (nbConnections >= this.maxConnections) {
-                debugLog(chalk.bgWhite.cyan("OPCUAServerEndPoint#_on_client_connection " +
-                    "The maximum number of connection has been reached - Connection is refused"));
-                socket.end();
-                (socket as any).destroy();
+                warningLog(
+                    " nbConnections ",
+                    nbConnections,
+                    " self._server.maxConnections",
+                    this._server?.maxConnections,
+                    this.maxConnections
+                );
+                deny_connection();
                 return;
             }
 
-            debugLog("OPCUAServerEndPoint._on_client_connection successful => New Channel");
+            // c8 ignore next
+            doDebug && debugLog("OPCUAServerEndPoint._on_client_connection successful => New Channel");
 
             const channel = new ServerSecureChannelLayer({
                 defaultSecureTokenLifetime: this.defaultSecureTokenLifetime,
                 // objectFactory: this.objectFactory,
                 parent: this,
-                timeout: this.timeout
+                timeout: this.timeout,
+                adjustTransportLimits: this.transportSettings?.adjustTransportLimits
             });
+
+            // c8 ignore next
+            doDebug && debugLog("channel Timeout = >", channel.timeout);
 
             socket.resume();
 
@@ -642,26 +1202,158 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
 
             channel.init(socket, (err?: Error) => {
                 this._un_pre_registerChannel(channel);
-                debugLog(chalk.yellow.bold("Channel#init done"), err);
+                // c8 ignore next
+                doDebug && debugLog(chalk.yellow.bold("Channel#init done"), err);
                 if (err) {
+                    const reason = `openSecureChannel has Failed ${err.message}`;
+                    const socketData = extractSocketData(socket, reason);
+                    const channelData = extractChannelData(channel);
+                    this.emit("openSecureChannelFailure", socketData, channelData);
+
                     socket.end();
+                    socket.destroy();
                 } else {
-                    debugLog("server receiving a client connection");
+                    // c8 ignore next
+                    doDebug && debugLog("server receiving a client connection");
                     this._registerChannel(channel);
                 }
             });
 
-            channel.on("message", (message: any) => {
+            channel.on("message", (message: Message) => {
                 // forward
                 this.emit("message", message, channel, this);
             });
         };
+
         // Each SecureChannel exists until it is explicitly closed or until the last token has expired and the overlap
         // period has elapsed. A Server application should limit the number of SecureChannels.
         // To protect against misbehaving Clients and denial of service attacks, the Server shall close the oldest
         // SecureChannel that has no Session assigned before reaching the maximum number of supported SecureChannels.
-        this._prevent_DDOS_Attack(establish_connection);
+        this._prevent_DDOS_Attack(establish_connection, deny_connection);
+    }
 
+    /**
+     * Initiate a REVERSE connection (OPC UA Part 6 §7.1.3).
+     *
+     * The server dials an OUTBOUND socket to the Client's reverse-connect listener
+     * (`clientEndpointUrl`), sends a ReverseHello ("RHE") carrying `serverUri`/`endpointUrl`,
+     * and then feeds that socket through the very same SecureChannel bookkeeping used for
+     * inbound connections (`_preregisterChannel` / `_registerChannel` / `newChannel`).
+     *
+     * @param clientEndpointUrl the Client's reverse listener URL to dial, e.g. `opc.tcp://client-host:8888`
+     * @param options.serverUri    the server ApplicationUri to advertise in the ReverseHello
+     * @param options.endpointUrl  the SecureChannel EndpointUrl the Client should use
+     * @param options.connectionTimeout optional per-connection HEL timeout (ms)
+     * @param callback called with the established channel, or an error (so the caller may retry)
+     * @returns the outbound socket (so the caller can abort a pending dial), or undefined if not started
+     */
+    public createReverseConnection(
+        clientEndpointUrl: string,
+        options: { serverUri: string; endpointUrl: string; connectionTimeout?: number },
+        callback: (err: Error | null, channel?: ServerSecureChannelLayer) => void
+    ): Socket | undefined {
+        if (!this._started) {
+            callback(new Error("OPCUAServerEndPoint is not started - cannot create a reverse connection"));
+            return undefined;
+        }
+
+        let ep: ReturnType<typeof parseEndpointUrl>;
+        try {
+            ep = parseEndpointUrl(clientEndpointUrl);
+        } catch (err) {
+            callback(err instanceof Error ? err : new Error(String(err)));
+            return undefined;
+        }
+        const port = parseInt(ep.port || "4840", 10);
+        const hostname = ep.hostname;
+
+        let settled = false;
+        // bound the TCP handshake: a client host that silently drops SYNs (firewall) would otherwise
+        // hang the dial for the OS default (~1-2 min) with no retry. Mirrors createClientSocket in
+        // client_tcp_transport.ts, which passes a timeout to createConnection for exactly this case.
+        const connectTimeout = options.connectionTimeout ?? this.timeout;
+        const socket = net.createConnection({ host: hostname, port, timeout: connectTimeout }, () => {
+            /* connected - handled by the "connect" listener below */
+        });
+        socket.setNoDelay(true);
+        socket.setKeepAlive(true);
+
+        const onTimeout = () => {
+            onConnectError(
+                new Error(`reverse connect: TCP connection to ${clientEndpointUrl} timed out after ${connectTimeout} ms`)
+            );
+        };
+
+        const onConnectError = (err: Error) => {
+            if (settled) return;
+            settled = true;
+            socket.removeListener("connect", onConnect);
+            socket.removeListener("timeout", onTimeout);
+            socket.destroy();
+            callback(err);
+        };
+
+        const onConnect = () => {
+            socket.removeListener("error", onConnectError);
+            socket.removeListener("timeout", onTimeout);
+            // clear the connect-phase timeout; the transport installs its own socket timeout in initReverse.
+            socket.setTimeout(0);
+            if (settled) return;
+
+            // reverse connections still consume a channel slot: honor maxConnections
+            const nbConnections = Object.keys(this._channels).length;
+            if (nbConnections >= this.maxConnections) {
+                settled = true;
+                socket.destroy();
+                callback(new Error(`maxConnections reached (${this.maxConnections})`));
+                return;
+            }
+
+            // c8 ignore next
+            doDebug && debugLog("OPCUAServerEndPoint#createReverseConnection successful => New Channel");
+
+            const channel = new ServerSecureChannelLayer({
+                defaultSecureTokenLifetime: this.defaultSecureTokenLifetime,
+                parent: this,
+                timeout: options.connectionTimeout ?? this.timeout,
+                adjustTransportLimits: this.transportSettings?.adjustTransportLimits
+            });
+
+            this._preregisterChannel(channel);
+
+            channel.initReverse(socket, { serverUri: options.serverUri, endpointUrl: options.endpointUrl }, (err?: Error) => {
+                this._un_pre_registerChannel(channel);
+                // c8 ignore next
+                doDebug && debugLog(chalk.yellow.bold("reverse Channel#initReverse done"), err);
+                if (err) {
+                    if (settled) return;
+                    settled = true;
+                    const reason = `reverse connect openSecureChannel has Failed ${err.message}`;
+                    const socketData = extractSocketData(socket, reason);
+                    const channelData = extractChannelData(channel);
+                    this.emit("openSecureChannelFailure", socketData, channelData);
+                    socket.destroy();
+                    callback(err);
+                } else {
+                    settled = true;
+                    // c8 ignore next
+                    doDebug && debugLog("server established a reverse connection");
+                    this._registerChannel(channel);
+                    callback(null, channel);
+                }
+            });
+
+            channel.on("message", (message: Message) => {
+                // forward
+                this.emit("message", message, channel, this);
+            });
+        };
+
+        socket.once("error", onConnectError);
+        socket.once("connect", onConnect);
+        socket.once("timeout", onTimeout);
+
+        return socket;
     }
 
     private _preregisterChannel(channel: ServerSecureChannelLayer) {
@@ -671,77 +1363,86 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
         // as they will need to be interrupted when OPCUAServerEndPoint is closed
         assert(this._started, "OPCUAServerEndPoint must be started");
 
-        assert(!this._channels.hasOwnProperty(channel.hashKey), " channel already preregistered!");
+        assert(!Object.hasOwn(this._channels, channel.hashKey), " channel already preregistered!");
 
         this._channels[channel.hashKey] = channel;
-
-        (channel as any)._unpreregisterChannelEvent = () => {
-            debugLog("Channel received an abort event during the preregistration phase");
+        const onAbort = () => {
+            // c8 ignore next
+            doDebug && debugLog("Channel received an abort event during the preregistration phase");
             this._un_pre_registerChannel(channel);
             channel.dispose();
         };
-        channel.on("abort", (channel as any)._unpreregisterChannelEvent);
+        preregisterAbortListeners.set(channel, onAbort);
+        channel.on("abort", onAbort);
     }
 
     private _un_pre_registerChannel(channel: ServerSecureChannelLayer) {
-
         if (!this._channels[channel.hashKey]) {
-            debugLog("Already un preregistered ?", channel.hashKey);
+            // c8 ignore next
+            doDebug && debugLog("Already un preregistered ?", channel.hashKey);
             return;
         }
-
         delete this._channels[channel.hashKey];
-        assert(_.isFunction((channel as any)._unpreregisterChannelEvent));
-        channel.removeListener("abort", (channel as any)._unpreregisterChannelEvent);
-        (channel as any)._unpreregisterChannelEvent = null;
+        const onAbort = preregisterAbortListeners.get(channel);
+        if (onAbort) {
+            channel.removeListener("abort", onAbort);
+            preregisterAbortListeners.delete(channel);
+        }
     }
 
     /**
-     * @method _registerChannel
-     * @param channel
      * @private
      */
     private _registerChannel(channel: ServerSecureChannelLayer) {
-
         if (this._started) {
-
-            debugLog(chalk.red("_registerChannel = "), "channel.hashKey = ", channel.hashKey);
+            // c8 ignore next
+            doDebug && debugLog(chalk.red("_registerChannel = "), "channel.hashKey = ", channel.hashKey);
 
             assert(!this._channels[channel.hashKey]);
             this._channels[channel.hashKey] = channel;
 
-            channel._rememberClientAddressAndPort();
             /**
-             * @event newChannel
+             * @event newChannel — fired after transport init (HEL/ACK).
+             * Note: securityPolicy/securityMode are NOT yet established.
              * @param channel
              */
             this.emit("newChannel", channel);
 
+            channel.once("open", () => {
+                /**
+                 * @event channelSecured — fired after OpenSecureChannel
+                 * handshake succeeds. securityPolicy, securityMode, and
+                 * clientCertificate are available at this point.
+                 * @param channel
+                 */
+                this.emit("channelSecured", channel);
+            });
+
             channel.on("abort", () => {
                 this._unregisterChannel(channel);
             });
-
         } else {
-            debugLog("OPCUAServerEndPoint#_registerChannel called when end point is shutdown !");
-            debugLog("  -> channel will be forcefully terminated");
-            channel.close();
-            channel.dispose();
+            // c8 ignore next
+            if (doDebug) {
+                debugLog("OPCUAServerEndPoint#_registerChannel called when end point is shutdown !");
+                debugLog("  -> channel will be forcefully terminated");
+            }
+            channel.close(() => {
+                channel.dispose();
+            });
         }
     }
 
     /**
-     * @method _unregisterChannel
-     * @param channel
-     * @private
      */
     private _unregisterChannel(channel: ServerSecureChannelLayer): void {
-
-        debugLog("_un-registerChannel channel.hashKey", channel.hashKey);
-        if (!this._channels.hasOwnProperty(channel.hashKey)) {
+        // c8 ignore next
+        doDebug && debugLog("_un-registerChannel channel.hashKey", channel.hashKey);
+        if (!Object.hasOwn(this._channels, channel.hashKey)) {
             return;
         }
 
-        assert(this._channels.hasOwnProperty(channel.hashKey), "channel is not registered");
+        assert(Object.hasOwn(this._channels, channel.hashKey), "channel is not registered");
 
         /**
          * @event closeChannel
@@ -755,7 +1456,7 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
         this.transactionsCountOldChannels += channel.transactionsCount;
         delete this._channels[channel.hashKey];
 
-        // istanbul ignore next
+        // c8 ignore next
         if (doDebug) {
             this._dump_statistics();
             debugLog("un-registering channel  - Count = ", this.currentChannelCount);
@@ -765,9 +1466,9 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
     }
 
     private _end_listen(err?: Error) {
-        assert(_.isFunction(this._listen_callback));
+        if (!this._listen_callback) return;
         this._listen_callback(err);
-        this._listen_callback = null;
+        this._listen_callback = undefined;
     }
 
     /**
@@ -775,11 +1476,8 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
      * @param channel
      * @param inner_callback
      */
-    private shutdown_channel(
-        channel: ServerSecureChannelLayer,
-        inner_callback: (err?: Error) => void
-    ) {
-        assert(_.isFunction(inner_callback));
+    private shutdown_channel(channel: ServerSecureChannelLayer, inner_callback: (err?: Error) => void) {
+        assert(typeof inner_callback === "function");
         channel.once("close", () => {
             // xx console.log(" ON CLOSED !!!!");
         });
@@ -793,68 +1491,82 @@ export class OPCUAServerEndPoint extends EventEmitter implements ServerSecureCha
     /**
      * @private
      */
-    private _prevent_DDOS_Attack(establish_connection: () => void) {
-
+    private _prevent_DDOS_Attack(establish_connection: () => void, deny_connection: () => void) {
         const nbConnections = this.activeChannelCount;
 
         if (nbConnections >= this.maxConnections) {
-            // istanbul ignore next
-            if (doDebug) {
-                console.log(chalk.bgRed.white("PREVENTING DOS ATTACK => Closing unused channels"));
-            }
-            const unused_channels: ServerSecureChannelLayer[] = _.filter(this.getChannels(),
-                (channel1: ServerSecureChannelLayer) => {
-                    return !channel1.isOpened && !channel1.hasSession;
-                });
-            if (unused_channels.length === 0) {
-                // all channels are in used , we cannot get any
+            // c8 ignore next
+            errorLog(chalk.bgRed.white(`PREVENTING DDOS ATTACK => maxConnection =${this.maxConnections}`));
 
-                // istanbul ignore next
+            // OPC UA Part 6: at the cap the server closes the oldest SecureChannel that has
+            // no Session assigned, so that one new connection fits. A Session is attached to
+            // its channel during CreateSession, which happens before ActivateSession, so a
+            // channel can report `hasSession === true` while none of its Sessions is activated
+            // yet. Such a channel does not represent an established client, so it stays
+            // reclaimable. We reclaim in two tiers: first a channel with no Session at all,
+            // then, only if none is free, the oldest channel whose Sessions are all still
+            // unactivated. `getChannels()` keeps the channels in ascending channelId order, so
+            // the first entry of each tier is the oldest.
+            const sessionLess = this.getChannels().filter((channel1: ServerSecureChannelLayer) => !channel1.hasSession);
+            const unused_channels: ServerSecureChannelLayer[] =
+                sessionLess.length > 0
+                    ? sessionLess
+                    : this.getChannels().filter((channel1: ServerSecureChannelLayer) => !channel1.hasActivatedSession);
+            if (unused_channels.length === 0) {
+                doDebug &&
+                    console.log(
+                        this.getChannels()
+                            .map(({ status, isOpened, hasSession }) => `${status} ${isOpened} ${hasSession}\n`)
+                            .join(" ")
+                    );
+                // all channels are in used , we cannot get any
+                errorLog(`All channels are in used ! we cannot cancel any ${this.getChannels().length}`);
+                // c8 ignore next
                 if (doDebug) {
-                    console.log("  - all channel are used !!!!");
-                    dumpChannelInfo(this.getChannels());
+                    console.log("  - all channels are used !!!!");
+                    false && dumpChannelInfo(this.getChannels());
                 }
-                setImmediate(establish_connection);
+                setTimeout(deny_connection, 1000);
                 return;
             }
-            // istanbul ignore next
+            // c8 ignore next
             if (doDebug) {
-                console.log("   - Unused channels that can be clobbered",
-                    _.map(unused_channels, (channel1: ServerSecureChannelLayer) => channel1.hashKey).join(" "));
+                console.log(
+                    "   - Unused channels that can be clobbered",
+                    unused_channels.map((channel1: ServerSecureChannelLayer) => channel1.hashKey).join(" ")
+                );
             }
             const channel = unused_channels[0];
-
+            errorLog(
+                `${unused_channels.length} : Forcefully closing oldest channel that has no activated session: ${channel.hashKey}`
+            );
             channel.close(() => {
-                // istanbul ignore next
+                // c8 ignore next
                 if (doDebug) {
                     console.log("   _ Unused channel has been closed ", channel.hashKey);
                 }
                 this._unregisterChannel(channel);
-
                 establish_connection();
             });
         } else {
             setImmediate(establish_connection);
         }
     }
-
 }
 
 interface MakeEndpointDescriptionOptions {
-
-    /**
-     * port number s
-     */
-    port: number;
-
     /**
      * @default  default hostname (default value will be full qualified domain name)
      */
     hostname: string;
-    endpointUrl: string;
 
-    serverCertificateChain: Certificate;
+    /**
+     *
+     */
     securityMode: MessageSecurityMode;
+    /**
+     *
+     */
     securityPolicy: SecurityPolicy;
 
     securityLevel?: number;
@@ -871,185 +1583,185 @@ interface MakeEndpointDescriptionOptions {
         };
      */
     resourcePath?: string;
-    allowAnonymous?: boolean; // default true
 
-    // allow unencrypted password in userNameIdentity
+    // allow un-encrypted password in userNameIdentity
     allowUnsecurePassword?: boolean; // default false
 
+    /**
+     * onlyCertificateLessConnection
+     */
+    onlyCertificateLessConnection?: boolean;
+
     restricted: boolean;
+
+    collection: { [key: string]: number };
+
+    securityPolicies: SecurityPolicy[];
+
+    userTokenTypes: UserTokenType[];
+    /**
+     * Override the port used in the dynamic endpointUrl getter.
+     * When set, the endpoint URL advertises this port instead of
+     * the parent's listen port.
+     */
+    advertisedPort?: number;
+    /**
+     *
+     * default value: false;
+     *
+     * note: setting noUserIdentityTokens=true is useful for pure local discovery servers
+     */
+    noUserIdentityTokens?: boolean;
 }
 
-interface EndpointDescriptionEx extends EndpointDescription {
+export interface EndpointDescriptionEx extends EndpointDescription {
+    _parent: OPCUAServerEndPoint;
     restricted: boolean;
 }
 
 function estimateSecurityLevel(securityMode: MessageSecurityMode, securityPolicy: SecurityPolicy): number {
-
     if (securityMode === MessageSecurityMode.None) {
         return 1;
     }
     let offset = 100;
     if (securityMode === MessageSecurityMode.SignAndEncrypt) {
-        offset = 100;
+        offset = 200;
     }
     switch (securityPolicy) {
-        case SecurityPolicy.None:
-            return 0;
         case SecurityPolicy.Basic128:
         case SecurityPolicy.Basic128Rsa15:
         case SecurityPolicy.Basic192:
-            return 2;
+            return 2; // deprecated => low
         case SecurityPolicy.Basic192Rsa15:
-            return 3;
+            return 3; // deprecated => low
         case SecurityPolicy.Basic256:
-            return 4;
+            return 4; // deprecated => low
         case SecurityPolicy.Basic256Rsa15:
             return 4 + offset;
+        case SecurityPolicy.Aes128_Sha256_RsaOaep:
+            return 5 + offset;
         case SecurityPolicy.Basic256Sha256:
             return 6 + offset;
-        case SecurityPolicy.Aes128_Sha256_RsaOaep:
-            return 1;
+        case SecurityPolicy.Aes256_Sha256_RsaPss:
+            return 7 + offset;
+
         default:
             return 1;
     }
-
 }
 /**
  * @private
  */
-function _makeEndpointDescription(options: MakeEndpointDescriptionOptions): EndpointDescriptionEx {
-
-    assert(_.isFinite(options.port), "expecting a valid port number");
-    assert(options.hasOwnProperty("serverCertificateChain"));
-    assert(!options.hasOwnProperty("serverCertificate"));
-    assert(!!options.securityMode); // s.MessageSecurityMode
-    assert(!!options.securityPolicy);
-    assert(_.isObject(options.server));
-    assert(!!options.hostname && (typeof options.hostname === "string"));
-    assert(_.isBoolean(options.restricted));
-
-    options.securityLevel = (options.securityLevel === undefined) ? estimateSecurityLevel(options.securityMode, options.securityPolicy) : options.securityLevel;
-    assert(_.isFinite(options.securityLevel), "expecting a valid securityLevel");
+function _makeEndpointDescription(options: MakeEndpointDescriptionOptions, parent: OPCUAServerEndPoint): EndpointDescriptionEx {
+    const u = (n: string) => getUniqueName(n, options.collection);
+    options.securityLevel =
+        options.securityLevel === undefined
+            ? estimateSecurityLevel(options.securityMode, options.securityPolicy)
+            : options.securityLevel;
+    assert(Number.isFinite(options.securityLevel), "expecting a valid securityLevel");
 
     const securityPolicyUri = toURI(options.securityPolicy);
 
-    const userIdentityTokens = [];
+    const userIdentityTokens: UserTokenPolicyOptions[] = [];
 
-    if (options.securityPolicy === SecurityPolicy.None) {
+    const registerIdentity2 = (tokenType: UserTokenType, securityPolicy: SecurityPolicy, name: string) => {
+        return registerIdentity({
+            policyId: u(name),
+            tokenType,
+            issuedTokenType: null,
+            issuerEndpointUrl: null,
+            securityPolicyUri: securityPolicy
+        });
+    };
+    const registerIdentity = (r: UserTokenPolicyOptions) => {
+        const tokenType = r.tokenType === undefined ? UserTokenType.Invalid : r.tokenType;
+        const securityPolicy = (r.securityPolicyUri || "") as SecurityPolicy;
+        if (!securityPolicy && options.userTokenTypes.indexOf(tokenType) >= 0) {
+            userIdentityTokens.push(r);
+            return;
+        }
+        if (options.securityPolicies.indexOf(securityPolicy) >= 0 && options.userTokenTypes.indexOf(tokenType) >= 0) {
+            userIdentityTokens.push(r);
+        }
+    };
 
-        if (options.allowUnsecurePassword) {
-            userIdentityTokens.push({
-                policyId: "username_unsecure",
-                tokenType: UserTokenType.UserName,
+    if (!options.noUserIdentityTokens) {
+        if (options.securityPolicy === SecurityPolicy.None) {
+            if (options.allowUnsecurePassword) {
+                registerIdentity({
+                    policyId: u("username_unsecure"),
+                    tokenType: UserTokenType.UserName,
 
-                issuedTokenType: null,
-                issuerEndpointUrl: null,
-                securityPolicyUri: null
-            });
+                    issuedTokenType: null,
+                    issuerEndpointUrl: null,
+                    securityPolicyUri: null
+                });
+            }
+
+            const onlyCertificateLessConnection =
+                options.onlyCertificateLessConnection === undefined ? false : options.onlyCertificateLessConnection;
+
+            if (!onlyCertificateLessConnection) {
+                registerIdentity2(UserTokenType.UserName, SecurityPolicy.Basic256, "username_basic256");
+                registerIdentity2(UserTokenType.UserName, SecurityPolicy.Basic128Rsa15, "username_basic128Rsa15");
+                registerIdentity2(UserTokenType.UserName, SecurityPolicy.Basic256Sha256, "username_basic256Sha256");
+                registerIdentity2(UserTokenType.UserName, SecurityPolicy.Aes128_Sha256_RsaOaep, "username_aes128Sha256RsaOaep");
+
+                // X509
+                registerIdentity2(UserTokenType.Certificate, SecurityPolicy.Basic256, "certificate_basic256");
+                registerIdentity2(UserTokenType.Certificate, SecurityPolicy.Basic128Rsa15, "certificate_basic128Rsa15");
+                registerIdentity2(UserTokenType.Certificate, SecurityPolicy.Basic256Sha256, "certificate_basic256Sha256");
+                registerIdentity2(
+                    UserTokenType.Certificate,
+                    SecurityPolicy.Aes128_Sha256_RsaOaep,
+                    "certificate_aes128Sha256RsaOaep"
+                );
+            }
+        } else {
+            // note:
+            //  when channel session security is not "None",
+            //  userIdentityTokens can be left to null.
+            //  in this case this mean that secure policy will be the same as connection security policy
+            // c8 ignore next
+            if (process.env.NODEOPCUA_SERVER_EMULATE_SIEMENS) {
+                // However, for some reason SIEMENS plc requires that password get encrypted even though
+                // the secure channel is also encrypted ....
+                // you can set the NODEOPCUA_SERVER_EMULATE_SIEMENS env variable to simulate this behavior
+                const registerIdentity3 = (tokenType: UserTokenType, securityPolicy: SecurityPolicy, name: string) => {
+                    const identity = {
+                        policyId: u(name),
+                        tokenType,
+                        issuedTokenType: null,
+                        issuerEndpointUrl: null,
+                        securityPolicyUri: securityPolicy
+                    };
+                    userIdentityTokens.push(identity);
+                };
+                registerIdentity3(UserTokenType.UserName, SecurityPolicy.Basic256, "username_basic256");
+                registerIdentity3(UserTokenType.UserName, SecurityPolicy.Basic128Rsa15, "username_basic128Rsa15");
+                registerIdentity3(UserTokenType.UserName, SecurityPolicy.Basic256Sha256, "username_basic256Sha256");
+            } else {
+                registerIdentity({
+                    policyId: u("usernamePassword"),
+                    tokenType: UserTokenType.UserName,
+                    issuedTokenType: null,
+                    issuerEndpointUrl: null,
+                    securityPolicyUri: null
+                });
+
+                registerIdentity({
+                    policyId: u("certificateX509"),
+                    tokenType: UserTokenType.Certificate,
+
+                    issuedTokenType: null,
+                    issuerEndpointUrl: null,
+                    securityPolicyUri: null
+                });
+            }
         }
 
-        userIdentityTokens.push({
-            policyId: "username_basic256",
-            tokenType: UserTokenType.UserName,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic256
-        });
-
-        userIdentityTokens.push({
-            policyId: "username_basic128",
-            tokenType: UserTokenType.UserName,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic128Rsa15
-        });
-
-        userIdentityTokens.push({
-            policyId: "username_basic256Sha256",
-            tokenType: UserTokenType.UserName,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic256Sha256
-        });
-
-        userIdentityTokens.push({
-            policyId: "certificate_basic256Sha256",
-            tokenType: UserTokenType.Certificate,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic256Sha256
-        });
-
-        // X509
-        userIdentityTokens.push({
-            policyId: "certificate_basic256",
-            tokenType: UserTokenType.UserName,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic256
-        });
-
-        userIdentityTokens.push({
-            policyId: "certificate_basic128",
-            tokenType: UserTokenType.UserName,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic128Rsa15
-        });
-
-        userIdentityTokens.push({
-            policyId: "certificate_basic256Sha256",
-            tokenType: UserTokenType.UserName,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic256Sha256
-        });
-
-        userIdentityTokens.push({
-            policyId: "certificate_basic256Sha256",
-            tokenType: UserTokenType.Certificate,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: SecurityPolicy.Basic256Sha256
-        });
-
-    } else {
-        // note:
-        //  when channel session security is not "None",
-        //  userIdentityTokens can be left to null.
-        //  in this case this mean that secure policy will be the same as connection security policy
-        userIdentityTokens.push({
-            policyId: "usernamePassword",
-            tokenType: UserTokenType.UserName,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: null
-        });
-
-        userIdentityTokens.push({
-            policyId: "certificateX509",
-            tokenType: UserTokenType.Certificate,
-
-            issuedTokenType: null,
-            issuerEndpointUrl: null,
-            securityPolicyUri: null
-        });
-
-    }
-
-    if (options.allowAnonymous) {
-
-        userIdentityTokens.push({
-            policyId: "anonymous",
+        registerIdentity({
+            policyId: u("anonymous"),
             tokenType: UserTokenType.Anonymous,
 
             issuedTokenType: null,
@@ -1057,25 +1769,44 @@ function _makeEndpointDescription(options: MakeEndpointDescriptionOptions): Endp
             securityPolicyUri: null
         });
     }
-
     // return the endpoint object
     const endpoint = new EndpointDescription({
-
-        endpointUrl: options.endpointUrl,
+        endpointUrl: "<to be evaluated at run time>", // options.endpointUrl,
 
         server: undefined, // options.server,
-        serverCertificate: options.serverCertificateChain,
+        // serverCertificate is set as a dynamic getter below
+        serverCertificate: undefined,
 
         securityMode: options.securityMode,
         securityPolicyUri,
         userIdentityTokens,
 
         securityLevel: options.securityLevel,
-        transportProfileUri: default_transportProfileUri
+        transportProfileUri: UATCP_UASC_UABINARY
     }) as EndpointDescriptionEx;
+    endpoint._parent = parent;
 
-    (endpoint as any).__defineGetter__("endpointUrl", () => {
-        return resolveFullyQualifiedDomainName(options.endpointUrl);
+    // serverCertificate — always dynamic.
+    // Delegates to the parent endpoint's combined DER cache
+    // which in turn reads from the current ICertificateChainProvider.
+    // This ensures GetEndpoints always returns the current chain,
+    // whether the provider is static or disk-based.
+    Object.defineProperty(endpoint, "serverCertificate", {
+        get: () => parent.getCombinedCertificate(),
+        configurable: true
+    });
+
+    // endpointUrl is dynamic as port number may be adjusted
+    // when the tcp socket start listening
+    Object.defineProperty(endpoint, "endpointUrl", {
+        get: () => {
+            const port = options.advertisedPort ?? endpoint._parent.port;
+            const resourcePath = options.resourcePath || "";
+            const hostname = options.hostname;
+            const endpointUrl = `opc.tcp://${hostname}:${port}${resourcePath}`;
+            return resolveFullyQualifiedDomainName(endpointUrl);
+        },
+        configurable: true
     });
 
     endpoint.server = options.server;
@@ -1083,7 +1814,6 @@ function _makeEndpointDescription(options: MakeEndpointDescriptionOptions): Endp
     endpoint.restricted = options.restricted;
 
     return endpoint;
-
 }
 
 /**
@@ -1097,26 +1827,39 @@ function _makeEndpointDescription(options: MakeEndpointDescriptionOptions): Endp
 function matching_endpoint(
     securityMode: MessageSecurityMode,
     securityPolicy: SecurityPolicy,
-    endpointUrl: string | undefined,
+    endpointUrl: string | null,
     endpoint: EndpointDescription
 ): boolean {
-
     assert(endpoint instanceof EndpointDescription);
     const endpoint_securityPolicy = fromURI(endpoint.securityPolicyUri);
-    if (endpointUrl && endpoint.endpointUrl! !== endpointUrl) {
+    if (endpointUrl && endpoint.endpointUrl !== endpointUrl) {
         return false;
     }
-    return (endpoint.securityMode === securityMode && endpoint_securityPolicy === securityPolicy);
+    return endpoint.securityMode === securityMode && endpoint_securityPolicy === securityPolicy;
 }
 
-const defaultSecurityModes = [
-    MessageSecurityMode.None,
-    MessageSecurityMode.Sign,
-    MessageSecurityMode.SignAndEncrypt
-];
+const defaultSecurityModes = [MessageSecurityMode.None, MessageSecurityMode.Sign, MessageSecurityMode.SignAndEncrypt];
+
 const defaultSecurityPolicies = [
-    SecurityPolicy.Basic128Rsa15,
-    SecurityPolicy.Basic256,
-    // xx UNUSED!!    SecurityPolicy.Basic256Rsa15,
-    SecurityPolicy.Basic256Sha256
+    // now deprecated  Basic128Rs15 shall be disabled by default
+    // see https://profiles.opcfoundation.org/profile/1532
+    // SecurityPolicy.Basic128Rsa15,
+
+    // now deprecated Basic256 shall be disabled by default
+    // see https://profiles.opcfoundation.org/profile/2062
+    // SecurityPolicy.Basic256,
+
+    // xx UNUSED!!  SecurityPolicy.Basic192Rsa15,
+    // xx UNUSED!!  SecurityPolicy.Basic256Rsa15,
+
+    SecurityPolicy.Basic256Sha256,
+    SecurityPolicy.Aes128_Sha256_RsaOaep,
+    SecurityPolicy.Aes256_Sha256_RsaPss
+];
+
+const defaultUserTokenTypes = [
+    UserTokenType.Anonymous,
+    UserTokenType.UserName,
+    UserTokenType.Certificate
+    // NOT USED YET : UserTokenType.IssuedToken
 ];

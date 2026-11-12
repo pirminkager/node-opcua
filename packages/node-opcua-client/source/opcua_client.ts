@@ -2,170 +2,77 @@
  * @module node-opcua-client
  */
 
-// tslint:disable:variable-name
-import { EventEmitter } from "events";
-import {
-    Certificate,
-    exploreCertificate,
-    extractPublicKeyFromCertificateSync,
-    Nonce,
-    PrivateKey,
-    PrivateKeyPEM,
-    toPem
-} from "node-opcua-crypto";
-import {
-    ConnectionStrategyOptions,
-    SecurityPolicy
-} from "node-opcua-secure-channel";
-import {
-    ApplicationDescription,
-    ApplicationDescriptionOptions,
-    ApplicationType,
-    EndpointDescription,
-    UserTokenType
-} from "node-opcua-service-endpoints";
-import { MessageSecurityMode } from "node-opcua-service-secure-channel";
-import { X509IdentityTokenOptions } from "node-opcua-types";
-import {
-    ErrorCallback
-} from "node-opcua-status-code";
-import {
+import type { LocaleId } from "node-opcua-basic-types";
+import type { DataTypeExtractStrategy } from "node-opcua-client-dynamic-extension-object";
+import type { ResponseCallback } from "node-opcua-pseudo-session";
+import type { ApplicationDescription, EndpointDescription } from "node-opcua-service-endpoints";
+import type { CallbackT, ErrorCallback, StatusCode } from "node-opcua-status-code";
+import type {
     FindServersRequestLike,
     GetEndpointsOptions,
     OPCUAClientBase,
+    OPCUAClientBaseEvents,
     OPCUAClientBaseOptions
-} from "./client_base";
-
-import { ByteString } from "node-opcua-basic-types";
-import { ClientSession, ResponseCallback } from "./client_session";
-import { ClientSubscription, ClientSubscriptionOptions } from "./client_subscription";
-import { OPCUAClientImpl } from "./private/opcua_client_impl";
-
-export interface UserIdentityInfoUserName {
-    type: UserTokenType.UserName;
-    userName: string;
-    password: string;
-}
-
-export interface UserIdentityInfoX509 extends X509IdentityTokenOptions {
-    type: UserTokenType.Certificate;
-    certificateData: ByteString;
-    privateKey: PrivateKeyPEM;
-}
-export interface AnonymousIdentity {
-    type: UserTokenType.Anonymous;
-}
-
-export type UserIdentityInfo = AnonymousIdentity | UserIdentityInfoX509 | UserIdentityInfoUserName;
+} from "./client_base.js";
+import type { ClientSession } from "./client_session.js";
+import type { ClientSubscription, ClientSubscriptionOptions } from "./client_subscription.js";
+import { OPCUAClientImpl } from "./private/opcua_client_impl.js";
+import type { UserIdentityInfo } from "./user_identity_info.js";
 
 export interface OPCUAClientOptions extends OPCUAClientBaseOptions {
-
     /**
      * the requested session timeout in CreateSession (ms)
-     * @default 60000
+     *
+     * Note:
+     *    - make sure that this value is large enough, especially larger than the
+     *      time between two transactions to the server.
+     *
+     *    - If your client establishes a subscription with the server, make sure that
+     *      (maxKeepAliveCount * publishingInterval) calculated with negotiated values
+     *      from the server  stay by large below the session time out, as you make
+     *      encountered unexpected behavior.
+     *
+     * @default 60000 - default value is 60 secondes
      */
-
     requestedSessionTimeout?: number;
+
+    /**
+     *  @deprecated(use endpointMustExist instead)
+     */
+    endpoint_must_exist?: boolean;
     /**
      * set to false if the client should accept server endpoint mismatch
      * @default true
      */
-    endpoint_must_exist?: boolean;
-
-    // --------------------------------------------------------------------
-    connectionStrategy?: ConnectionStrategyOptions;
-
-    /** the server certificate. */
-    serverCertificate?: Certificate;
-
-    /***
-     * default secure token lifetime in ms
-     */
-    defaultSecureTokenLifetime?: number;
+    endpointMustExist?: boolean;
 
     /**
-     * the security mode
-     * @default MessageSecurityMode.None
-     */
-    securityMode?: MessageSecurityMode | string;
-
-    /**
-     * the security policy
-     * @default SecurityPolicy.None
-     */
-    securityPolicy?: SecurityPolicy | string;
-
-    /**
+     * Compute the ActivateSession client signature over the server certificate
+     * exactly as received in CreateSessionResponse (the whole chain, when the
+     * server sends one) instead of over its leaf certificate.
+     *
+     * This is the legacy calculation of OPC 10000-4 §6.1.8 that some deployed
+     * clients still use; a conformant server accepts both. Leave it off in
+     * production: it exists to test servers against such clients.
      * @default false
      */
-    keepSessionAlive?: boolean;
+    signServerCertificateChain?: boolean;
 
     /**
-     * client certificate pem file.
-     * @default "certificates/client_self-signed_cert_2048.pem"
+     * optional parameter to specify strategy used to extract DataTypeDefinition from server
+     * default value : "Auto" : the client will attempt to extract DataTypeDefinition using the most efficient strategy
      */
-    certificateFile?: string;
+    dataTypeExtractStrategy?: DataTypeExtractStrategy;
 
     /**
-     * client private key pem file.
-     * @default "certificates/client_key_2048.pem"
+     * List of locale ids to send in ActivateSession, in priority order (the first is the
+     * most preferred). OPC 10000-4 v1.05.07 §5.7.3 ActivateSession: sent with every
+     * ActivateSession call, including a reactivation after reconnect, since the Server
+     * keeps its current list when it receives a null or empty one.
+     *
+     * @default [] - unset, so the Server keeps whatever locale it already uses.
      */
-    privateKeyFile?: string;
-
-    /**
-     * a client name string that will be used to generate session names.
-     */
-    clientName?: string;
-}
-
-export interface OPCUAClient extends OPCUAClientBase {
-
-    connect(endpointUrl: string): Promise<void>;
-
-    connect(endpointUrl: string, callback: ErrorCallback): void;
-
-    disconnect(): Promise<void>;
-
-    disconnect(callback: ErrorCallback): void;
-
-    getEndpoints(options?: GetEndpointsOptions): Promise<EndpointDescription[]>;
-
-    getEndpoints(options: GetEndpointsOptions, callback: ResponseCallback<EndpointDescription[]>): void;
-
-    getEndpoints(callback: ResponseCallback<EndpointDescription[]>): void;
-
-    findServers(options?: FindServersRequestLike): Promise<ApplicationDescription[]>;
-
-    findServers(options: FindServersRequestLike, callback: ResponseCallback<ApplicationDescription[]>): void;
-
-    findServers(callback: ResponseCallback<ApplicationDescription[]>): void;
-
-    createSession(userIdentityInfo?: UserIdentityInfo): Promise<ClientSession>;
-
-    createSession(
-        userIdentityInfo: UserIdentityInfo,
-        callback: (err: Error | null, session?: ClientSession) => void): void;
-
-    createSession(callback: (err: Error | null, session?: ClientSession) => void): void;
-
-    changeSessionIdentity(
-        session: ClientSession,
-        userIdentityInfo: UserIdentityInfo
-    ): Promise<void>;
-
-    changeSessionIdentity(
-        session: ClientSession,
-        userIdentityInfo: UserIdentityInfo,
-        callback: (err?: Error) => void
-    ): void;
-
-    closeSession(session: ClientSession, deleteSubscriptions: boolean): Promise<void>;
-
-    closeSession(session: ClientSession, deleteSubscriptions: boolean, callback: (err?: Error) => void): void;
-
-    reactivateSession(session: ClientSession): Promise<void>;
-
-    reactivateSession(session: ClientSession, callback: (err?: Error) => void): void;
+    localeIds?: LocaleId[];
 }
 
 export interface EndpointWithUserIdentity {
@@ -177,27 +84,227 @@ export type WithSessionFuncP<T> = (session: ClientSession) => Promise<T>;
 export type WithSubscriptionFunc = (session: ClientSession, subscription: ClientSubscription) => Promise<void>;
 export type WithSubscriptionFuncP<T> = (session: ClientSession, subscription: ClientSubscription) => Promise<T>;
 
-export interface OPCUAClient {
+/**
+ * The OPC UA client interface.
+ *
+ * `OPCUAClient` provides methods to connect to an OPC UA server,
+ * create sessions, and manage the client lifecycle.
+ *
+ * Use {@link OPCUAClient.create} to instantiate a client.
+ *
+ * @example
+ * ```typescript
+ * const client = OPCUAClient.create({ endpointMustExist: false });
+ * await client.connect("opc.tcp://localhost:26543");
+ * const session = await client.createSession();
+ * // ... use the session ...
+ * await session.close();
+ * await client.disconnect();
+ * ```
+ */
+export interface OPCUAClient<Events extends OPCUAClientBaseEvents = OPCUAClientBaseEvents> extends OPCUAClientBase<Events> {
+    /**
+     * Legacy signer switch, read at each ActivateSession.
+     * @see OPCUAClientOptions.signServerCertificateChain
+     */
+    signServerCertificateChain: boolean;
 
-    withSessionAsync<T>(
-        endpointUrl: string | EndpointWithUserIdentity,
-        inner_func: WithSessionFuncP<T>
-    ): Promise<T>;
+    /**
+     * Connect the client to the specified OPC UA server endpoint.
+     *
+     * The client will establish a secure channel, negotiate security
+     * parameters, and verify the server certificate.
+     *
+     * @param endpointUrl - the OPC UA endpoint URL (e.g. `"opc.tcp://host:4840"`)
+     */
+    connect(endpointUrl: string): Promise<void>;
+    connect(endpointUrl: string, callback: ErrorCallback): void;
 
-    withSession(endpointUrl: string | EndpointWithUserIdentity,
-        inner_func: (session: ClientSession, done: (err?: Error) => void) => void,
-        callback: (err?: Error) => void): void;
+    /**
+     * Disconnect the client from the server.
+     *
+     * This closes all active sessions, subscriptions, and the
+     * underlying secure channel.
+     */
+    disconnect(): Promise<void>;
+    disconnect(callback: ErrorCallback): void;
 
+    /**
+     * Retrieve the list of endpoints exposed by the server.
+     *
+     * @param options - optional filter criteria for the endpoint query
+     * @returns the array of endpoint descriptions advertised by the server
+     */
+    getEndpoints(options?: GetEndpointsOptions): Promise<EndpointDescription[]>;
+
+    getEndpoints(options: GetEndpointsOptions, callback: ResponseCallback<EndpointDescription[]>): void;
+
+    getEndpoints(callback: ResponseCallback<EndpointDescription[]>): void;
+
+    /**
+     * Discover OPC UA servers registered on the network.
+     *
+     * @param options - optional filter criteria for the discovery query
+     * @returns the array of discovered server application descriptions
+     */
+    findServers(options?: FindServersRequestLike): Promise<ApplicationDescription[]>;
+
+    findServers(options: FindServersRequestLike, callback: ResponseCallback<ApplicationDescription[]>): void;
+
+    findServers(callback: ResponseCallback<ApplicationDescription[]>): void;
+
+    /**
+     * Create a new session on the connected server.
+     *
+     * If `userIdentityInfo` is not provided, an anonymous session
+     * is created.
+     *
+     * @param userIdentityInfo - optional credentials for user authentication
+     * @returns the newly created client session
+     */
+    createSession(userIdentityInfo?: UserIdentityInfo): Promise<ClientSession>;
+
+    createSession(userIdentityInfo: UserIdentityInfo, callback: (err: Error | null, session?: ClientSession) => void): void;
+
+    createSession(callback: (err: Error | null, session?: ClientSession) => void): void;
+
+    /**
+     * Create a new session, using createSession2 service (OPC UA 1.04+).
+     *
+     * @param userIdentityInfo - optional credentials for user authentication
+     * @returns the newly created client session
+     */
+    createSession2(userIdentityInfo?: UserIdentityInfo): Promise<ClientSession>;
+
+    createSession2(userIdentityInfo: UserIdentityInfo, callback: (err: Error | null, session?: ClientSession) => void): void;
+
+    createSession2(callback: (err: Error | null, session?: ClientSession) => void): void;
+
+    /** @deprecated */
+    changeSessionIdentity(session: ClientSession, userIdentityInfo: UserIdentityInfo): Promise<StatusCode>;
+    changeSessionIdentity(session: ClientSession, userIdentityInfo: UserIdentityInfo, callback: CallbackT<StatusCode>): void;
+
+    /**
+     * Close a previously created session.
+     *
+     * @param session - the session to close
+     * @param deleteSubscriptions - if `true`, all subscriptions
+     *   associated with the session are deleted on the server
+     */
+    closeSession(session: ClientSession, deleteSubscriptions: boolean): Promise<void>;
+
+    closeSession(session: ClientSession, deleteSubscriptions: boolean, callback: (err?: Error) => void): void;
+
+    /**
+     * Reactivate a session that was previously transferred or
+     * disconnected.
+     *
+     * @param session - the session to reactivate
+     */
+    reactivateSession(session: ClientSession): Promise<void>;
+
+    reactivateSession(session: ClientSession, callback: (err?: Error) => void): void;
+
+    /** @internal */
+    createDefaultCertificate(): Promise<void>;
+
+    /**
+     * Connect to a server, execute an async function within a session,
+     * then automatically close the session and disconnect.
+     *
+     * This is a convenience method for simple one-shot operations.
+     *
+     * @param endpointUrl - the server endpoint URL or endpoint with credentials
+     * @param inner_func - the async function to execute with the session
+     * @returns the value returned by `inner_func`
+     *
+     * @example
+     * ```typescript
+     * const result = await client.withSessionAsync(
+     *     "opc.tcp://localhost:26543",
+     *     async (session) => {
+     *         return await session.read({ nodeId: "ns=0;i=2258",
+     *             attributeId: AttributeIds.Value });
+     *     }
+     * );
+     * ```
+     */
+    withSessionAsync<T>(endpointUrl: string | EndpointWithUserIdentity, inner_func: WithSessionFuncP<T>): Promise<T>;
+
+    /**
+     * Connect to a server, create a session and a subscription,
+     * execute an async function, then clean up everything.
+     *
+     * This is a convenience method for subscription-based operations.
+     *
+     * @param endpointUrl - the server endpoint URL or endpoint with credentials
+     * @param parameters - subscription creation parameters
+     * @param inner_func - the async function to execute with the session and subscription
+     * @returns the value returned by `inner_func`
+     */
     withSubscriptionAsync<T>(
         endpointUrl: string | EndpointWithUserIdentity,
         parameters: ClientSubscriptionOptions,
         inner_func: WithSubscriptionFuncP<T>
     ): Promise<T>;
-
 }
 
+/**
+ * Factory class for creating OPC UA client instances.
+ *
+ * @example
+ * ```typescript
+ * import { OPCUAClient } from "node-opcua-client";
+ *
+ * const client = OPCUAClient.create({
+ *     endpointMustExist: false,
+ *     requestedSessionTimeout: 60000,
+ * });
+ * ```
+ */
+// biome-ignore lint/complexity/noStaticOnlyClass: interface merges instance-side typings; static factory + static accessors can't be expressed as a namespace (get/set)
 export class OPCUAClient {
+    /**
+     * Create a new OPC UA client instance.
+     *
+     * @param options - client configuration options
+     * @returns a configured OPC UA client ready to connect
+     */
     public static create(options: OPCUAClientOptions): OPCUAClient {
-        return new OPCUAClientImpl(options);
+        return new OPCUAClientImpl(options) as unknown as OPCUAClient;
+    }
+    /**
+     * Convenience method to create a client, connect, and establish
+     * a session in one call.
+     *
+     * @param endpointUrl - the OPC UA endpoint URL
+     * @param userIdentity - optional user credentials
+     * @param clientOptions - optional client configuration
+     * @returns a connected client session
+     *
+     * @example
+     * ```typescript
+     * const session = await OPCUAClient.createSession(
+     *     "opc.tcp://localhost:26543"
+     * );
+     * const dataValue = await session.read({
+     *     nodeId: "ns=0;i=2258",
+     *     attributeId: AttributeIds.Value,
+     * });
+     * await session.close(true); // deleteSubscriptions = true
+     * ```
+     */
+    public static async createSession(
+        endpointUrl: string,
+        userIdentity?: UserIdentityInfo,
+        clientOptions?: OPCUAClientOptions
+    ): Promise<ClientSession> {
+        return OPCUAClientImpl.createSession(endpointUrl, userIdentity, clientOptions);
+    }
+    public static set minimumRevisedSessionTimeout(minimumRevisedSessionTimeout: number) {
+        OPCUAClientImpl.minimumRevisedSessionTimeout = minimumRevisedSessionTimeout;
+    }
+    public static get minimumRevisedSessionTimeout(): number {
+        return OPCUAClientImpl.minimumRevisedSessionTimeout;
     }
 }

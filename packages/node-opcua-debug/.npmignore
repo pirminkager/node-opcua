@@ -10,5 +10,7 @@ certificates/
 _test_generated/
 schemas/
 tsconfig.json
-tsconfig.tsbuildinfo
+*.tsbuildinfo
+pnpm-lock.yaml
 tslint.*
+.mocharc.*

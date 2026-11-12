@@ -1,4 +1,6 @@
 test/
 test_helpers/
 tsconfig.json
-tsconfig.tsbuildinfo
+*.tsbuildinfo
+.mocharc.yaml
+pnpm-lock.yaml

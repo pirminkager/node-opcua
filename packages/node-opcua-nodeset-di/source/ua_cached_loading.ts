@@ -1,0 +1,21 @@
+import type { UAMethod } from "node-opcua-address-space-base";
+
+import type { UAPackageLoading, UAPackageLoading_Base } from "./ua_package_loading.js";
+import type { UASoftwareVersion } from "./ua_software_version.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/DI/                             |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |CachedLoadingType i=171                                     |
+ * |isAbstract      |false                                                       |
+ */
+export interface UACachedLoading_Base extends UAPackageLoading_Base {
+    pendingVersion: UASoftwareVersion;
+    fallbackVersion?: UASoftwareVersion;
+    getUpdateBehavior: UAMethod;
+}
+export interface UACachedLoading extends UAPackageLoading, UACachedLoading_Base {}

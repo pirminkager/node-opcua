@@ -4,21 +4,24 @@
 // OPC UA Secure Conversation Message Header : Part 6 page 36
 // Asymmetric algorithms are used to secure the OpenSecureChannel messages.
 import {
-    ByteString,
+    type ByteString,
     decodeByteString,
     decodeString,
     encodeByteString,
     encodeString,
-    UAString
+    type UAString
 } from "node-opcua-basic-types";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
 import {
     BaseUAObject,
-    buildStructuredType, check_options_correctness_against_schema,
-    initialize_field, parameters, StructuredTypeSchema
+    buildStructuredType,
+    check_options_correctness_against_schema,
+    type IStructuredTypeSchema,
+    initialize_field,
+    parameters
 } from "node-opcua-factory";
 
-const schemaAsymmetricAlgorithmSecurityHeader: StructuredTypeSchema = buildStructuredType({
+const schemaAsymmetricAlgorithmSecurityHeader: IStructuredTypeSchema = buildStructuredType({
     name: "AsymmetricAlgorithmSecurityHeader",
 
     baseType: "BaseUAObject",
@@ -27,7 +30,7 @@ const schemaAsymmetricAlgorithmSecurityHeader: StructuredTypeSchema = buildStruc
         // length shall not exceed 256
         // The URI of the security policy used to secure the message.
         // This field is encoded as a UTF8 string without a null terminator
-        { name: "securityPolicyUri", fieldType: "String" },
+        { name: "SecurityPolicyUri", fieldType: "String" },
 
         // The X509v3 certificate assigned to the sending application instance.
         // This is a DER encoded blob.
@@ -45,33 +48,34 @@ const schemaAsymmetricAlgorithmSecurityHeader: StructuredTypeSchema = buildStruc
         // Receivers can extract the Certificates from the byte array by using the Certificate size contained
         // in DER header (see X509).
         // Receivers that do not handle Certificate chains shall ignore the extra bytes.
-        { name: "senderCertificate", fieldType: "ByteString", defaultValue: null },
+        { name: "SenderCertificate", fieldType: "ByteString", defaultValue: null },
 
         // The thumbprint of the X509v3 certificate assigned to the receiving application
         // The thumbprint is the SHA1 digest of the DER encoded form of the certificate.
         // This indicates what public key was used to encrypt the MessageChunk
         // This field shall be null if the message is not encrypted.
-        { name: "receiverCertificateThumbprint", fieldType: "ByteString", defaultValue: null }
+        { name: "ReceiverCertificateThumbprint", fieldType: "ByteString", defaultValue: null }
     ]
 });
 
-export class AsymmetricAlgorithmSecurityHeader extends BaseUAObject {
+export interface AsymmetricAlgorithmSecurityHeaderOptions {
+    securityPolicyUri?: UAString;
+    senderCertificate?: ByteString | null;
+    receiverCertificateThumbprint?: ByteString | null;
+}
 
-    public static possibleFields: string[] = [
-      "securityPolicyUri",
-        "senderCertificate",
-        "receiverCertificateThumbprint"
-    ];
+export class AsymmetricAlgorithmSecurityHeader extends BaseUAObject {
+    public static possibleFields: string[] = ["securityPolicyUri", "senderCertificate", "receiverCertificateThumbprint"];
     public static schema = schemaAsymmetricAlgorithmSecurityHeader;
     public securityPolicyUri: UAString;
     public senderCertificate: ByteString;
     public receiverCertificateThumbprint: ByteString;
 
-    constructor(options?: any) {
+    constructor(options?: AsymmetricAlgorithmSecurityHeaderOptions) {
         options = options || {};
         super();
         const schema = schemaAsymmetricAlgorithmSecurityHeader;
-        /* istanbul ignore next */
+        /* c8 ignore next */
         if (parameters.debugSchemaHelper) {
             check_options_correctness_against_schema(this, schema, options);
         }

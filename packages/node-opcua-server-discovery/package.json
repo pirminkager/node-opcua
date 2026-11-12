@@ -1,47 +1,58 @@
 {
-	"name": "node-opcua-server-discovery",
-	"version": "2.6.0-alpha.1",
-	"description": "pure nodejs OPCUA SDK - module -server-discovery",
-	"scripts": {
-		"build": "tsc -b",
-		"postinstall": "npm run certificate",
-		"clean": "node -e \"require('rimraf').sync('dist');\"",
-		"certificate": "node test_helpers/create_certificates.js certificate -s -o certificates/server_selfsigned_cert_2048.pem",
-		"test": "echo no test here  : see node-opcua-end-to-end"
-	},
-	"main": "./dist/index.js",
-	"types": "./dist/index.d.ts",
-	"dependencies": {
-		"@types/bonjour": "^3.5.6",
-		"bonjour": "^3.5.0",
-		"node-opcua-assert": "^2.6.0-alpha.1",
-		"node-opcua-basic-types": "^2.6.0-alpha.1",
-		"node-opcua-certificate-manager": "^2.6.0-alpha.1",
-		"node-opcua-common": "^2.6.0-alpha.1",
-		"node-opcua-debug": "^2.6.0-alpha.1",
-		"node-opcua-hostname": "^2.6.0-alpha.1",
-		"node-opcua-pki": "^2.0.2",
-		"node-opcua-secure-channel": "^2.6.0-alpha.1",
-		"node-opcua-server": "^2.6.0-alpha.1",
-		"node-opcua-service-discovery": "^2.6.0-alpha.1",
-		"node-opcua-service-endpoints": "^2.6.0-alpha.1",
-		"node-opcua-status-code": "^2.6.0-alpha.1",
-		"underscore": "^1.10.2"
-	},
-	"author": "Etienne Rossignon",
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git://github.com/node-opcua/node-opcua.git"
-	},
-	"keywords": [
-		"OPCUA",
-		"opcua",
-		"m2m",
-		"iot",
-		"opc ua",
-		"internet of things"
-	],
-	"homepage": "http://node-opcua.github.io/",
-	"gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "name": "node-opcua-server-discovery",
+    "type": "module",
+    "version": "2.187.26",
+    "description": "pure nodejs OPCUA SDK - module server-discovery",
+    "scripts": {
+        "build": "tsc -b",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "echo no test here  : see node-opcua-end-to-end",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "engines": {
+        "node": ">=22.13.0"
+    },
+    "dependencies": {
+        "chalk": "6.0.1",
+        "env-paths": "4.0.0",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-basic-types": "2.187.0",
+        "node-opcua-certificate-manager": "2.187.26",
+        "node-opcua-common": "2.187.26",
+        "node-opcua-crypto": "6.2.5",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-object-registry": "2.186.7",
+        "node-opcua-secure-channel": "2.187.26",
+        "node-opcua-server": "2.187.26",
+        "node-opcua-service-discovery": "2.187.19",
+        "node-opcua-service-endpoints": "2.187.19",
+        "node-opcua-status-code": "2.187.0",
+        "sterfive-bonjour-service": "1.1.4",
+        "thenify-ex": "4.4.0"
+    },
+    "author": "Etienne Rossignon",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/node-opcua/node-opcua.git"
+    },
+    "keywords": [
+        "OPCUA",
+        "opcua",
+        "m2m",
+        "iot",
+        "opc ua",
+        "internet of things"
+    ],
+    "homepage": "http://node-opcua.github.io/",
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ],
+    "devDependencies": {
+        "node-opcua-pki": "7.1.6"
+    }
 }

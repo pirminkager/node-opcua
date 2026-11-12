@@ -1,22 +1,27 @@
 /**
  * @module node-opcua-transport
  */
-import { EventEmitter } from "events";
-import { assert } from "node-opcua-assert";
+import { EventEmitter } from "node:events";
 
+import { decodeStatusCode, decodeString, decodeUInt32 } from "node-opcua-basic-types";
 import { BinaryStream } from "node-opcua-binary-stream";
-import { createFastUninitializedBuffer } from "node-opcua-buffer-utils";
-import { readMessageHeader, SequenceHeader } from "node-opcua-chunkmanager";
-import { make_errorLog } from "node-opcua-debug";
-import { PacketAssembler, PacketInfo } from "node-opcua-packet-assembler";
-import { get_clock_tick } from "node-opcua-utils";
 
-const doPerfMonitoring = process.env.NODEOPCUADEBUG && (process.env.NODEOPCUADEBUG.indexOf("PERF")) >= 0;
+import { readMessageHeader, readMessageHeaderFromBuffer, SequenceHeader } from "node-opcua-chunkmanager";
+import { hexDump, make_debugLog, make_errorLog, make_warningLog } from "node-opcua-debug";
+import { type MessageHeader, PacketAssembler, type PacketInfo } from "node-opcua-packet-assembler";
+import type { StatusCode } from "node-opcua-status-code";
+import { get_clock_tick } from "node-opcua-utils";
+import { StatusCodes2 } from "./status_codes.js";
+import { TCPErrorMessageReceivedError } from "./TCPErrorMessage.js";
+
+const doPerfMonitoring = process.env.NODEOPCUADEBUG && process.env.NODEOPCUADEBUG.indexOf("PERF") >= 0;
 
 const errorLog = make_errorLog("MessageBuilder");
+const _debugLog = make_debugLog("MessageBuilder");
+const warningLog = make_warningLog("MessageBuilder");
 
 export function readRawMessageHeader(data: Buffer): PacketInfo {
-    const messageHeader = readMessageHeader(new BinaryStream(data));
+    const messageHeader = readMessageHeaderFromBuffer(data);
     return {
         extra: "",
         length: messageHeader.length,
@@ -24,20 +29,54 @@ export function readRawMessageHeader(data: Buffer): PacketInfo {
     };
 }
 
+export interface MessageBuilderBaseOptions {
+    signatureLength?: number;
+    maxMessageSize?: number;
+    maxChunkCount?: number;
+    maxChunkSize?: number;
+}
+
+export interface MessageBuilderBaseEvents {
+    /**
+     * notify the observers that a new message is being built
+     * @event startChunk
+     */
+    startChunk: [info: PacketInfo, data: Buffer];
+    /**
+     * notify the observers that new message chunk has been received
+     * @event chunk
+     */
+    chunk: [chunk: Buffer];
+    /**
+     * notify the observers that an error has occurred
+     * @event error
+     */
+    error: [err: Error, statusCode: StatusCode, requestId: number | null];
+    /**
+     * notify the observers that a full message has been received
+     * @event full_message_body
+     */
+    full_message_body: [fullMessageBody: Buffer];
+    /**
+     * notify the observers that a request has been abandoned
+     * @event abandon
+     */
+    abandon: [requestId: number];
+}
 /**
- * @class MessageBuilderBase
- * @extends EventEmitter
- * @uses PacketAssembler
- * @constructor
- * @param options {Object}
- * @param [options.signatureLength=0] {number}
  *
  */
 export class MessageBuilderBase extends EventEmitter {
+    public static defaultMaxChunkCount = 1000;
+    public static defaultMaxMessageSize = 1024 * 64 * 1024; // 64Mo
+    public static defaultMaxChunkSize = 1024 * 8;
 
     public readonly signatureLength: number;
-    public readonly options: { signatureLength?: number };
-    public readonly _packetAssembler: PacketAssembler;
+    public readonly maxMessageSize: number;
+    public readonly maxChunkCount: number;
+    public readonly maxChunkSize: number;
+
+    public readonly options: MessageBuilderBaseOptions;
     public channelId: number;
     public totalMessageSize: number;
     public sequenceHeader: SequenceHeader | null;
@@ -49,151 +88,201 @@ export class MessageBuilderBase extends EventEmitter {
 
     protected totalBodySize: number;
     protected messageChunks: Buffer[];
-    protected messageHeader: any;
+    protected messageHeader?: MessageHeader;
 
-    private _securityDefeated: boolean;
-    private _hasReceivedError: boolean;
-    private blocks: Buffer[];
-    private readonly _expectedChannelId: number;
-    private offsetBodyStart: number;
+    readonly #_packetAssembler: PacketAssembler;
+    #_securityDefeated: boolean;
+    #_hasReceivedError: boolean;
+    #blocks: Buffer[];
+    readonly #_expectedChannelId: number;
+    #offsetBodyStart: number;
 
-    constructor(options?: { signatureLength?: number }) {
-
+    constructor(options?: MessageBuilderBaseOptions) {
         super();
 
         this.id = "";
 
         this._tick0 = 0;
         this._tick1 = 0;
-        this._hasReceivedError = false;
-        this.blocks = [];
+        this.#_hasReceivedError = false;
+        this.#blocks = [];
         this.messageChunks = [];
-        this._expectedChannelId = 0;
+        this.#_expectedChannelId = 0;
 
-        options = options || {};
+        options = options || {
+            maxMessageSize: 0,
+            maxChunkCount: 0,
+            maxChunkSize: 0
+        };
 
         this.signatureLength = options.signatureLength || 0;
 
+        this.maxMessageSize = options.maxMessageSize || MessageBuilderBase.defaultMaxMessageSize;
+        this.maxChunkCount = options.maxChunkCount || MessageBuilderBase.defaultMaxChunkCount;
+        this.maxChunkSize = options.maxChunkSize || MessageBuilderBase.defaultMaxChunkSize;
+
         this.options = options;
 
-        this._packetAssembler = new PacketAssembler({
-            minimumSizeInBytes: 0,
-            readMessageFunc: readRawMessageHeader
+        this.#_packetAssembler = new PacketAssembler({
+            minimumSizeInBytes: 8,
+            maxChunkSize: this.maxChunkSize,
+            readChunkFunc: readRawMessageHeader
         });
 
-        this._packetAssembler.on("message", (messageChunk) => this._feed_messageChunk(messageChunk));
+        this.#_packetAssembler.on("chunk", (messageChunk) => this.#_enqueue_messageChunk(messageChunk));
 
-        this._packetAssembler.on("newMessage", (info, data) => {
-
+        this.#_packetAssembler.on("startChunk", (info, data) => {
             if (doPerfMonitoring) {
                 // record tick 0: when the first data is received
                 this._tick0 = get_clock_tick();
             }
-            /**
-             *
-             * notify the observers that a new message is being built
-             * @event start_chunk
-             * @param info
-             * @param data
-             */
-            this.emit("start_chunk", info, data);
+            this.emit("startChunk", info, data);
         });
 
-        this._securityDefeated = false;
+        this.#_packetAssembler.on("error", (err) => {
+            warningLog("packet assembler ", err.message);
+            this._report_error(StatusCodes2.BadTcpMessageTooLarge, `packet assembler: ${err.message}`);
+        });
+
+        this.#_securityDefeated = false;
         this.totalBodySize = 0;
         this.totalMessageSize = 0;
         this.channelId = 0;
-        this.offsetBodyStart = 0;
+        this.#offsetBodyStart = 0;
         this.sequenceHeader = null;
-        this._init_new();
+        this.#_init_new();
     }
 
-    public dispose() {
+    public dispose(): void {
         this.removeAllListeners();
     }
 
     /**
      * Feed message builder with some data
-     * @method feed
+
      * @param data
      */
-    public feed(data: Buffer) {
-        if (!this._securityDefeated && !this._hasReceivedError) {
-            this._packetAssembler.feed(data);
+    public feed(data: Buffer): void {
+        if (!this.#_securityDefeated && !this.#_hasReceivedError) {
+            this.#_packetAssembler.feed(data);
         }
     }
 
-    protected _decodeMessageBody(fullMessageBody: Buffer): boolean {
+    protected _decodeMessageBody(_fullMessageBody: Buffer): boolean {
         return true;
     }
 
     protected _read_headers(binaryStream: BinaryStream): boolean {
+        try {
+            this.messageHeader = readMessageHeader(binaryStream);
+            this.channelId = binaryStream.readUInt32();
 
-        this.messageHeader = readMessageHeader(binaryStream);
-        assert(binaryStream.length === 8, "expecting message header to be 8 bytes");
-
-        this.channelId = binaryStream.readUInt32();
-        assert(binaryStream.length === 12);
-
-        // verifying secure ChannelId
-        if (this._expectedChannelId && this.channelId !== this._expectedChannelId) {
-            return this._report_error("Invalid secure channel Id");
+            // verifying secure ChannelId
+            if (this.#_expectedChannelId && this.channelId !== this.#_expectedChannelId) {
+                return this._report_error(StatusCodes2.BadTcpSecureChannelUnknown, "Invalid secure channel Id");
+            }
+            return true;
+        } catch (err) {
+            return this._report_error(
+                StatusCodes2.BadTcpInternalError,
+                `_read_headers error ${err instanceof Error ? err.message : String(err)}`
+            );
         }
-        return true;
     }
 
-    protected _report_error(errorMessage: string): false {
+    /**
+     * The possibly-asynchronous seam over {@link _read_headers}: a subclass
+     * whose header processing may need to await something (an OPN chunk
+     * decrypted by a remote key-operations provider) overrides THIS method
+     * and returns a promise for that one case; every synchronous case keeps
+     * returning a plain boolean, and the surrounding chunk processing stays
+     * fully synchronous for it. While a returned promise is pending, later
+     * chunks queue in arrival order (see the chunk pump), so ordering is
+     * preserved.
+     * @internal node-opcua plumbing: may change in a minor release.
+     */
+    protected _read_headersEx(binaryStream: BinaryStream): boolean | Promise<boolean> {
+        return this._read_headers(binaryStream);
+    }
 
-        this._hasReceivedError = true;
-        /**
-         * notify the observers that an error has occurred
-         * @event error
-         * @param error the error to raise
-         */
-        errorLog("Error  ", this.id, errorMessage);
-        // xx errorLog(new Error());
-        this.emit("error", new Error(errorMessage), this.sequenceHeader ? this.sequenceHeader.requestId : null);
+    protected _report_abandon(_channelId: number, _tokenId: number, sequenceHeader: SequenceHeader): false {
+        // the server has not been able to send a complete message and has abandoned the request
+        // the connection can probably continue
+        this.#_hasReceivedError = false; ///
+        this.emit("abandon", sequenceHeader.requestId);
         return false;
     }
 
-    private _init_new() {
-        this._securityDefeated = false;
-        this._hasReceivedError = false;
+    protected _report_error(statusCode: StatusCode, errorMessage: string): false {
+        this.#_hasReceivedError = true;
+        errorLog("Error  ", this.id, errorMessage);
+        // xx errorLog(new Error());
+        this.emit("error", new Error(errorMessage), statusCode, this.sequenceHeader?.requestId || null);
+        return false;
+    }
+
+    #_init_new() {
+        this.#_securityDefeated = false;
+        this.#_hasReceivedError = false;
         this.totalBodySize = 0;
         this.totalMessageSize = 0;
-        this.blocks = [];
+        this.#blocks = [];
         this.messageChunks = [];
     }
 
     /**
      * append a message chunk
-     * @method _append
+
      * @param chunk
      * @private
      */
-    private _append(chunk: Buffer): boolean {
-
-        if (this._hasReceivedError) {
+    #_append(chunk: Buffer): boolean | Promise<boolean> {
+        if (this.#_hasReceivedError) {
             // the message builder is in error mode and further message chunks should be discarded.
             return false;
+        }
+
+        if (this.messageChunks.length + 1 > this.maxChunkCount) {
+            return this._report_error(StatusCodes2.BadTcpMessageTooLarge, `max chunk count exceeded: ${this.maxChunkCount}`);
         }
 
         this.messageChunks.push(chunk);
         this.totalMessageSize += chunk.length;
 
-        const binaryStream = new BinaryStream(chunk);
-
-        if (!this._read_headers(binaryStream)) {
-            return false;
+        if (this.totalMessageSize > this.maxMessageSize) {
+            return this._report_error(
+                StatusCodes2.BadTcpMessageTooLarge,
+                `max message size exceeded: ${this.maxMessageSize} : total message size ${this.totalMessageSize}`
+            );
         }
 
-        assert(binaryStream.length >= 12);
+        const binaryStream = new BinaryStream(chunk);
+
+        const headersOk = this._read_headersEx(binaryStream);
+        if (typeof headersOk === "boolean") {
+            if (!headersOk) {
+                return false; // error already reported
+            }
+            return this.#_append_after_headers(chunk, binaryStream);
+        }
+        return headersOk.then((ok) => (ok ? this.#_append_after_headers(chunk, binaryStream) : false));
+    }
+
+    /** the second half of {@link #_append}, run after the (possibly awaited) header processing. */
+    #_append_after_headers(chunk: Buffer, binaryStream: BinaryStream): boolean {
+        // c8 ignore next
+        if (binaryStream.length < 12) {
+            return this._report_error(StatusCodes2.BadTcpInternalError, "message chunk headers shorter than 12 bytes");
+        }
 
         // verify message chunk length
-        if (this.messageHeader.length !== chunk.length) {
-            // tslint:disable:max-line-length
+        if (this.messageHeader?.length !== chunk.length) {
             return this._report_error(
-                `Invalid messageChunk size: the provided chunk is ${chunk.length} bytes long but header specifies ${this.messageHeader.length}`);
+                StatusCodes2.BadTcpInternalError,
+                `Invalid messageChunk size: the provided chunk is ${chunk.length} bytes long but header specifies ${
+                    this.messageHeader?.length
+                }`
+            );
         }
 
         // the start of the message body block
@@ -202,65 +291,144 @@ export class MessageBuilderBase extends EventEmitter {
         // the end of the message body block
         const offsetBodyEnd = binaryStream.buffer.length;
 
-        this.totalBodySize += (offsetBodyEnd - offsetBodyStart);
-        this.offsetBodyStart = offsetBodyStart;
+        this.totalBodySize += offsetBodyEnd - offsetBodyStart;
+        this.#offsetBodyStart = offsetBodyStart;
 
         // add message body to a queue
-        // note : Buffer.slice create a shared memory !
-        //        use Buffer.clone
-        const sharedBuffer = chunk.slice(offsetBodyStart, offsetBodyEnd);
-        const clonedBuffer = createFastUninitializedBuffer(sharedBuffer.length);
-
-        sharedBuffer.copy(clonedBuffer, 0, 0);
-        this.blocks.push(clonedBuffer);
+        // We use subarray here to avoid copy.
+        // This assumes PacketAssembler manages the buffer lifecycle appropriately.
+        const sharedBuffer = chunk.subarray(this.#offsetBodyStart, offsetBodyEnd);
+        this.#blocks.push(sharedBuffer);
 
         return true;
     }
 
-    private _feed_messageChunk(chunk: Buffer) {
-        assert(chunk);
-        const messageHeader = readMessageHeader(new BinaryStream(chunk));
-        /**
-         * notify the observers that new message chunk has been received
-         * @event chunk
-         * @param messageChunk the raw message chunk
-         */
+    /**
+     * The chunk pump: chunks flow straight through while processing is
+     * synchronous (the overwhelmingly common case — zero behavioral change),
+     * and queue in arrival order while one chunk's processing is awaiting
+     * (an OPN decrypted by a remote key-operations provider).
+     */
+    #chunkFifo: Buffer[] = [];
+    #pumpBusy = false;
+
+    #_enqueue_messageChunk(chunk: Buffer): void {
+        if (this.#pumpBusy) {
+            this.#chunkFifo.push(chunk);
+            return;
+        }
+        const outcome = this.#_feed_messageChunk(chunk);
+        if (outcome instanceof Promise) {
+            this.#pumpBusy = true;
+            outcome.then(
+                () => this.#_drain_chunkFifo(),
+                (err: Error) => {
+                    this._report_error(StatusCodes2.BadTcpInternalError, `asynchronous chunk processing failed: ${err.message}`);
+                    this.#_drain_chunkFifo();
+                }
+            );
+        }
+    }
+
+    #_drain_chunkFifo(): void {
+        while (this.#chunkFifo.length > 0) {
+            const chunk = this.#chunkFifo.shift() as Buffer;
+            const outcome = this.#_feed_messageChunk(chunk);
+            if (outcome instanceof Promise) {
+                outcome.then(
+                    () => this.#_drain_chunkFifo(),
+                    (err: Error) => {
+                        this._report_error(
+                            StatusCodes2.BadTcpInternalError,
+                            `asynchronous chunk processing failed: ${err.message}`
+                        );
+                        this.#_drain_chunkFifo();
+                    }
+                );
+                return;
+            }
+        }
+        this.#pumpBusy = false;
+    }
+
+    #_feed_messageChunk(chunk: Buffer): boolean | Promise<boolean> {
+        let messageHeader: ReturnType<typeof readMessageHeader>;
+        try {
+            messageHeader = readMessageHeaderFromBuffer(chunk);
+        } catch (err) {
+            // the packet assembler hands out chunks of at least 8 bytes, so this is not
+            // expected; still, a bad chunk must not throw out of the socket data handler.
+            return this._report_error(
+                StatusCodes2.BadTcpInternalError,
+                `Error decoding message header ${err instanceof Error ? err.message : String(err)}`
+            );
+        }
         this.emit("chunk", chunk);
 
         if (messageHeader.isFinal === "F") {
-
-            // last message
-            this._append(chunk);
-            if (this._hasReceivedError) {
-                return false;
+            if (messageHeader.msgType === "ERR") {
+                const binaryStream = new BinaryStream(chunk);
+                binaryStream.length = 8;
+                const errorCode = decodeStatusCode(binaryStream);
+                const reason = decodeString(binaryStream);
+                // an Error Message concerns the whole connection, not one request: report it
+                // without a requestId (the last sequence header belongs to an earlier message)
+                this.#_hasReceivedError = true;
+                errorLog("Error  ", this.id, "ERR received", errorCode.toString(), reason);
+                this.emit("error", new TCPErrorMessageReceivedError(errorCode, reason), errorCode, null);
+                return true;
+            } else {
+                const appended = this.#_append(chunk);
+                if (appended instanceof Promise) {
+                    return appended.then(() => this.#_finalize_message());
+                }
+                return this.#_finalize_message();
             }
-
-            const fullMessageBody: Buffer = this.blocks.length === 1 ? this.blocks[0] : Buffer.concat(this.blocks);
-
-            if (doPerfMonitoring) {
-                // record tick 1: when a complete message has been received ( all chunks assembled)
-                this._tick1 = get_clock_tick();
-            }
-            /**
-             * notify the observers that a full message has been received
-             * @event full_message_body
-             * @param full_message_body the full message body made of all concatenated chunks.
-             */
-            this.emit("full_message_body", fullMessageBody);
-
-            this._decodeMessageBody(fullMessageBody);
-
-            // be ready for next block
-            this._init_new();
-            return true;
-
         } else if (messageHeader.isFinal === "A") {
-            return this._report_error("received and Abort Message");
+            try {
+                // only valid for MSG, according to spec
+                const stream = new BinaryStream(chunk);
+                readMessageHeader(stream);
+                // instead of
+                //   const securityHeader = new SymmetricAlgorithmSecurityHeader();
+                //   securityHeader.decode(stream);
 
+                const channelId = stream.readUInt32();
+                const tokenId = decodeUInt32(stream);
+
+                const sequenceHeader = new SequenceHeader();
+                sequenceHeader.decode(stream);
+
+                return this._report_abandon(channelId, tokenId, sequenceHeader);
+            } catch (err) {
+                const errMessage = err instanceof Error ? err.message : String(err);
+                warningLog(hexDump(chunk));
+                warningLog("Cannot interpret message chunk: ", errMessage);
+                return this._report_error(StatusCodes2.BadTcpInternalError, `Error decoding message header ${errMessage}`);
+            }
         } else if (messageHeader.isFinal === "C") {
-            return this._append(chunk);
+            return this.#_append(chunk);
         }
         return false;
     }
 
+    /** last-chunk processing: assemble, emit, decode, reset — extracted so it can run after an awaited append. */
+    #_finalize_message(): boolean {
+        if (this.#_hasReceivedError) {
+            return false;
+        }
+
+        const fullMessageBody: Buffer = this.#blocks.length === 1 ? this.#blocks[0] : Buffer.concat(this.#blocks);
+
+        if (doPerfMonitoring) {
+            // record tick 1: when a complete message has been received ( all chunks assembled)
+            this._tick1 = get_clock_tick();
+        }
+        this.emit("full_message_body", fullMessageBody);
+
+        const messageOk = this._decodeMessageBody(fullMessageBody);
+        // be ready for next block
+        this.#_init_new();
+        return messageOk;
+    }
 }

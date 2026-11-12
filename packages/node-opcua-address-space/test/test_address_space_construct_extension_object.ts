@@ -1,4 +1,3 @@
-// tslint:disable:no-bitwise
 // =====================================================================================================================
 // the purpose of this test is to check the ability to create a extension object from it's node
 // id out of the address_space
@@ -6,60 +5,54 @@
 // For instance if ServerStatus
 //    const ServerStatusDataType = addressSpace.findDataType("ServerStatus");
 //    const serverStatus  = addressSpace.constructExtensionObject(ServerStatusDataType);
-//    serverStatus.constructor.name.should.eql("ServerStatus");
+//    serverStatus.constructor.name.should.eql("<<ServerStatus");
 //
 //
-"use strict";
 
-import * as fs from "fs";
-import * as mocha from "mocha";
-import * as utils from "node-opcua-utils";
-
+import fs from "node:fs";
 import { assert } from "node-opcua-assert";
+import { VariableIds } from "node-opcua-constants";
+import { AccessLevelFlag, AttributeIds, accessLevelFlagToString, makeAccessLevelFlag, NodeClass } from "node-opcua-data-model";
+import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
 import { ExtensionObject } from "node-opcua-extension-object";
-import { makeNodeId } from "node-opcua-nodeid";
-import { StatusCodes } from "node-opcua-status-code";
-import * as path from "path";
-import * as should from "should";
-
-import { ServerState } from "node-opcua-common";
-import { AccessLevelFlag, NodeClass } from "node-opcua-data-model";
-import { AttributeIds } from "node-opcua-data-model";
-import { DataType } from "node-opcua-variant";
-import { Variant } from "node-opcua-variant";
-
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import { nodesets } from "node-opcua-nodesets";
+import { WriteValue } from "node-opcua-service-write";
+import { StatusCodes } from "node-opcua-status-code";
+import { modelingFile } from "node-opcua-test-helpers";
+import { ServerState } from "node-opcua-types";
+import { get_clock_tick } from "node-opcua-utils";
+import { DataType, Variant } from "node-opcua-variant";
+import should from "should";
 import {
     AddressSpace,
-    BaseNode,
-    generateAddressSpace,
-    Namespace,
-    SessionContext,
-    UAObject,
-    UAServerStatus,
-} from "..";
+    type BaseNode,
+    type DTServerStatus,
+    type Namespace,
+    type UAServerStatus,
+    type UAVariable
+} from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
 
-// make sure all namespace 0 data type are properly loaded
-const context = SessionContext.defaultContext;
+const debugLog = make_debugLog("TEST");
+const _doDebug = checkDebugFlag("TEST");
 
-function debugLog(...args: [any, ... any[]]) {
-    //
-    console.log.apply(console.log, args);
+interface MyStructureExtensionObject extends ExtensionObject {
+    lowValue: number;
+}
+interface MyOtherStructureExtensionObject extends ExtensionObject {
+    names: string[];
+    values: Array<{ highValue: number; lowValue: number }>;
 }
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
-describe("testing address space namespace loading", function (this: any) {
-    this.timeout(Math.max(300000, this._timeout));
+describe("testing address space namespace loading", function (this: Mocha.Suite) {
+    this.timeout(Math.max(300000, this.timeout()));
 
     let addressSpace: AddressSpace;
     let namespace: Namespace;
     before(async () => {
         addressSpace = AddressSpace.create();
-        const xml_files = [
-            nodesets.standard_nodeset_file,
-            path.join(__dirname, "../../../", "modeling/my_data_type.xml")
-        ];
+        const xml_files = [nodesets.standard, modelingFile("my_data_type.xml")];
         fs.existsSync(xml_files[0]).should.be.eql(true);
         fs.existsSync(xml_files[1]).should.be.eql(true);
 
@@ -73,8 +66,8 @@ describe("testing address space namespace loading", function (this: any) {
     });
 
     it("should be possible to create a ServerStatus ExtensionObject", () => {
-
-        const serverStatusDataType = addressSpace.findDataType("ServerStatusDataType")!;
+        const serverStatusDataType = addressSpace.findDataType("ServerStatusDataType");
+        if (!serverStatusDataType) throw new Error(" cannot find ServerStatusDataType");
         serverStatusDataType.nodeClass.should.eql(NodeClass.DataType);
         serverStatusDataType.browseName.toString().should.eql("ServerStatusDataType");
 
@@ -94,7 +87,8 @@ describe("testing address space namespace loading", function (this: any) {
         //              - AttributeOperand
         //
 
-        const attributeOperand = addressSpace.findDataType("AttributeOperand")!;
+        const attributeOperand = addressSpace.findDataType("AttributeOperand");
+        if (!attributeOperand) throw new Error(" cannot find AttributeOperand");
         attributeOperand.nodeClass.should.eql(NodeClass.DataType);
 
         attributeOperand.browseName.toString().should.eql("AttributeOperand");
@@ -104,21 +98,20 @@ describe("testing address space namespace loading", function (this: any) {
 
         op.should.have.property("attributeId");
         op.should.have.property("browsePath");
-
     });
 
     it("should create a arbitrary structure from a second name space", () => {
-
         const ns = addressSpace.getNamespaceIndex("http://yourorganisation.org/my_data_type/");
         ns.should.eql(2);
 
-        const myStructureDataType = addressSpace.findDataType("MyStructureDataType", ns)!;
+        const myStructureDataType = addressSpace.findDataType("MyStructureDataType", ns);
+        if (!myStructureDataType) throw new Error(" cannot find MyStructureDataType");
         myStructureDataType.nodeClass.should.eql(NodeClass.DataType);
 
         // ------------------------------------------------------------------------------
         // create an extension object
         // ------------------------------------------------------------------------------
-        const op = addressSpace.constructExtensionObject(myStructureDataType) as any;
+        const op = addressSpace.constructExtensionObject(myStructureDataType) as unknown as MyStructureExtensionObject;
 
         op.constructor.name.should.eql("MyStructureDataType");
         op.should.be.instanceof(ExtensionObject);
@@ -131,7 +124,8 @@ describe("testing address space namespace loading", function (this: any) {
         // ------------------------------------------------------------------------------
         // create a variable
         // ------------------------------------------------------------------------------
-        const myStructureType = addressSpace.findVariableType("MyStructureType", ns)!;
+        const myStructureType = addressSpace.findVariableType("MyStructureType", ns);
+        if (!myStructureType) throw new Error(" cannot find MyStructureType");
         myStructureType.nodeClass.should.eql(NodeClass.VariableType);
 
         const folder = namespace.addFolder("ObjectsFolder", { browseName: "MyDevices" });
@@ -146,7 +140,7 @@ describe("testing address space namespace loading", function (this: any) {
         });
         myVar.browseName.toString().should.eql("1:MyVar");
 
-        (myVar as any).$extensionObject.should.be.instanceOf(op.constructor);
+        myVar.$extensionObject.should.be.instanceOf(op.constructor);
 
         myVar.readValue().value.value.should.be.instanceOf(op.constructor);
 
@@ -156,16 +150,14 @@ describe("testing address space namespace loading", function (this: any) {
 
         // now change the underlying data
 
-        (myVar as any).$extensionObject.lowValue = 10;
+        myVar.$extensionObject.lowValue = 10;
 
-        // verify that value has changed using all way to access it
-        (myVar as any).lowValue.readValue().value.value.should.eql(10);
+        // verify that value has changed using all possible way to access it
         myVar.readValue().value.value.lowValue.should.eql(10);
-
+        (myVar.getComponentByName("LowValue")! as UAVariable).readValue().value.value.should.eql(10);
     });
 
     it("should explore the DataType through OPCUA", () => {
-
         const ns = addressSpace.getNamespaceIndex("http://yourorganisation.org/my_data_type/");
         ns.should.eql(2);
         const myStructureDataType = addressSpace.findDataType("MyStructureDataType", ns)!;
@@ -176,10 +168,10 @@ describe("testing address space namespace loading", function (this: any) {
         // find the encoding
         // Xx debugLog(myStructureDataType.binaryEncoding.toString());
 
-        debugLog(myStructureDataType.binaryEncodingDefinition!.toString());
+        debugLog(myStructureDataType.binaryEncodingDefinition?.toString());
         debugLog("------------------------------------------------------------------------------");
         // xx debugLog(myStructureDataType.xmlEncoding.toString());
-        debugLog(myStructureDataType.xmlEncodingDefinition!.toString());
+        debugLog(myStructureDataType.xmlEncodingDefinition?.toString());
     });
 
     it("AC explore the DataType through OPCUA", () => {
@@ -192,25 +184,28 @@ describe("testing address space namespace loading", function (this: any) {
 
         // find the encoding
         // xx debugLog(myStructureDataType.binaryEncoding.toString());
-        debugLog(myOtherStructureDataType.binaryEncodingDefinition!.toString());
+        debugLog(myOtherStructureDataType.binaryEncodingDefinition?.toString());
         debugLog("------------------------------------------------------------------------------");
         // xx debugLog(myStructureDataType.xmlEncoding.toString());
-        debugLog(myOtherStructureDataType.xmlEncodingDefinition!.toString());
+        debugLog(myOtherStructureDataType.xmlEncodingDefinition?.toString());
 
         const options = {
             names: ["Hello", "World"],
             values: [
                 {
                     highValue: 100,
-                    lowValue: 50,
+                    lowValue: 50
                 },
                 {
                     highValue: 101,
-                    lowValue: 51,
+                    lowValue: 51
                 }
             ]
         };
-        const op = addressSpace.constructExtensionObject(myOtherStructureDataType, options) as any;
+        const op = addressSpace.constructExtensionObject(
+            myOtherStructureDataType,
+            options
+        ) as unknown as MyOtherStructureExtensionObject;
 
         op.constructor.name.should.eql("MyOtherStructureDataType");
         debugLog(op.toString());
@@ -221,98 +216,82 @@ describe("testing address space namespace loading", function (this: any) {
         op.values[0].lowValue.should.eql(50);
         op.values[1].highValue.should.eql(101);
         op.values[1].lowValue.should.eql(51);
-
     });
 
     it("should bind an xml-preloaded Extension Object Variable : ServerStatus ", async () => {
         // in this test, we verify that we can easily bind the Server_ServerStatus object
         // the process shall automatically bind variables and substructures recursively
-        const VariableIds = require("node-opcua-constants").VariableIds;
 
-        const serverStatus = addressSpace.findNode(makeNodeId(VariableIds.Server_ServerStatus))! as UAServerStatus;
+        const serverStatus = addressSpace.findNode(VariableIds.Server_ServerStatus)! as UAServerStatus<DTServerStatus>;
         serverStatus.browseName.toString().should.eql("ServerStatus");
 
         // before bindExtensionObject is called, startTime property exists but is not bound
         serverStatus.should.have.property("startTime");
-        serverStatus.startTime.readValue().value.dataType.should.eql(DataType.Null);
-        serverStatus.readValue().value.dataType.should.eql(DataType.Null);
+        serverStatus.startTime.readValue().value.dataType.should.eql(DataType.DateTime);
+        serverStatus.readValue().value.dataType.should.eql(DataType.ExtensionObject);
+
+        accessLevelFlagToString(serverStatus.accessLevel).should.eql("CurrentRead");
 
         // Xx value.startTime.should.eql(DataType.Null);
         // xx debugLog("serverStatus.startTime =",serverStatus.startTime.readValue().value.toString());
 
         serverStatus.bindExtensionObject();
+        serverStatus.readValue().value.value.state.should.eql(ServerState.Running);
 
-        {
-            serverStatus
-                .readValue()
-                .value.value.state
-                .should.eql(ServerState.Running);
+        serverStatus.$extensionObject.state = ServerState.CommunicationFault;
 
-            serverStatus.$extensionObject.state = ServerState.CommunicationFault;
+        serverStatus.readValue().value.value.state.should.eql(ServerState.CommunicationFault);
 
-            serverStatus
-                .readValue()
-                .value.value.state
-                .should.eql(ServerState.CommunicationFault);
+        serverStatus.$extensionObject.state = ServerState.Running;
 
-            serverStatus.$extensionObject.state = ServerState.Running;
-        }
+        serverStatus.readValue().value.value.startTime.toISOString().should.eql("1601-01-01T00:00:00.000Z");
 
-        serverStatus
-            .readValue()
-            .value.value.startTime.toISOString()
-            .should.eql("1601-01-01T00:00:00.000Z");
-
-        serverStatus.startTime
-            .readValue()
-            .value.value!.toISOString()
-            .should.eql("1601-01-01T00:00:00.000Z");
+        should(serverStatus.startTime.readValue().value.value?.toISOString()).eql("1601-01-01T00:00:00.000Z");
 
         serverStatus.$extensionObject.startTime = new Date(Date.UTC(1800, 0, 1));
 
-        serverStatus
-            .readValue()
-            .value.value.startTime.toISOString()
-            .should.eql("1800-01-01T00:00:00.000Z");
+        serverStatus.readValue().value.value.startTime.toISOString().should.eql("1800-01-01T00:00:00.000Z");
 
-        serverStatus.startTime
-            .readValue()
-            .value.value!.toISOString()
-            .should.eql("1800-01-01T00:00:00.000Z");
+        should(serverStatus.startTime.readValue().value.value?.toISOString()).eql("1800-01-01T00:00:00.000Z");
 
         serverStatus.startTime.setValueFromSource({
             dataType: DataType.DateTime,
             value: new Date(Date.UTC(2100, 0, 1))
         });
 
-        serverStatus
-            .readValue()
-            .value.value!.startTime.toISOString()
-            .should.eql("2100-01-01T00:00:00.000Z");
+        should(serverStatus.readValue().value.value?.startTime.toISOString()).eql("2100-01-01T00:00:00.000Z");
 
-        serverStatus.startTime
-            .readValue()
-            .value.value!.toISOString()
-            .should.eql("2100-01-01T00:00:00.000Z");
+        should(serverStatus.startTime.readValue().value.value?.toISOString()).eql("2100-01-01T00:00:00.000Z");
 
         // xx debugLog(serverStatus.readValue().value.toString());
 
         serverStatus.$extensionObject.buildInfo.productName = "productName1";
-        serverStatus.readValue().value.value.buildInfo.productName.should.eql("productName1");
-        serverStatus.buildInfo.productName.readValue().value.value!.should.eql("productName1");
+        should(serverStatus.readValue().value.value.buildInfo.productName).eql("productName1");
+        should(serverStatus.buildInfo.productName.readValue().value.value).eql("productName1");
 
         serverStatus.buildInfo.productName.setValueFromSource({ dataType: DataType.String, value: "productName2" });
-        serverStatus.readValue().value.value.buildInfo.productName.should.eql("productName2");
-        serverStatus.buildInfo.productName.readValue().value.value!.should.eql("productName2");
+        should(serverStatus.readValue().value.value.buildInfo.productName).eql("productName2");
+        should(serverStatus.buildInfo.productName.readValue().value.value).eql("productName2");
 
-        const write_service = require("node-opcua-service-write");
-        const WriteValue = write_service.WriteValue;
-        const makeAccessLevelFlag = require("node-opcua-data-model").makeAccessLevelFlag;
+        accessLevelFlagToString(serverStatus.buildInfo.productName.accessLevel).should.eql("CurrentRead");
+        const writeValue0 = new WriteValue({
+            attributeId: AttributeIds.Value, // value
+            value: {
+                statusCode: StatusCodes.Good,
+                value: {
+                    dataType: DataType.String,
+                    value: "productName3"
+                }
+            }
+        });
+        const statusCode0 = await serverStatus.buildInfo.productName.writeAttribute(null, writeValue0);
+        statusCode0.should.eql(StatusCodes.BadNotWritable);
 
         // now use WriteValue instead
         // make sure value is writable
         const rw = makeAccessLevelFlag("CurrentRead | CurrentWrite");
         assert(rw === (AccessLevelFlag.CurrentRead | AccessLevelFlag.CurrentWrite));
+
         serverStatus.buildInfo.productName.accessLevel = rw;
         serverStatus.buildInfo.productName.userAccessLevel = rw;
 
@@ -332,38 +311,37 @@ describe("testing address space namespace loading", function (this: any) {
                 }
             }
         });
-        const statusCode = await serverStatus.buildInfo.productName.writeAttribute(context, writeValue);
-        statusCode.should.eql(StatusCodes.BadNotWritable);
+        accessLevelFlagToString(serverStatus.buildInfo.productName.accessLevel).should.eql("CurrentRead | CurrentWrite");
+        const statusCode = await serverStatus.buildInfo.productName.writeAttribute(null, writeValue);
+        statusCode.should.eql(StatusCodes.Good);
 
-        serverStatus.buildInfo.productName.readValue().value.value!.should.not.eql("productName3");
-        serverStatus.readValue().value.value.buildInfo.productName.should.not.eql("productName3");
-
+        should(serverStatus.buildInfo.productName.readValue().value.value).eql("productName3");
+        should(serverStatus.readValue().value.value.buildInfo.productName).eql("productName3");
     });
 
     it("should instantiate SessionDiagnostics in a linear time", () => {
-
         const sessionDiagnosticsDataType = addressSpace.findDataType("SessionDiagnosticsDataType")!;
         const sessionDiagnosticsVariableType = addressSpace.findVariableType("SessionDiagnosticsVariableType")!;
 
         const objs: BaseNode[] = [];
 
         function createDiagnostic(index: number) {
-            const t5 = utils.get_clock_tick();
+            const _t5 = get_clock_tick();
             const sessionObject = namespace.addObject({
-                browseName: "Session" + index,
+                browseName: `Session${index}`,
                 organizedBy: addressSpace.rootFolder.objects
             });
 
             // the extension object
-            const t6 = utils.get_clock_tick();
+            const _t6 = get_clock_tick();
             const _sessionDiagnostics = addressSpace.constructExtensionObject(sessionDiagnosticsDataType);
-            const t7 = utils.get_clock_tick();
-            const sessionDiagnostics = sessionDiagnosticsVariableType.instantiate({
+            const _t7 = get_clock_tick();
+            const _sessionDiagnosticsVar = sessionDiagnosticsVariableType.instantiate({
                 browseName: { name: "SessionDiagnostics", namespaceIndex: 0 },
                 componentOf: sessionObject,
                 value: new Variant({ dataType: DataType.ExtensionObject, value: _sessionDiagnostics })
             });
-            const t8 = utils.get_clock_tick();
+            const _t8 = get_clock_tick();
             // xx debugLog(" t8-t7",t8-t7);
 
             objs.push(sessionObject);

@@ -1,27 +1,24 @@
+import { make_errorLog } from "node-opcua-debug";
 import {
-    buildStructuredType,
-    ConstructorFuncWithSchema,
-    DataTypeFactory,
+    type ConstructorFuncWithSchema,
+    type DataTypeFactory,
     FieldCategory,
-    getBuildInType,
-    getStructuredTypeSchema,
+    getBuiltInType,
     hasBuiltInType,
-    hasStructuredType,
-    StructuredTypeOptions,
-    StructuredTypeSchema,
+    type IStructuredTypeSchema,
+    StructuredTypeSchema
 } from "node-opcua-factory";
-import {
-    createDynamicObjectConstructor
-} from "./dynamic_extension_object";
-import {
-    MapDataTypeAndEncodingIdProvider,
-    TypeDictionary,
-} from "./parse_binary_xsd";
 import { ExpandedNodeId } from "node-opcua-nodeid";
 
-function _removeNamespacePart(str?: string): string | undefined {
+import { createDynamicObjectConstructor } from "./dynamic_extension_object.js";
+import type { InternalTypeDictionary, MapDataTypeAndEncodingIdProvider, StructureTypeRaw } from "./parse_binary_xsd.js";
+
+const errorLog = make_errorLog("tools");
+const _doDebug = false; // process.env.DEBUG && process.env.DEBUG.includes("node-opcua-schemas");
+
+function _removeNamespacePart(str?: string): string {
     if (!str) {
-        return str;
+        return str || "";
     }
     const data = str.split(":");
     return data.length > 1 ? data[1] : str;
@@ -33,11 +30,11 @@ function _getNamespacePart(str: string): string {
 
 function _adjustFieldTypeName(fieldTypeName: string): string {
     // special cases
-    if (fieldTypeName === "String" || fieldTypeName === "CharArray") {
-        fieldTypeName = "UAString";
+    if (fieldTypeName === "UAString" || fieldTypeName === "CharArray") {
+        fieldTypeName = "String";
     }
-    if (fieldTypeName === "Boolean") {
-        fieldTypeName = "UABoolean";
+    if (fieldTypeName === "UABoolean") {
+        fieldTypeName = "Boolean";
     }
 
     return fieldTypeName;
@@ -45,113 +42,157 @@ function _adjustFieldTypeName(fieldTypeName: string): string {
 
 export function getOrCreateStructuredTypeSchema(
     name: string,
-    typeDictionary: TypeDictionary,
+    typeDictionary: InternalTypeDictionary,
     dataTypeFactory: DataTypeFactory,
     idProvider: MapDataTypeAndEncodingIdProvider
-): StructuredTypeSchema {
-
-    function _getOrCreateStructuredTypeSchema(
-        _name: string,
-    ): StructuredTypeSchema {
-
-        if (dataTypeFactory.hasStructuredType(_name)) {
+): IStructuredTypeSchema {
+    function _getOrCreateStructuredTypeSchema(_name: string): IStructuredTypeSchema {
+        if (dataTypeFactory.hasStructureByTypeName(_name)) {
             return dataTypeFactory.getStructuredTypeSchema(_name);
         }
-
+        if (dataTypeFactory.hasEnumeration(_name)) {
+            return dataTypeFactory.getEnumeration(_name) as unknown as IStructuredTypeSchema;
+        }
+        if (dataTypeFactory.hasBuiltInType(_name)) {
+            return dataTypeFactory.getBuiltInType(_name) as unknown as IStructuredTypeSchema;
+        }
         // construct it !
         const structuredType = typeDictionary.getStructuredTypesRawByName(_name);
         if (!structuredType) {
-            throw new Error("Cannot find structuredType " + _name);
+            throw new Error(`Cannot find structuredType ${_name}`);
         }
 
         structuredType.baseType = _removeNamespacePart(structuredType.baseType);
         structuredType.baseType = structuredType.baseType ? structuredType.baseType : "ExtensionObject";
 
-        for (const field of structuredType.fields) {
-            const fieldType = field.fieldType;
-            if (!field.schema) {
+        const baseSchema = typeDictionary.getStructuredTypesRawByName(structuredType.baseType);
 
-                const prefix = _getNamespacePart(fieldType);
-                const fieldTypeName = _adjustFieldTypeName(_removeNamespacePart(fieldType)!);
+        // remove redundant fields
+        // Note: Some files do not have SourceType property and may be replicated here,
+        //       but they belong to the base class and shall be removed.
+        //       For instance, DataTypeSchemaHeader => UABinaryFileDataType
+        if (baseSchema?.fields && baseSchema.name !== "ExtensionObject") {
+            structuredType.fields = structuredType.fields.filter((field) => {
+                const name = field.name;
+                const index = baseSchema.fields.findIndex((f) => f.name === name);
 
-                switch (prefix) {
-                    case "tns":
-
-                        field.fieldType = fieldTypeName;
-                        if (dataTypeFactory.hasEnumeration(fieldTypeName)) {
-                            const enumeratedType = dataTypeFactory.getEnumeration(fieldTypeName);
-                            field.category = FieldCategory.enumeration;
-                            field.schema = enumeratedType;
-                        } else {
-                            // must be a structure then ....
-                            field.category = FieldCategory.complex;
-                            field.schema = _getOrCreateStructuredTypeSchema(fieldTypeName);
-                            if (!field.schema) {
-                                // tslint:disable-next-line:no-console
-                                console.log("cannot find schema for ", fieldTypeName);
-                            }
-                        }
-                        break;
-                    case "ua":
-                        field.fieldType = fieldTypeName;
-                        if (hasBuiltInType(fieldTypeName)) {
-                            field.category = FieldCategory.basic;
-                            field.schema = getBuildInType(fieldTypeName);
-                        } else if (hasStructuredType(fieldTypeName)) {
-                            field.category = FieldCategory.complex;
-                            field.schema = getStructuredTypeSchema(fieldTypeName);
-
-                        } else {
-                            field.category = FieldCategory.basic;
-                            // try in this
-                            field.schema = _getOrCreateStructuredTypeSchema(fieldTypeName);
-                            if (!field.schema) {
-                                // tslint:disable-next-line:no-console
-                                console.log("What should I do ??", fieldTypeName, " ", hasStructuredType(fieldTypeName));
-                            } else {
-                                if (hasBuiltInType(fieldTypeName)) {
-                                    field.category = FieldCategory.basic;
-                                } else {
-                                    field.category = FieldCategory.complex;
-                                }
-                            }
-                        }
-                        break;
-                    case "opc":
-                        if ((fieldTypeName === "UAString" || fieldTypeName === "String") && field.name === "IndexRange") {
-                            field.fieldType = "NumericRange";
-                            // xx console.log(" NumericRange detected here !");
-                        } else {
-                            field.fieldType = fieldTypeName;
-                        }
-                        if (!hasBuiltInType(fieldTypeName)) {
-                            throw new Error("Unknown basic type " + fieldTypeName);
-                        }
-                        field.category = FieldCategory.basic;
-                        break;
+                // c8 ignore next
+                if (index >= 0) {
+                    errorLog(
+                        "Warning : find duplicated field from base structure : field name ",
+                        name,
+                        "baseSchema = ",
+                        baseSchema.name,
+                        "schema =",
+                        structuredType.name
+                    );
                 }
-            }
+                return index < 0;
+            });
         }
-
-        const schema = buildStructuredType(structuredType as StructuredTypeOptions);
+        // an own "constructor" data property would shadow the class on every instance, and
+        // clone() and the sub-type checks reach the class through it
+        if (structuredType.fields.some((field) => field.name === "constructor")) {
+            throw new Error(`Unsupported structure field name: constructor (in ${structuredType.name})`);
+        }
+        applyOnFields(structuredType);
+        const schema = new StructuredTypeSchema({
+            ...structuredType,
+            dataTypeFactory
+        });
         const ids = idProvider.getDataTypeAndEncodingId(schema.name);
         if (!ids) {
-            throw new Error("Cannot find getDataTypeAndEncodingId for " + schema.name);
-        }
-        schema.id = ids.dataTypeNodeId;
-        schema.dataTypeNodeId = ids.dataTypeNodeId;
-        if (schema.id.namespace === 0 && schema.id.value === 0) {
+            // This may happen if the type is abstract or if the type refers to an internal ExtensionObject
+            // that can only exist inside another extension object. This Type of extension object cannot
+            // be instantiated as a standalone object and does not have encoding nodeIds...
+            // the constructor is created for its side effect of registering the dynamic class
+            createDynamicObjectConstructor(schema, dataTypeFactory);
             return schema;
+        }
+        schema.dataTypeNodeId = ids.dataTypeNodeId;
+        if (schema.dataTypeNodeId.namespace === 0 && schema.dataTypeNodeId.value === 0) {
+            // this extension object is from namespace 0  may exist already in the dataTypeFactory
+            const existing = dataTypeFactory.hasStructureByTypeName(schema.name);
+            if (existing) {
+                return schema;
+            }
         }
         schema.encodingDefaultXml = ExpandedNodeId.fromNodeId(ids.xmlEncodingNodeId);
         schema.encodingDefaultJson = ExpandedNodeId.fromNodeId(ids.jsonEncodingNodeId);
         schema.encodingDefaultBinary = ExpandedNodeId.fromNodeId(ids.binaryEncodingNodeId);
 
-        const Constructor = createDynamicObjectConstructor(schema, dataTypeFactory) as ConstructorFuncWithSchema;
+        // note: it is valid to have consructed element that have no encoding
+        //       when those elements are abstract or only used internaly
+        const Constructor = createDynamicObjectConstructor(schema, dataTypeFactory) as unknown as ConstructorFuncWithSchema;
         Constructor.encodingDefaultBinary = schema.encodingDefaultBinary;
         Constructor.encodingDefaultXml = schema.encodingDefaultXml;
-
+        Constructor.encodingDefaultJson = schema.encodingDefaultJson;
         return schema;
+
+        function applyOnFields(structuredType: StructureTypeRaw) {
+            for (const field of structuredType.fields) {
+                const fieldType = field.fieldType;
+                if (!field.schema) {
+                    const prefix = _getNamespacePart(fieldType);
+                    const fieldTypeName = _adjustFieldTypeName(_removeNamespacePart(fieldType));
+
+                    switch (prefix) {
+                        case "ua":
+                            field.fieldType = fieldTypeName;
+                            if (hasBuiltInType(fieldTypeName)) {
+                                field.category = FieldCategory.basic;
+                                field.schema = getBuiltInType(fieldTypeName);
+                            } else if (dataTypeFactory.hasStructureByTypeName(fieldTypeName)) {
+                                field.category = FieldCategory.complex;
+                                field.schema = dataTypeFactory.getStructuredTypeSchema(fieldTypeName);
+                            } else {
+                                field.category = FieldCategory.basic;
+                                // try in this
+                                field.schema = _getOrCreateStructuredTypeSchema(fieldTypeName);
+                                // c8 ignore next
+                                if (!field.schema) {
+                                    errorLog(
+                                        "What should I do ??",
+                                        fieldTypeName,
+                                        " ",
+                                        dataTypeFactory.hasStructureByTypeName(fieldTypeName)
+                                    );
+                                } else {
+                                    if (hasBuiltInType(fieldTypeName)) {
+                                        field.category = FieldCategory.basic;
+                                    } else {
+                                        field.category = FieldCategory.complex;
+                                    }
+                                }
+                            }
+                            break;
+                        case "opc":
+                            if ((fieldTypeName === "UAString" || fieldTypeName === "String") && field.name === "IndexRange") {
+                                field.fieldType = "NumericRange";
+                            } else {
+                                field.fieldType = fieldTypeName;
+                            }
+                            if (!hasBuiltInType(fieldTypeName)) {
+                                throw new Error(`Unknown basic type ${fieldTypeName}`);
+                            }
+                            field.category = FieldCategory.basic;
+                            break;
+                        default:
+                            field.fieldType = fieldTypeName;
+                            if (dataTypeFactory.hasEnumeration(fieldTypeName)) {
+                                field.category = FieldCategory.enumeration;
+                                const enumeratedType = dataTypeFactory.getEnumeration(fieldTypeName);
+                                field.schema = enumeratedType || undefined;
+                            } else if (dataTypeFactory.hasStructureByTypeName(fieldTypeName)) {
+                                field.category = FieldCategory.complex;
+                                const schema1 = dataTypeFactory.getStructuredTypeSchema(fieldTypeName);
+                                field.schema = schema1;
+                            }
+                            break;
+                    }
+                }
+            }
+        }
     }
     return _getOrCreateStructuredTypeSchema(name);
 }

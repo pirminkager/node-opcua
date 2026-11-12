@@ -1,0 +1,19 @@
+{
+    "extends": "../../tsconfig.test.json",
+    "references": [
+        {
+            "path": "../../node-opcua-role-set-client"
+        },
+        {
+            "path": "../../node-opcua-role-set-common"
+        }
+    ],
+    "include": [
+        "../source/**/*.ts",
+        "./**/*.ts"
+    ],
+    "exclude": [
+        "../node_modules",
+        "../dist"
+    ]
+}

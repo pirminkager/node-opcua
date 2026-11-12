@@ -1,13 +1,24 @@
 /**
  * @module node-opcua-secure-channel
  */
-export * from "./services";
-export * from "./secure_channel_service";
-export * from "./secure_message_chunk_manager";
-export * from "./security_policy";
-export * from "./sequence_number_generator";
-export * from "./message_builder";
-export * from "./message_header_to_string";
-export * from "./client/client_secure_channel_layer";
-export * from "./server/server_secure_channel_layer";
-export * from "./common";
+
+export * from "./client/client_secure_channel_layer.js";
+export * from "./common.js";
+export * from "./encoded_message_body.js";
+export * from "./encoded_nodes_to_write.js";
+export * from "./key_object.js";
+export * from "./message_builder.js";
+export * from "./message_header_to_string.js";
+export * from "./secure_channel_service.js";
+export * from "./secure_chunk_writer.js";
+export * from "./secure_message_chunk_manager.js";
+export * from "./security_policy.js";
+export * from "./sequence_number_generator.js";
+export * from "./server/server_secure_channel_layer.js";
+export * from "./services.js";
+export * from "./token_stack.js";
+
+//
+import { testRSAPKCS1V15_EncryptDecrypt } from "./verify_pcks1.js";
+
+testRSAPKCS1V15_EncryptDecrypt();

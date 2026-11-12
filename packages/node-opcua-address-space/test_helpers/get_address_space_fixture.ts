@@ -1,30 +1,55 @@
 /**
  * @module node-opcua-address-space
  */
-import * as fs from "fs";
-import * as path from "path";
+import fs from "node:fs";
+import path from "node:path";
 
-export function getAddressSpaceFixture(pathname: string) {
-    // find test_fixtures
+/**
+ * The one place this package's tests resolve a fixture.
+ *
+ * It used to try three candidate folders in turn, because `__dirname` lands somewhere
+ * different depending on whether the caller was compiled - a depth guess with two more
+ * behind it. Anchoring on the package root removes the question, and at the ESM flip
+ * `__dirname` becomes `import.meta.dirname` here and nowhere else.
+ */
+const here = import.meta.dirname;
+const packageRoot = findPackageRoot(here);
 
-    let folder = path.join(__dirname, "./test_fixtures");
-    if (!fs.existsSync(folder)) {
-        folder = path.join(__dirname, "../test_helpers/test_fixtures");
-        if (!fs.existsSync(folder)) {
-            folder = path.join(__dirname, "../../test_helpers/test_fixtures");
-
-            // istanbul ignore next
-            if (!fs.existsSync(folder)) {
-                // tslint:disable:no-console
-                console.log(" cannot find test_fixtures folder ");
-            }
+/**
+ * The nearest ancestor holding a package.json. Kept local on purpose: this file
+ * ships in distHelpers, and node-opcua-test-helpers is private to the monorepo,
+ * so a consumer installing the package must not need it.
+ */
+function findPackageRoot(from: string): string {
+    let dir = from;
+    for (;;) {
+        if (fs.existsSync(path.join(dir, "package.json"))) {
+            return dir;
         }
+        const parent = path.dirname(dir);
+        if (parent === dir) {
+            throw new Error(`cannot find package.json at or above ${from}`);
+        }
+        dir = parent;
     }
-    const filename = path.join(folder, pathname);
+}
 
-    // istanbul ignore next
-    if (!fs.existsSync(filename)) {
-        throw new Error(" cannot find fixture with name " + pathname);
+/** nodesets shipped by this package */
+const nodesetsFolder = path.join(packageRoot, "nodesets");
+
+/** XML fixtures the tests load */
+const fixturesFolder = path.join(packageRoot, "test_helpers", "test_fixtures");
+
+export function getAddressSpaceFixture(pathname: string): string {
+    // a nodeset shipped by the package wins over a test fixture of the same name
+    const asNodeset = path.join(nodesetsFolder, pathname);
+    if (fs.existsSync(asNodeset)) {
+        return asNodeset;
     }
-    return filename;
+    const asFixture = path.join(fixturesFolder, pathname);
+    // c8 ignore next
+    if (!fs.existsSync(asFixture)) {
+        throw new Error(`cannot find fixture with name ${pathname}: looked in ${nodesetsFolder} and ${fixturesFolder}`);
+    }
+    return asFixture;
 }

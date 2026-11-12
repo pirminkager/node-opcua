@@ -1,19 +1,16 @@
 /**
  * @module node-opcua-client
  */
-import { EventEmitter } from "events";
+import type { EventEmitter } from "node:events";
 
-import { DataValue, TimestampsToReturn } from "node-opcua-data-value";
-import { ReadValueIdOptions } from "node-opcua-service-read";
-import { Variant } from "node-opcua-variant";
+import { type DataValue, TimestampsToReturn } from "node-opcua-data-value";
+import type { ReadValueIdOptions } from "node-opcua-service-read";
+import type { MonitoringParametersOptions } from "node-opcua-types";
+import type { Variant } from "node-opcua-variant";
+import type { ClientMonitoredItemBase, ClientMonitoredItemOrGroupAction } from "./client_monitored_item_base.js";
+import type { ClientSubscription } from "./client_subscription.js";
 
-import { MonitoringMode, MonitoringParametersOptions } from "node-opcua-types";
-import { ClientMonitoredItemBase, ClientMonitoredItemOrGroupAction } from "./client_monitored_item_base";
-import { ClientSubscription } from "./client_subscription";
-
-// tslint:disable:unified-signatures
 export interface ClientMonitoredItem extends ClientMonitoredItemBase, ClientMonitoredItemOrGroupAction, EventEmitter {
-
     on(event: "changed", eventHandler: (dataValue: DataValue) => void): this;
     on(event: "changed", eventHandler: (values: Variant[]) => void): this;
 
@@ -24,15 +21,17 @@ export interface ClientMonitoredItem extends ClientMonitoredItemBase, ClientMoni
     on(event: "err", eventHandler: (message: string) => void): this;
 }
 
-export class ClientMonitoredItem {
-    public static create(
-        subscription: ClientSubscription,
-        itemToMonitor: ReadValueIdOptions,
-        monitoringParameters: MonitoringParametersOptions,
-        timestampsToReturn: TimestampsToReturn = TimestampsToReturn.Neither
-    ): ClientMonitoredItem {
-        /* istanbul ignore next*/
+export namespace ClientMonitoredItem {
+    // reassigned in private/client_monitored_item_impl.ts to install the real
+    // implementation; biome's useConst can't see that cross-module write.
+    // biome-ignore lint/style/useConst: intentionally mutable, see above
+    export let create = (
+        _subscription: ClientSubscription,
+        _itemToMonitor: ReadValueIdOptions,
+        _monitoringParameters: MonitoringParametersOptions,
+        _timestampsToReturn: TimestampsToReturn = TimestampsToReturn.Neither
+    ): ClientMonitoredItem => {
+        /* c8 ignore next*/
         throw new Error("unimplemented");
-    }
-
+    };
 }

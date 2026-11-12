@@ -1,0 +1,13 @@
+import type { UAIOLinkAlarm, UAIOLinkAlarm_Base } from "./ua_io_link_alarm.js";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/IOLink/                         |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |IOLinkDeviceAlarmType i=1008                                |
+ * |isAbstract      |false                                                       |
+ */
+export type UAIOLinkDeviceAlarm_Base = UAIOLinkAlarm_Base;
+export interface UAIOLinkDeviceAlarm extends UAIOLinkAlarm, UAIOLinkDeviceAlarm_Base {}

@@ -1,0 +1,27 @@
+{
+    "extends": "../tsconfig.common.json",
+    "compilerOptions": {
+        "rootDir": "test_helpers",
+        "outDir": "distHelpers",
+        "composite": true,
+        "incremental": true
+    },
+    "include": [
+        "test_helpers/**.ts"
+    ],
+    "references": [
+        {
+            "path": "./tsconfig_base.json"
+        },
+        {
+            "path": "./tsconfig_nodejs.json"
+        },
+        {
+            "path": "../node-opcua-test-helpers"
+        }
+    ],
+    "exclude": [
+        "node_modules",
+        "dist*"
+    ]
+}

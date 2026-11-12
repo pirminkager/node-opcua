@@ -1,0 +1,27 @@
+import type { UAMethod } from "node-opcua-address-space-base";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { UAFiniteStateMachine, UAFiniteStateMachine_Base } from "node-opcua-nodeset-ua/dist/ua_finite_state_machine.js";
+import type { UAInitialState } from "node-opcua-nodeset-ua/dist/ua_initial_state.js";
+import type { UAState } from "node-opcua-nodeset-ua/dist/ua_state.js";
+import type { UATransition } from "node-opcua-nodeset-ua/dist/ua_transition.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/DI/                             |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ConfirmationStateMachineType i=307                          |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAConfirmationStateMachine_Base extends UAFiniteStateMachine_Base {
+    confirm: UAMethod;
+    confirmationTimeout: UABaseDataVariable<number, DataType.Double>;
+    notWaitingForConfirm: UAInitialState;
+    waitingForConfirm: UAState;
+    notWaitingForConfirmToWaitingForConfirm: UATransition;
+    waitingForConfirmToNotWaitingForConfirm: UATransition;
+}
+export interface UAConfirmationStateMachine extends UAFiniteStateMachine, UAConfirmationStateMachine_Base {}

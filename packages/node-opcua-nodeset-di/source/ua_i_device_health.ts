@@ -1,0 +1,22 @@
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { UABaseInterface, UABaseInterface_Base } from "node-opcua-nodeset-ua/dist/ua_base_interface.js";
+import type { UAFolder } from "node-opcua-nodeset-ua/dist/ua_folder.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { EnumDeviceHealth } from "./enum_device_health.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/DI/                             |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |IDeviceHealthType i=15051                                   |
+ * |isAbstract      |true                                                        |
+ */
+export interface UAIDeviceHealth_Base extends UABaseInterface_Base {
+    deviceHealth?: UABaseDataVariable<EnumDeviceHealth, DataType.Int32>;
+    deviceHealthAlarms?: UAFolder;
+}
+export interface UAIDeviceHealth extends UABaseInterface, UAIDeviceHealth_Base {}

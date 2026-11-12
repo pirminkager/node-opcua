@@ -1,0 +1,34 @@
+import type { UAObject, UAProperty } from "node-opcua-address-space-base";
+import type { UAString } from "node-opcua-basic-types";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * The UserType ObjectType describes information of
+ * the registered user groups within the control
+ * system.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Robotics/                       |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |UserType i=18175                                            |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAUser_Base {
+    /**
+     * level
+     * Provides information about the access rights and
+     * determines what can be viewed, updated, or
+     * deleted by a user
+     */
+    level: UAProperty<UAString, DataType.String>;
+    /**
+     * name
+     * The name for the current user within the control
+     * system.
+     */
+    name?: UAProperty<UAString, DataType.String>;
+}
+export interface UAUser extends UAObject, UAUser_Base {}

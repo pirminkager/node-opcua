@@ -1,0 +1,341 @@
+import { describe } from "mocha";
+import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
+import { nodesets } from "node-opcua-nodesets";
+import should from "should";
+import {
+    AddressSpace,
+    addDefaultInstanceBrowseName,
+    implementInterface,
+    instantiateAddIn,
+    type UAObject
+} from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
+
+const debugLog = make_debugLog("TEST");
+const doDebug = checkDebugFlag("TEST");
+
+describe("testing object instantiation with Interfaces - case 1", () => {
+    let addressSpace: AddressSpace;
+    beforeEach(async () => {
+        addressSpace = AddressSpace.create();
+        addressSpace.registerNamespace("Private");
+        await generateAddressSpace(addressSpace, [nodesets.standard]);
+    });
+    afterEach(() => {
+        if (addressSpace) {
+            addressSpace.dispose();
+        }
+    });
+
+    function addIVendorPlateType(namespace1: ReturnType<AddressSpace["registerNamespace"]>) {
+        // #region Define IVendorPlateType
+        const iVendorPlateType = namespace1.addObjectType({
+            browseName: "IVendorPlateType",
+            subtypeOf: "BaseInterfaceType",
+            description: "IVendorPlateType description"
+        });
+        const _productName = namespace1.addVariable({
+            propertyOf: iVendorPlateType,
+            browseName: "ProductName",
+            dataType: "String",
+            description: "ProductName description",
+            modellingRule: "Mandatory"
+        });
+        const _serialNumber = namespace1.addVariable({
+            propertyOf: iVendorPlateType,
+            browseName: "SerialNumber",
+            dataType: "String",
+            description: "SerialNumber description",
+            modellingRule: "Mandatory"
+        });
+        const _softwareRevision = namespace1.addVariable({
+            propertyOf: iVendorPlateType,
+            browseName: "SoftwareRevision",
+            dataType: "String",
+            description: "SoftwareRevision description",
+            modellingRule: "Optional"
+        });
+        // #endregion
+
+        // #region define IVendorPlateTypeExtended
+        const iVendorPlateTypeExtended = namespace1.addObjectType({
+            browseName: "IVendorPlateTypeExtended",
+            subtypeOf: iVendorPlateType,
+            description: "IVendorPlateTypeExtended description"
+        });
+        const _Manufacturer = namespace1.addVariable({
+            propertyOf: iVendorPlateTypeExtended,
+            browseName: "Manufacturer",
+            dataType: "String",
+            description: "Manufacturer description",
+            modellingRule: "Mandatory"
+        });
+        // #endregion
+    }
+
+    it("INT-01 should create a type implements an interface", async () => {
+        const namespace1 = addressSpace.registerNamespace("Model");
+
+        addIVendorPlateType(namespace1);
+
+        const iVendorPlateTypeExtended = namespace1.findObjectType("IVendorPlateTypeExtended");
+        if (!iVendorPlateTypeExtended) throw new Error("cannot find IVendorPlateTypeExtended");
+
+        // #region define MachineType that implements IVendorPlateTypeExtended
+        const machineType = namespace1.addObjectType({
+            browseName: "MachineType",
+            subtypeOf: "BaseObjectType",
+            description: "MachineType"
+        });
+
+        implementInterface(machineType, iVendorPlateTypeExtended, []);
+
+        should.exist(machineType.getChildByName("ProductName", 2));
+        should.exist(machineType.getChildByName("SerialNumber", 2));
+        should.exist(machineType.getChildByName("Manufacturer", 2));
+        should.exist(machineType.getChildByName("SoftwareRevision", 2));
+
+        should(machineType.getChildByName("ProductName", 2)?.modellingRule).eql("Mandatory");
+        should(machineType.getChildByName("SerialNumber", 2)?.modellingRule).eql("Mandatory");
+        should(machineType.getChildByName("Manufacturer", 2)?.modellingRule).eql("Mandatory");
+        should(machineType.getChildByName("SoftwareRevision", 2)?.modellingRule).eql("Optional");
+
+        // #endregion
+
+        // #region now instantiate a machine
+        const namespace2 = addressSpace.registerNamespace("Instance");
+        const machine = machineType.instantiate({
+            browseName: "Machine",
+            organizedBy: addressSpace.rootFolder.objects,
+            namespace: namespace2
+        });
+        // #endregion
+        doDebug && debugLog(machineType.toString());
+
+        doDebug && debugLog(machine.toString());
+
+        should.exist(machine.getChildByName("ProductName", 2));
+        should.exist(machine.getChildByName("SerialNumber", 2));
+        should.exist(machine.getChildByName("Manufacturer", 2));
+        should.not.exist(machine.getChildByName("SoftwareRevision", 2));
+
+        // #region now instantiate a machine with optionals
+        const machine2 = machineType.instantiate({
+            browseName: "Machine2",
+            organizedBy: addressSpace.rootFolder.objects,
+            namespace: namespace2,
+            optionals: ["SoftwareRevision"]
+        });
+        // #endregion
+        doDebug && debugLog(machine2.toString());
+
+        should.exist(machine2.getChildByName("ProductName", 2));
+        should.exist(machine2.getChildByName("SerialNumber", 2));
+        should.exist(machine2.getChildByName("Manufacturer", 2));
+        should.exist(machine2.getChildByName("SoftwareRevision", 2));
+    });
+
+    it("INT-02 should create a instances that implements an interface", async () => {
+        const namespace1 = addressSpace.registerNamespace("Model");
+
+        addIVendorPlateType(namespace1);
+
+        const iVendorPlateTypeExtended = namespace1.findObjectType("IVendorPlateTypeExtended");
+        if (!iVendorPlateTypeExtended) throw new Error("cannot find IVendorPlateTypeExtended");
+
+        // #region now instantiate a machine
+        const namespace2 = addressSpace.registerNamespace("Instance");
+
+        const baseObjectType = addressSpace.findObjectType("BaseObjectType");
+        if (!baseObjectType) throw new Error("cannot find BaseObjectType");
+
+        const machine = baseObjectType.instantiate({
+            browseName: "Machine",
+            organizedBy: addressSpace.rootFolder.objects,
+            namespace: namespace2
+        });
+        implementInterface(machine, iVendorPlateTypeExtended, ["SoftwareRevision"]);
+        // #endregion
+
+        doDebug && debugLog(machine.toString());
+
+        should.exist(machine.getChildByName("ProductName", 2));
+        should.exist(machine.getChildByName("SerialNumber", 2));
+        should.exist(machine.getChildByName("Manufacturer", 2));
+        should.exist(machine.getChildByName("SoftwareRevision", 2));
+    });
+
+    function addInterfaceWith2Optionals(addressSpace: AddressSpace) {
+        // UAInterface1 {
+        //    OptionalVariable1 (optional)
+        //    OptionalVariable2 (optional)
+        // }
+        const uaInterface1 = addressSpace.getOwnNamespace().addObjectType({
+            browseName: "UAInterface1",
+            subtypeOf: "BaseInterfaceType"
+        });
+        const _optionalVariable1 = addressSpace.getOwnNamespace().addVariable({
+            propertyOf: uaInterface1,
+            browseName: "OptionalVariable1",
+            dataType: "String",
+            modellingRule: "Optional"
+        });
+        const _optionalVariable2 = addressSpace.getOwnNamespace().addVariable({
+            propertyOf: uaInterface1,
+            browseName: "OptionalVariable2",
+            dataType: "String",
+            modellingRule: "Optional"
+        });
+        return uaInterface1;
+    }
+    it("INT-03 should expose optional interface members that are in the optionals property", async () => {
+        const uaInterface1 = addInterfaceWith2Optionals(addressSpace);
+
+        const uaObjectType1 = addressSpace.getOwnNamespace().addObjectType({
+            browseName: "UAObjectType1",
+            subtypeOf: "BaseObjectType"
+        });
+        implementInterface(uaObjectType1, uaInterface1, []);
+
+        //
+        const uaObject1 = uaObjectType1.instantiate({
+            browseName: "UAObject1",
+            organizedBy: addressSpace.rootFolder.objects,
+            optionals: ["OptionalVariable1"]
+        });
+
+        should.exist(uaObject1.getChildByName("OptionalVariable1", 1), "OptionalVariable1 should be exposed");
+        should.not.exist(uaObject1.getChildByName("OptionalVariable2", 1), "OptionalVariable2 should not be exposed");
+
+        const uaObject2 = uaObjectType1.instantiate({
+            browseName: "UAObject2",
+            organizedBy: addressSpace.rootFolder.objects,
+            optionals: ["OptionalVariable2"]
+        });
+
+        should.not.exist(uaObject2.getChildByName("OptionalVariable1", 1), "OptionalVariable1 should not be exposed");
+        should.exist(uaObject2.getChildByName("OptionalVariable2", 1), "OptionalVariable2 should be exposed");
+    });
+
+    it("INT-04 should instantiate an object with optionals,  of a type that implements an interface with no override", async () => {
+        const uaInterface1 = addInterfaceWith2Optionals(addressSpace);
+
+        // #region define a object type that implements the interface
+        const uaObjectType1 = addressSpace.getOwnNamespace().addObjectType({
+            browseName: "UAObjectType1",
+            subtypeOf: "BaseObjectType"
+        });
+
+        // using simply add Reference to implement the interface should work as well
+        uaObjectType1.addReference({
+            nodeId: uaInterface1,
+            referenceType: "HasInterface"
+        });
+        // #endregion
+
+        const uaObject1 = uaObjectType1.instantiate({
+            browseName: "UAObject1",
+            organizedBy: addressSpace.rootFolder.objects,
+            optionals: ["OptionalVariable1"]
+        });
+
+        should.exist(uaObject1.getChildByName("OptionalVariable1", 1), "OptionalVariable1 should be exposed");
+        should.not.exist(uaObject1.getChildByName("OptionalVariable2", 1), "OptionalVariable2 should not be exposed");
+
+        const uaObject2 = uaObjectType1.instantiate({
+            browseName: "UAObject2",
+            organizedBy: addressSpace.rootFolder.objects,
+            optionals: ["OptionalVariable2"]
+        });
+
+        should.not.exist(uaObject2.getChildByName("OptionalVariable1", 1), "OptionalVariable1 should not be exposed");
+        should.exist(uaObject2.getChildByName("OptionalVariable2", 1), "OptionalVariable2 should be exposed");
+    });
+
+    it("INT-05 should expose an optional interface member of a nested child, and leave the type declaration untouched", async () => {
+        const namespace = addressSpace.getOwnNamespace();
+        const iThingType = namespace.addObjectType({ browseName: "IThingType", subtypeOf: "BaseInterfaceType" });
+        namespace.addVariable({
+            propertyOf: iThingType,
+            browseName: "OptionalPart",
+            dataType: "String",
+            modellingRule: "Optional"
+        });
+
+        const functionType = namespace.addObjectType({ browseName: "FunctionType", subtypeOf: "BaseObjectType" });
+        implementInterface(functionType, iThingType, []);
+
+        const holderType = namespace.addObjectType({ browseName: "HolderType", subtypeOf: "BaseObjectType" });
+        const functionDeclaration = functionType.instantiate({
+            browseName: "Function",
+            componentOf: holderType,
+            modellingRule: "Mandatory"
+        });
+
+        const holder = holderType.instantiate({
+            browseName: "Holder2",
+            organizedBy: addressSpace.rootFolder.objects,
+            optionals: ["Function.OptionalPart"]
+        });
+
+        const fn = holder.getChildByName("Function", 1);
+        should.exist(fn);
+        should(fn?.getChildByName("OptionalPart", 1)).be.ok();
+        should.not.exist(
+            functionDeclaration.getChildByName("OptionalPart", 1),
+            "the type declaration HolderType/Function must not gain OptionalPart"
+        );
+    });
+
+    it("INT-06 should keep the ModellingRule of a nested optional interface member only when instantiated inside a type", async () => {
+        const namespace = addressSpace.getOwnNamespace();
+        const iThingType = namespace.addObjectType({ browseName: "IThingType", subtypeOf: "BaseInterfaceType" });
+        for (const [browseName, modellingRule] of [
+            ["MandatoryPart", "Mandatory"],
+            ["OptionalPart", "Optional"]
+        ] as const) {
+            namespace.addVariable({ componentOf: iThingType, browseName, dataType: "Double", modellingRule });
+        }
+
+        // FunctionType implements the interface but carries a copy of the Mandatory member only
+        const functionType = namespace.addObjectType({ browseName: "FunctionType", subtypeOf: "BaseObjectType" });
+        functionType.addReference({ referenceType: "HasInterface", nodeId: iThingType.nodeId });
+        namespace.addVariable({
+            componentOf: functionType,
+            browseName: "MandatoryPart",
+            dataType: "Double",
+            modellingRule: "Mandatory"
+        });
+        should.not.exist(functionType.getChildByName("OptionalPart", 1));
+        addDefaultInstanceBrowseName(functionType, "Function");
+
+        const holderType = namespace.addObjectType({ browseName: "HolderType", subtypeOf: "BaseObjectType" });
+        instantiateAddIn(functionType, { addInOf: holderType, modellingRule: "Mandatory" });
+
+        const optionalPartOf = (holder: UAObject) => holder.getChildByName("Function", 1)?.getChildByName("OptionalPart", 1);
+
+        // inside a type: the copy is an instance declaration
+        const outerType = namespace.addObjectType({ browseName: "OuterType", subtypeOf: "BaseObjectType" });
+        const declared = optionalPartOf(
+            holderType.instantiate({
+                browseName: "Holder",
+                componentOf: outerType,
+                modellingRule: "Mandatory",
+                optionals: ["Function.OptionalPart"]
+            })
+        );
+        should.exist(declared);
+        should(declared?.modellingRule).eql("Optional");
+
+        // outside a type: an ordinary instance carries no ModellingRule
+        const copy = optionalPartOf(
+            holderType.instantiate({
+                browseName: "Holder2",
+                organizedBy: addressSpace.rootFolder.objects,
+                optionals: ["Function.OptionalPart"]
+            })
+        );
+        should.exist(copy);
+        should.not.exist(copy?.modellingRule);
+    });
+});

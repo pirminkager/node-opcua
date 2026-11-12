@@ -1,159 +1,243 @@
 #!node
-"use strict";
-
-const Mocha = require("mocha");
-const fs = require("fs");
-const path = require("path");
-const chalk = require("chalk");
-
-require("source-map-support").install();
-require("ts-node").register({
-    transpileOnly: true
-});
-
-Error.stackTraceLimit = Infinity;
-
-
+const fs = require("node:fs");
+const path = require("node:path");
+// .default: chalk 6 is ESM-only, so require() hands back the module namespace
+// object rather than the instance, and every chalk.<style>() would be undefined.
+const chalk = require("chalk").default;
+const { Mocha } = require("mocha");
 require("mocha-clean");
 
-const {
-    EVENT_RUN_BEGIN,
-    EVENT_RUN_END,
-    EVENT_TEST_BEGIN,
-    EVENT_TEST_FAIL,
-    EVENT_TEST_PASS,
-    EVENT_SUITE_BEGIN,
-    EVENT_SUITE_END,
-    EVENT_TEST_SKIPPED
-} = Mocha.Runner.constants;
+const { registerHooks } = require("node:module");
+const { pathToFileURL, fileURLToPath } = require("node:url");
 
-let filterOpts = process.argv[process.argv.length - 1];
+// The suite runs on Node's own type stripping. Set TSX=1 to fall back to tsx instead.
+//
+// This is not about dropping a dependency. tsx's CommonJS hook intercepts every module,
+// including the already-compiled dist/*.js of the packages under test, and hands V8 its own
+// transformed source with its own source map; c8 then attributes coverage to the compiled
+// file instead of following the .js.map back to the TypeScript. A package reached through
+// its package name was reported under dist/, the same package reached by a relative path was
+// reported under source/, and the two sets of counts never merged. Measured across the whole
+// suite, the same tests scored 79.06% of lines that way and 91.70% without tsx, on an
+// essentially unchanged denominator: 32,500 lines that were always covered but were being
+// counted against a file nobody edits. It also injects esbuild's <define:import.meta> shim,
+// which reaches the lcov as a source file and makes `c8 report` fail on Windows.
+//
+// Two resolver redirects replace what tsx was doing. Neither rewrites a single import.
+//
+// TSX=1 is the escape hatch, for a file Node's stripper rejects outright: an enum, a
+// parameter property, an angle-bracket cast, a namespace, or `import =`. `check:erasable`
+// gates the test trees against exactly those, so reaching for it should mean the gate has
+// found something new rather than something known. It registers only the ESM hooks: the
+// CommonJS hook is what caused the misattribution above, so a fallback that re-registered it
+// would reintroduce the defect this replaced.
+if (!process.env.TSX) {
+    const exists = (p) => fs.existsSync(p);
 
-if (filterOpts.match(/run_all_mocha/)) {
-    filterOpts = "";
+    /** the package a file belongs to, i.e. the nearest directory holding a package.json */
+    const packageRootOf = (file) => {
+        let dir = path.dirname(file);
+        for (let i = 0; i < 12; i++) {
+            if (exists(path.join(dir, "package.json"))) return dir;
+            const parent = path.dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+        }
+        return null;
+    };
+
+    /**
+     * <pkg>/<anywhere>/x.js -> the compiled file, so the library runs as published.
+     * Both dist shapes this repo uses: rootDir at the source directory (source/x.ts ->
+     * dist/x.js) and rootDir at the package (impl/x.ts -> dist/impl/x.js).
+     */
+    const SOURCE_DIRS = new Set(["source", "src", "api", "impl", "source_nodejs"]);
+    const compiledCandidates = (jsPath) => {
+        const pkgDir = packageRootOf(jsPath);
+        if (!pkgDir) return [];
+        const rel = path.relative(pkgDir, jsPath).replace(/\\/g, "/");
+        const [first, ...rest] = rel.split("/");
+        // only a source directory may be dropped. Dropping any first segment would let a test's
+        // own ./helper.js resolve to the library's dist/helper.js, a different module that
+        // happens to share a name.
+        if (!SOURCE_DIRS.has(first) || rest.length === 0) {
+            return [path.join(pkgDir, "dist", rel)];
+        }
+        return [path.join(pkgDir, "dist", rest.join("/")), path.join(pkgDir, "dist", rel)];
+    };
+
+    registerHooks({
+        resolve(specifier, context, nextResolve) {
+            if (specifier.startsWith(".") && specifier.endsWith(".js") && context.parentURL) {
+                const jsPath = fileURLToPath(new URL(specifier, context.parentURL));
+                if (!exists(jsPath)) {
+                    // prefer the compiled output: it keeps enums and parameter properties,
+                    // which strip-only mode cannot handle, out of the loader entirely
+                    for (const candidate of compiledCandidates(jsPath)) {
+                        if (exists(candidate)) {
+                            return nextResolve(pathToFileURL(candidate).href, context);
+                        }
+                    }
+                    // a test helper that exists only as TypeScript: Node strips it itself
+                    const tsPath = jsPath.replace(/\.js$/, ".ts");
+                    if (exists(tsPath)) {
+                        return nextResolve(pathToFileURL(tsPath).href, context);
+                    }
+                }
+            }
+            return nextResolve(specifier, context);
+        }
+    });
+} else {
+    // The ESM hooks only, and through tsx's own api rather than
+    // register("tsx/esm/api", pathToFileURL(__filename)): the module.register form installs
+    // hooks that never do the NodeNext .js -> .ts resolution, so `import "./x.js"` next to an
+    // x.ts throws ERR_MODULE_NOT_FOUND. That went unnoticed for as long as the CommonJS hook
+    // was registered alongside it and covered for it. ("tsx/esm" refuses outright and asks to
+    // be loaded with --import.)
+    require("tsx/esm/api").register();
 }
-if (filterOpts) {
-    console.log("test filter = ", filterOpts);
-}
-// Instantiate a Mocha instance.
-let mocha = new Mocha({
-    bail: true,
-    fullTrace: true,
-    grep: filterOpts,
-    reporter: process.env.REPORTER || "spec", //"nyan", //"tap"
-    slow: 6000,
+
+Error.stackTraceLimit = 20;
+
+const doDebug = !!process.env.DEBUG;
+
+// Capture unhandled rejections and uncaught exceptions at the runner level
+// so future TCC2-style regressions (tests that schedule async assertions
+// without awaiting them) surface as a clear [FATAL] message with the
+// offending test's name and the rejection stack — instead of a confusing
+// exit code (e.g. 127) and a noisy "Unhandled Rejection" cascade.
+//
+// Exit codes the runner can emit (see the IIFE at the bottom):
+//   0 — all tests passed
+//   1 — one or more tests failed (any count, clamped to 1)
+//   2 — unhandled rejection or uncaught exception during the run
+//  -1 — outer try/catch in the IIFE caught an error
+let fatalError = null;
+let currentTestTitle = "<runner setup>";
+
+process.on("unhandledRejection", (reason) => {
+    if (!fatalError) fatalError = reason;
+    console.error("\n[FATAL] Unhandled Rejection");
+    console.error("[FATAL] during test: " + currentTestTitle);
+    console.error(reason && reason.stack ? reason.stack : reason);
 });
 
+process.on("uncaughtException", (err) => {
+    if (!fatalError) fatalError = err;
+    console.error("\n[FATAL] Uncaught Exception");
+    console.error("[FATAL] during test: " + currentTestTitle);
+    console.error(err && err.stack ? err.stack : err);
+});
 
-let testFiles = [];
+/** a spec: optionally numbered, named test_ or repro_ */
+const SPEC_TS = /^(\d+[-_])?(test|repro)_.*\.ts$/;
+const SPEC_JS = /^(\d+[-_])?(test|repro)_.*\.js$/;
 
-function collect_files(testFolder) {
+async function collect_files(testFiles, testFolder) {
 
-    for (const file of fs.readdirSync(testFolder)) {
-
+    const files = await fs.promises.readdir(testFolder);
+    for (const file of files) {
         let f = path.join(testFolder, file);
-        if (fs.lstatSync(f).isDirectory()) {
-            collect_files(f);
+
+        const stat = await fs.promises.lstat(f);
+        if (stat.isDirectory()) {
+            await collect_files(testFiles, f);
         } else {
-
-            if (file.match(/^test_.*\.ts/) && !file.match(/^test_.*\.d\.ts/)) {
-
+            // Optional NN- or NN_ prefix, and repro_ as well as test_.
+            //
+            // node-opcua-secure-channel numbers its files 01-test_..., 02-test_... to
+            // fix their order, and a reproduction case is named repro_<issue>. Neither
+            // matched a bare /^test_/, so 24 files - 22 of them that whole package's
+            // suite - were skipped in silence by both programmatic runners for as long
+            // as the pattern has existed. They ran only under `pnpm m run test`, which
+            // was itself broken, so nothing ran them at all.
+            if (file.match(SPEC_TS) && !file.match(/\.d\.ts$/)) {
+                doDebug && console.log("     - adding file ", f);
                 testFiles.push(f);
-            } else if (file.match(/^test_.*\.js/)) {
+            } else if (file.match(SPEC_JS)) {
                 // make sure that there is not a TS file along side
-                if (fs.existsSync(file.replace(".js", ".ts"))) {
+                if (fs.existsSync(f.replace(".js", ".ts"))) {
                     console.log("warning => transpiled js file ignored : ", file);
                 } else {
+                    doDebug && console.log("     - adding file ", f);
                     testFiles.push(f);
                 }
             } else {
-                //xx console.log("skipping file ",f);
+                doDebug && console.log("     - (skipping file ", f, ")");
             }
         }
     }
 }
 
-for (const file of fs.readdirSync(__dirname)) {
+async function extractAllTestFiles() {
+    let testFiles = [];
 
-    const testFolder = path.join(__dirname, file, "test");
-    if (fs.existsSync(testFolder)) {
-        collect_files(testFolder);
-    }
-}
+    const promises = [];
+    const files = await fs.promises.readdir(__dirname);
+    for (const file of files) {
+        // if (file!== "node-opcua-address-space") {
+        //     continue;
+        // }
 
-testFiles = testFiles.sort();
-
-// -------------------------------------------------
-// portion
-if (process.env.TESTPAGE) {
-
-    console.log("nb files with tests : ", testFiles.length);
-
-    const pageSize = 10;
-    const testPage = parseInt(process.env.TESTPAGE);
-    if (testPage == -1) {
-
-        // display test page
-        let i = 0;
-        while (testFiles) {
-
-            console.log("\n --------------------------------- Page ", i);
-
-            const a = testFiles.slice(i * pageSize, (i + 1) * pageSize);
-            if (a.length === 0) {
-                return;
-            }
-            for (const f of a) {
-                console.log("        " + f);
-            }
-
-            i++
-        }
-
-        exit(0);
-    }
-    testFiles = testFiles.slice(testPage * pageSize, (testPage + 1) * pageSize);
-
-    console.log(" Testing with test page : " + testPage);
-    console.log(testFiles[0]);
-    console.log(testFiles[testFiles.length - 1]);
-}
-
-const suite = mocha.suite;
-suite.on('pre-require', (global, file, self) => {
-    //console.log("pre-require", file);
-});
-suite.on('require', (script, file, self) => {
-
-});
-suite.on('post-require', (global, file, self) => {
-    //  console.log("post   -require", file);
-
-});
-
-
-// Add each .js file to the mocha instance
-const selectedFiles = testFiles.filter((file) => {
-    // Only keep the .js files
-    const extension = file.substr(-3);
-    return extension === ".js" || extension === ".ts";
-});
-for (const file of selectedFiles) {
-
-    function test_no_leak() {
-        let t = fs.readFileSync(file, "ascii");
-        if (t.match("OPCUAClient")) {
-            if (!t.match("Leak")) {
-                console.log(" OPCUAClient without leak detection mechanism  !!!", file);
-            }
+        const testFolder = path.join(__dirname, file, "test");
+        if (fs.existsSync(testFolder) && fs.lstatSync(testFolder).isDirectory()) {
+            doDebug && console.log("collecting test files from ", testFolder);
+            promises.push(collect_files(testFiles, testFolder));
         }
     }
-    test_no_leak();
-    mocha.addFile(file);
+    await Promise.all(promises);
+
+    testFiles = testFiles.sort();
+    return testFiles;
+}
+exports.extractAllTestFiles = extractAllTestFiles;
+
+async function extractPageTest(testFiles, { page, pageCount, pageSize }) {
+    // -------------------------------------------------
+    // portion
+    if (page !== undefined) {
+        if (page === -1) {
+            // display test page
+            let i = 0;
+            while (testFiles) {
+                console.log("\n --------------------------------- Page ", i);
+                const a = testFiles.slice(i * pageSize, (i + pageCount) * pageSize);
+                if (a.length === 0) {
+                    return;
+                }
+                for (const f of a) {
+                    console.log("        " + f);
+                }
+
+                i++;
+            }
+
+            process.exit(0);
+        }
+        testFiles = testFiles.slice(page * pageSize, (page + 1) * pageSize);
+
+        // console.log(" Testing with test page : " + page, pageSize);
+        // console.log(testFiles[0]);
+        // console.log(testFiles[testFiles.length - 1]);
+    }
+    return testFiles;
+}
+exports.extractPageTest = extractPageTest;
+
+async function extractTestFiles({ page, pageCount, pageSize }) {
+    let testFiles = await extractAllTestFiles();
+    return await extractPageTest(testFiles, { page, pageCount, pageSize });
 }
 
-mocha.timeout(200000);
-mocha.bail(true);
+function test_no_leak(file) {
+    let sourceCode = fs.readFileSync(file, "utf-8");
+    if (sourceCode.match("OPCUAClient")) {
+        if (!sourceCode.match("Leak")) {
+            console.log(chalk.yellow(" OPCUAClient without leak detection mechanism  !!!"), file);
+        }
+    }
+}
 
 function forceGC() {
     if (global.gc) {
@@ -165,44 +249,55 @@ function forceGC() {
 
 const doHeapSnapshot = !!process.env["HEAPSNAPSHOT"];
 const doHeapSnapshotGlobal = true;
-var heapdump = null;
+let heapdump = null;
 try {
     heapdump = require("heapdump");
-}
-catch (err) {
-
+} catch (_err) {
+    /** */
 }
 
 function checkMemoryConsumption() {
-    forceGC();
+    // Only force a full GC when heap snapshots are requested.
+    // Forcing GC on every test (~2 calls per test) adds 70-110ms
+    // per call and degrades progressively as the heap grows,
+    // consuming 40-60% of total wall-clock time in long runs.
+    if (doHeapSnapshot) {
+        forceGC();
+    }
     const used = process.memoryUsage().heapUsed / 1024 / 1024;
     return used;
-    //  console.log(`The script uses approximately ${Math.round(used * 100) / 100} MB`);
 }
-
-
 
 Mocha.reporters.Base.color;
 
 const heapsnapshot = Date.now().toString();
 const oldConsole = console.log;
 function myConsoleLog() {
-
-
+    /**  */
 }
 const symbols = {
-    ok: '✓',
-    err: '✖',
-    dot: '․',
-    comma: ',',
-    bang: '!'
-}
-if (process.platform === 'win32') {
-    symbols.ok = '\u221A';
-    symbols.err = '\u00D7';
-    symbols.dot = '.';
+    ok: "✓",
+    err: "✖",
+    dot: "․",
+    comma: ",",
+    bang: "!"
+};
+if (process.platform === "win32") {
+    symbols.ok = "\u221A";
+    symbols.err = "\u00D7";
+    symbols.dot = ".";
 }
 
+const {
+    EVENT_RUN_BEGIN,
+    EVENT_RUN_END,
+    EVENT_TEST_BEGIN,
+    EVENT_TEST_FAIL,
+    EVENT_TEST_PASS,
+    EVENT_SUITE_BEGIN,
+    EVENT_SUITE_END,
+    EVENT_TEST_SKIPPED
+} = Mocha.Runner.constants;
 class MyReporter {
     constructor(runner) {
         this._indents = 0;
@@ -213,27 +308,27 @@ class MyReporter {
         this.total = runner.total;
         runner
             .once(EVENT_RUN_BEGIN, () => {
-                console.log('start');
+                console.log("start");
 
-                if (doHeapSnapshotGlobal && heapdump)
-                    heapdump.writeSnapshot('./' + heapsnapshot + '.start.heapsnapshot');
+                if (doHeapSnapshotGlobal && heapdump) heapdump.writeSnapshot(`./${heapsnapshot}.start.heapsnapshot`);
             })
-            .on(EVENT_SUITE_BEGIN, test => {
+            .on(EVENT_SUITE_BEGIN, (test) => {
                 if (process.stdout.cursorTo && process.stdout.clearLine) {
-                    process.stdout.clearLine();  // clear current text
-                    process.stdout.cursorTo(0);  // move cursor to beginning of line
+                    process.stdout.clearLine(); // clear current text
+                    process.stdout.cursorTo(0); // move cursor to beginning of line
                 }
-                console.log("                  " + this.indent() + chalk.yellow(test.title));
+                console.log(`                  ${this.indent()}${chalk.yellow(test.title)}`);
                 this.increaseIndent();
             })
-            .on(EVENT_TEST_BEGIN, test => {
+            .on(EVENT_TEST_BEGIN, (test) => {
                 this.counter++;
                 const mem = checkMemoryConsumption();
+                // console.log(`The script uses approximately ${Math.round(mem * 100) / 100} MB`);
                 this.memBefore = mem;
-                let memInfo = mem.toPrecision(5);
+                const memInfo = mem.toPrecision(5);
                 this.displayStatus(test, chalk.cyan(symbols.dot), chalk.grey(memInfo), "", "\r");
                 if (doHeapSnapshot && heapdump)
-                    heapdump.writeSnapshot('./' + Date.now() + '.start.' + this.counter + '.heapsnapshot');
+                    heapdump.writeSnapshot(`./${Date.now()}.start.${this.counter}.heapsnapshot`);
 
                 this.old_console = console.log;
                 console.log = myConsoleLog;
@@ -241,11 +336,10 @@ class MyReporter {
             .on(EVENT_SUITE_END, () => {
                 this.decreaseIndent();
             })
-            .on(EVENT_TEST_PASS, test => {
-
+            .on(EVENT_TEST_PASS, (test) => {
                 console.log = oldConsole;
 
-                var color = Mocha.reporters.Base.color;
+                const _color = Mocha.reporters.Base.color;
                 const extra = test.duration > 500 ? chalk.greenBright(` (${test.duration}ms)`) : "";
                 const mem = checkMemoryConsumption();
                 if (mem > this.maxMem) {
@@ -261,49 +355,45 @@ class MyReporter {
                 }
                 this.displayStatus(test, chalk.greenBright(symbols.ok), memInfo, extra, "\n");
                 if (doHeapSnapshot && heapdump)
-                    heapdump.writeSnapshot('./' + Date.now() + '.end.' + this.counter + '.heapsnapshot');
+                    heapdump.writeSnapshot(`./${Date.now()}.end.${this.counter}.heapsnapshot`);
             })
             .on(EVENT_TEST_SKIPPED, (test) => {
                 console.log = oldConsole;
                 this.displayStatus(test, chalk.red(symbols.bang), "     ", "", "\n");
             })
             .on(EVENT_TEST_FAIL, (test, err) => {
-
                 console.log = oldConsole;
 
                 this.displayStatus(test, chalk.red(symbols.err), "     ", "", "\n");
                 console.log(err);
             })
             .once(EVENT_RUN_END, () => {
-
                 const mem = checkMemoryConsumption();
                 let memInfo = mem.toPrecision(5);
                 console.log(`end: ${stats.passes} / ${stats.passes + stats.failures} ok   (mem = ${memInfo} MB)`);
                 console.log(`total test: ${this.total}`);
                 console.log("max mem =", this.maxMem.toPrecision(5), "MB");
-                if (doHeapSnapshotGlobal && heapdump)
-                    heapdump.writeSnapshot('./' + heapsnapshot + '.end.heapsnapshot');
+                if (doHeapSnapshotGlobal && heapdump) heapdump.writeSnapshot(`./${heapsnapshot}.end.heapsnapshot`);
             });
     }
     displayStatus(test, status, mem, extra, ending) {
         extra = extra || "";
         try {
             if (process.stdout.cursorTo && process.stdout.clearLine) {
-                process.stdout.cursorTo(0);  // move cursor to beginning of line
-                process.stdout.clearLine();  // clear current text
-                process.stdout.cursorTo(0);  // move cursor to beginning of line
+                process.stdout.cursorTo(0); // move cursor to beginning of line
+                process.stdout.clearLine(); // clear current text
+                process.stdout.cursorTo(0); // move cursor to beginning of line
             }
-            const title = this.indent() + status + " " + test.title;
-            const progress = this.counter.toString().padStart(4, " ") + "/" + this.total;
-            process.stdout.write(mem + " " + progress + " " + title + extra + ending);
+            const title = `${this.indent()}${status} ${test.title}`;
+            const progress = `${this.counter.toString().padStart(4, " ")}/${this.total}`;
+            process.stdout.write(`${mem} ${progress} ${title}${extra}${ending}`);
             return mem;
-        }
-        catch (err) {
+        } catch (err) {
             console.log(err);
         }
     }
     indent() {
-        return Array(this._indents).join('  ');
+        return Array(this._indents).join("  ");
     }
 
     increaseIndent() {
@@ -315,12 +405,131 @@ class MyReporter {
     }
 }
 
-if (process.env.NODEOPCUATESTREPORTER) {
-    mocha.reporter(MyReporter);
+async function runtests({ selectedTests, reporter, dryRun, filterOpts, skipped }) {
+    // Instantiate a Mocha instance.
+    const mocha = new Mocha({
+        bail: true,
+        fullTrace: true,
+        grep: filterOpts,
+        dryRun,
+        timeout: 80000,
+        /*
+        fullTrace: true,
+        parallel: true,
+        jobs: 16,
+        */
+        // growl: true,
+        // checkLeaks: true,
+        reporter,
+        slow: 6000
+    });
+
+    const suite = mocha.suite;
+    suite.on("pre-require", (_global, _file, _self) => {
+        //   console.log("pre-require", file);
+    });
+    suite.on("require", (_script, _file, _self) => {
+        /* */
+    });
+    suite.on("post-require", (_global, _file, _self) => {
+        //  console.log("post   -require", file);
+    });
+
+    let count = 0;
+    for (const file of selectedTests) {
+        test_no_leak(file);
+        if (skipped === undefined || count >= skipped) {
+            mocha.addFile(file);
+        }
+        count++;
+    }
+    mocha.timeout(200000);
+    // NO_BAIL=1 runs the whole suite instead of stopping at the first failure, for when the
+    // question is "what is the full set of failures" rather than "is the tree green".
+    mocha.bail(!process.env.NO_BAIL);
+
+    // Use async file loading so Mocha can fall back to import()
+    // for .ts files in "type": "module" packages
+    mocha.lazyLoadFiles(true);
+    if (!process.env.TSX) {
+        // Load one file at a time so a file Node cannot load does not abort the whole run.
+        // A file that fails here carries syntax the stripper rejects (an enum, a parameter
+        // property, an angle-bracket cast) - the thing tsx used to paper over. Reported at the
+        // end rather than thrown, so a single offender still leaves a usable run.
+        const unloadable = [];
+        const queued = mocha.files.slice();
+        for (const file of queued) {
+            mocha.files = [file];
+            try {
+                await mocha.loadFilesAsync();
+            } catch (err) {
+                unloadable.push({ file, message: (err && err.message) || String(err) });
+            }
+        }
+        mocha.files = queued;
+        if (unloadable.length) {
+            console.log(
+                `\n${chalk.yellow(`${unloadable.length} file(s) could not be loaded; run \`pnpm run check:erasable\`, or set TSX=1 to fall back to tsx`)}`
+            );
+            for (const u of unloadable) {
+                console.log(`  ${u.file}\n      ${u.message.split("\n")[0]}`);
+            }
+            console.log("");
+        }
+    } else {
+        await mocha.loadFilesAsync();
+    }
+
+    return await new Promise((resolve) => {
+        const runner = mocha.run((failures) => {
+            resolve(failures);
+        });
+        // Track the currently-running test so the unhandledRejection /
+        // uncaughtException handlers above can name it in their [FATAL] output.
+        runner.on(Mocha.Runner.constants.EVENT_TEST_BEGIN, (test) => {
+            currentTestTitle = test.fullTitle();
+        });
+    });
+    // Run the tests.
 }
+module.exports.runtests = runtests;
 
-// Run the tests.
-mocha.run((failures) => {
-    process.exit(failures);  // exit with non-zero status if there were failures
-});
+if (require.main === module) {
+    let filterOpts = process.argv[process.argv.length - 1];
+    if (filterOpts.match(/run_all_mocha/)) {
+        filterOpts = "";
+    }
+    if (filterOpts) {
+        console.log("test filter = ", filterOpts);
+    }
 
+    const skipped = process.env.SKIPPED ? parseInt(process.env.SKIPPED, 10) : 0;
+    const pageCount = parseInt(process.env.PAGECOUNT || "0", 10) || 1;
+    const pageSize = parseInt(process.env.PAGESIZE || "0", 10) || 1;
+    const page = process.env.TESTPAGE ? parseInt(process.env.TESTPAGE, 10) : undefined;
+
+    let reporter = process.env.REPORTER || "spec"; //"nyan", //"tap"
+    if (process.env.NODEOPCUATESTREPORTER) {
+        reporter = MyReporter;
+    }
+    (async () => {
+        try {
+            const selectedTests = await extractTestFiles({ page, pageSize, pageCount });
+            const failures = await runtests({ selectedTests, reporter, skipped, filterOpts });
+            if (fatalError) {
+                console.error("[FATAL] Exiting with code 2 due to unhandled error during run");
+                process.exit(2);
+            }
+            // Clamp to 0/1 so CI gets a clean signal regardless of how many
+            // tests failed. process.exit(N) silently truncates to 8 bits on
+            // Unix, so e.g. process.exit(383) yields exit code 127 — the
+            // same as one shell convention for "command not found", which
+            // would be misleading.
+            process.exit(failures > 0 ? 1 : 0);
+        } catch (err) {
+            console.log("---------------------------------- mocha run error");
+            console.log(err);
+            process.exit(-1);
+        }
+    })();
+}

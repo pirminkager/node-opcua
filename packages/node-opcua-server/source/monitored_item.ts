@@ -1,320 +1,444 @@
 /**
  * @module node-opcua-server
  */
-// tslint:disable:no-console
-import * as chalk from "chalk";
-import { EventEmitter } from "events";
-import { assert } from "node-opcua-assert";
-import * as _ from "underscore";
 
+import { EventEmitter } from "node:events";
+import chalk from "chalk";
 import {
-  BaseNode,
-  IEventData,
-  extractEventFields,
-  makeAttributeEventName,
-  SessionContext,
-  UAVariable,
-  checkWhereClause,
-  AddressSpace
+    type AddressSpace,
+    type BaseNode,
+    type IEventData,
+    makeAttributeEventName,
+    SessionContext,
+    type UAVariable
 } from "node-opcua-address-space";
-import { DateTime } from "node-opcua-basic-types";
-import { NodeClass, QualifiedNameOptions } from "node-opcua-data-model";
-import { AttributeIds } from "node-opcua-data-model";
-import { apply_timestamps, DataValue, extractRange, sameDataValue } from "node-opcua-data-value";
+import type {
+    ConditionRefreshScope,
+    IConditionRefreshScopeHolder,
+    ISessionContext,
+    UAMethod,
+    UAObject
+} from "node-opcua-address-space-base";
+import { assert } from "node-opcua-assert";
+import type { DateTime, UInt32 } from "node-opcua-basic-types";
+import { AttributeIds, NodeClass, type QualifiedNameOptions } from "node-opcua-data-model";
 import {
-  checkDebugFlag, make_debugLog
-} from "node-opcua-debug";
-import { ExtensionObject } from "node-opcua-extension-object";
-import { NodeId } from "node-opcua-nodeid";
-import { NumericalRange0, NumericRange } from "node-opcua-numeric-range";
+    apply_timestamps,
+    apply_timestamps_into,
+    coerceTimestampsToReturn,
+    DataValue,
+    extractRange,
+    sameDataValue
+} from "node-opcua-data-value";
+import { getCurrentClock, type PreciseClock } from "node-opcua-date-time";
+import { checkDebugFlag, make_debugLog, make_errorLog, make_warningLog } from "node-opcua-debug";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { NodeId } from "node-opcua-nodeid";
+import { type NumericalRange0, NumericRange } from "node-opcua-numeric-range";
 import { ObjectRegistry } from "node-opcua-object-registry";
-import { EventFilter } from "node-opcua-service-filter";
+import { EventFilter, extractEventFields } from "node-opcua-service-filter";
+import { ReadValueId, type TimestampsToReturn } from "node-opcua-service-read";
 import {
-  ReadValueId,
-  TimestampsToReturn
-} from "node-opcua-service-read";
-import {
-  MonitoredItemModifyResult,
-  MonitoredItemNotification,
-  MonitoringMode,
-  MonitoringParameters
+    DataChangeFilter,
+    DataChangeTrigger,
+    DeadbandType,
+    isOutsideDeadbandAbsolute,
+    isOutsideDeadbandNone,
+    isOutsideDeadbandPercent,
+    MonitoredItemModifyResult,
+    MonitoredItemNotification,
+    MonitoringMode,
+    MonitoringParameters,
+    type PseudoRange
 } from "node-opcua-service-subscription";
+import { type CallbackT, coerceStatusCode, extraStatusCodeBits, StatusCode, StatusCodes } from "node-opcua-status-code";
 import {
-  DataChangeFilter,
-  DataChangeTrigger,
-  DeadbandType,
-  isOutsideDeadbandAbsolute,
-  isOutsideDeadbandNone,
-  isOutsideDeadbandPercent,
-  PseudoRange
-} from "node-opcua-service-subscription";
-import { StatusCode, StatusCodes } from "node-opcua-status-code";
-import {
-  EventFieldList,
-  MonitoringFilter,
-  ReadValueIdOptions,
-  SimpleAttributeOperand,
-  SubscriptionDiagnosticsDataType
+    EventFieldList,
+    type MonitoringFilter,
+    PermissionType,
+    type ReadValueIdOptions,
+    type SimpleAttributeOperand,
+    type SubscriptionDiagnosticsDataType
 } from "node-opcua-types";
-import {
-  sameVariant,
-  Variant
-} from "node-opcua-variant";
+import { sameVariant, Variant } from "node-opcua-variant";
+import { canReceiveEvent } from "./audit_event_permissions.js";
+import { isRefreshBracketEvent } from "./condition_refresh_bracket.js";
+import { checkWhereClauseOnAdressSpace as checkWhereClauseOnAddressSpace } from "./filter/check_where_clause_on_address_space.js";
+import type { CompactMonitorableNode, MonitorableNode } from "./monitorable_node.js";
+import { appendToTimer, removeFromTimer } from "./node_sampler.js";
+import type { SamplingFunc } from "./sampling_func.js";
+import type { MonitoredItemBase } from "./server_subscription.js";
+import { validateFilter } from "./validate_filter.js";
 
-import { appendToTimer, removeFromTimer } from "./node_sampler";
-import { validateFilter } from "./validate_filter";
+const errorLog = make_errorLog("monitored_item");
+
+export type QueueItem = MonitoredItemNotification | EventFieldList;
 
 const defaultItemToMonitor: ReadValueIdOptions = new ReadValueId({
-  attributeId: AttributeIds.Value,
-  indexRange: undefined,
+    attributeId: AttributeIds.Value,
+    indexRange: undefined
 });
 
-const debugLog = make_debugLog(__filename);
-const doDebug = checkDebugFlag(__filename);
+const debugLog = make_debugLog("monitored_item");
+const doDebug = checkDebugFlag("monitored_item");
+const doDebug2 = doDebug && false;
+const warningLog = make_warningLog("monitored_item");
 
-function _adjust_sampling_interval(samplingInterval: number, node_minimumSamplingInterval: number): number {
+/**
+ * @param samplingInterval the requested sampling interval
+ * @param node_minimumSamplingInterval the MinimumSamplingInterval attribute of the monitored Variable (0 = exception-based)
+ * @param minSupportedSampleRate the MinSupportedSampleRate the server advertises in ServerCapabilities
+ */
+function _adjust_sampling_interval(
+    samplingInterval: number,
+    node_minimumSamplingInterval: number,
+    minSupportedSampleRate: number
+): number {
+    assert(typeof node_minimumSamplingInterval === "number", "expecting a number");
 
-  assert(_.isNumber(node_minimumSamplingInterval), "expecting a number");
+    if (samplingInterval === 0) {
+        // OPC 10000-4 5.12.1.2: 0 asks for the fastest practical rate, and the revised value is
+        // never below the MinSupportedSampleRate the server advertises (CTT Monitor Basic 038).
+        // A Variable whose MinimumSamplingInterval is 0 is still served exception-based, without a
+        // sampling timer (see MonitoredItem#isExceptionBased): the revised interval is then the
+        // window over which value changes are coalesced, the bound on how stale a reported value
+        // can be. Only a server that advertises 0 answers 0, and then delivers every change.
+        if (node_minimumSamplingInterval === 0) {
+            return minSupportedSampleRate;
+        }
+        return Math.max(MonitoredItem.minimumSamplingInterval, node_minimumSamplingInterval);
+    }
+    assert(samplingInterval >= 0, " this case should have been prevented outside");
+    samplingInterval = samplingInterval || MonitoredItem.defaultSamplingInterval;
+    samplingInterval = Math.max(samplingInterval, MonitoredItem.minimumSamplingInterval);
+    samplingInterval = Math.min(samplingInterval, MonitoredItem.maximumSamplingInterval);
+    samplingInterval =
+        node_minimumSamplingInterval === 0 ? samplingInterval : Math.max(samplingInterval, node_minimumSamplingInterval);
 
-  if (samplingInterval === 0) {
-    return (node_minimumSamplingInterval === 0)
-      ? samplingInterval
-      : Math.max(MonitoredItem.minimumSamplingInterval, node_minimumSamplingInterval);
-  }
-  assert(samplingInterval >= 0, " this case should have been prevented outside");
-  samplingInterval = samplingInterval || MonitoredItem.defaultSamplingInterval;
-  samplingInterval = Math.max(samplingInterval, MonitoredItem.minimumSamplingInterval);
-  samplingInterval = Math.min(samplingInterval, MonitoredItem.maximumSamplingInterval);
-  samplingInterval = node_minimumSamplingInterval === 0
-    ? samplingInterval
-    : Math.max(samplingInterval, node_minimumSamplingInterval);
-
-  return samplingInterval;
+    return samplingInterval;
 }
 
 const maxQueueSize = 5000;
 
-function _adjust_queue_size(queueSize: number): number {
-  queueSize = Math.min(queueSize, maxQueueSize);
-  queueSize = Math.max(1, queueSize);
-  return queueSize;
+// OPC 10000-4 v1.05.07 §7.21 MonitoringParameters / queueSize gives 0, 1 and MaxUInt32 a different meaning on an
+// *event* monitored item than on a data one: there they are not sizes but questions about the Server's
+// own Event buffer - 0 asks for its default Event queue size, 1 for the minimum it requires, MaxUInt32
+// for the maximum it supports, and a value in between is honoured as asked (a value outside is bounded).
+// Answering an event item the way a data item is answered (0 or 1 => 1) leaves it holding a single Event,
+// so any two Events raised inside one publishing cycle overwrite each other and the older one is lost
+// with nothing to show for it. That is how session audit Events went missing (FEAT-65): a client that
+// asks for queueSize 1, meaning "tell me your minimum", is told 1 and then silently loses every Event
+// but the last of each cycle.
+const minimumEventQueueSize = 100;
+const defaultEventQueueSize = 1000;
+
+function _adjust_event_queue_size(queueSize: number): number {
+    if (queueSize === 0) {
+        return defaultEventQueueSize;
+    }
+    if (queueSize === 1) {
+        return minimumEventQueueSize;
+    }
+    // MaxUInt32 (and anything above the maximum) lands on maxQueueSize through this bound.
+    return Math.min(Math.max(queueSize, minimumEventQueueSize), maxQueueSize);
 }
 
-function _validate_parameters(monitoringParameters: any) {
-  // xx assert(options instanceof MonitoringParameters);
-  assert(monitoringParameters.hasOwnProperty("clientHandle"));
-  assert(monitoringParameters.hasOwnProperty("samplingInterval"));
-  assert(_.isFinite(monitoringParameters.clientHandle));
-  assert(_.isFinite(monitoringParameters.samplingInterval));
-  assert(_.isBoolean(monitoringParameters.discardOldest));
-  assert(_.isFinite(monitoringParameters.queueSize));
-  assert(monitoringParameters.queueSize >= 0);
+function _adjust_queue_size(queueSize: number, isEventMonitoredItem: boolean): number {
+    if (isEventMonitoredItem) {
+        return _adjust_event_queue_size(queueSize);
+    }
+    queueSize = Math.min(queueSize, maxQueueSize);
+    queueSize = Math.max(1, queueSize);
+    return queueSize;
 }
 
-function statusCodeHasChanged(
-  newDataValue: DataValue,
-  oldDataValue: DataValue
-): boolean {
-  assert(newDataValue instanceof DataValue);
-  assert(oldDataValue instanceof DataValue);
-  return newDataValue.statusCode !== oldDataValue.statusCode;
+function _validate_parameters(monitoringParameters: MonitoringParameters) {
+    // xx assert(options instanceof MonitoringParameters);
+    assert(Object.hasOwn(monitoringParameters, "clientHandle"));
+    assert(Object.hasOwn(monitoringParameters, "samplingInterval"));
+    assert(Number.isFinite(monitoringParameters.clientHandle));
+    assert(Number.isFinite(monitoringParameters.samplingInterval));
+    assert(typeof monitoringParameters.discardOldest === "boolean");
+    assert(Number.isFinite(monitoringParameters.queueSize));
+    assert(monitoringParameters.queueSize >= 0);
+}
+
+function statusCodeHasChanged(newDataValue: DataValue, oldDataValue: DataValue): boolean {
+    assert(newDataValue instanceof DataValue);
+    assert(oldDataValue instanceof DataValue);
+    return newDataValue.statusCode.value !== oldDataValue.statusCode.value;
 }
 
 function valueHasChanged(
-  this: MonitoredItem,
-  newDataValue: DataValue,
-  oldDataValue: DataValue,
-  deadbandType: DeadbandType,
-  deadbandValue: number
+    this: MonitoredItem,
+    newDataValue: DataValue,
+    oldDataValue: DataValue,
+    deadbandType: DeadbandType,
+    deadbandValue: number
 ): boolean {
+    assert(newDataValue instanceof DataValue);
+    assert(oldDataValue instanceof DataValue);
+    switch (deadbandType) {
+        case DeadbandType.None:
+            assert(newDataValue.value instanceof Variant);
+            assert(newDataValue.value instanceof Variant);
+            // No Deadband calculation should be applied.
+            return isOutsideDeadbandNone(oldDataValue.value, newDataValue.value);
+        case DeadbandType.Absolute:
+            // AbsoluteDeadband
+            return isOutsideDeadbandAbsolute(oldDataValue.value, newDataValue.value, deadbandValue);
+        default: {
+            // Percent_2    PercentDeadband (This type is specified in Part 8).
+            assert(deadbandType === DeadbandType.Percent);
 
-  assert(newDataValue instanceof DataValue);
-  assert(oldDataValue instanceof DataValue);
-  switch (deadbandType) {
-    case DeadbandType.None:
-      assert(newDataValue.value instanceof Variant);
-      assert(newDataValue.value instanceof Variant);
-      // No Deadband calculation should be applied.
-      return isOutsideDeadbandNone(oldDataValue.value, newDataValue.value);
-    case DeadbandType.Absolute:
-      // AbsoluteDeadband
-      return isOutsideDeadbandAbsolute(oldDataValue.value, newDataValue.value, deadbandValue);
-    default:
-      // Percent_2    PercentDeadband (This type is specified in Part 8).
-      assert(deadbandType === DeadbandType.Percent);
+            // The range of the deadbandValue is from 0.0 to 100.0 Percent.
+            assert(deadbandValue >= 0 && deadbandValue <= 100);
 
-      // The range of the deadbandValue is from 0.0 to 100.0 Percent.
-      assert(deadbandValue >= 0 && deadbandValue <= 100);
+            // DeadbandType = PercentDeadband
+            // For this type of deadband the deadbandValue is defined as the percentage of the EURange. That is,
+            // it applies only to AnalogItems with an EURange Property that defines the typical value range for the
+            // item. This range shall be multiplied with the deadbandValue and then compared to the actual value change
+            // to determine the need for a data change notification. The following pseudo code shows how the deadband
+            // is calculated:
+            //      DataChange if (absolute value of (last cached value - current value) >
+            //                                          (deadbandValue/100.0) * ((high-low) of EURange)))
+            //
+            // StatusCode BadDeadbandFilterInvalid (see Table 27).
+            // If the Value of the MonitoredItem is an array, then the deadband calculation logic shall be applied to
+            // each element of the array. If an element that requires a DataChange is found, then no further
+            // deadband checking is necessary and the entire array shall be returned.
+            if (this.node === null) {
+                throw new Error("valueHasChanged: expecting a valid address_space object here to get access the the EURange");
+            }
 
-      // DeadbandType = PercentDeadband
-      // For this type of deadband the deadbandValue is defined as the percentage of the EURange. That is,
-      // it applies only to AnalogItems with an EURange Property that defines the typical value range for the
-      // item. This range shall be multiplied with the deadbandValue and then compared to the actual value change
-      // to determine the need for a data change notification. The following pseudo code shows how the deadband
-      // is calculated:
-      //      DataChange if (absolute value of (last cached value - current value) >
-      //                                          (deadbandValue/100.0) * ((high-low) of EURange)))
-      //
-      // Specifying a deadbandValue outside of this range will be rejected and reported with the
-      // StatusCode BadDeadbandFilterInvalid (see Table 27).
-      // If the Value of the MonitoredItem is an array, then the deadband calculation logic shall be applied to
-      // each element of the array. If an element that requires a DataChange is found, then no further
-      // deadband checking is necessary and the entire array shall be returned.
-      assert(this.node !== null, "expecting a valid address_space object here to get access the the EURange");
-
-      const euRangeNode = this.node!.getChildByName("EURange") as UAVariable;
-      if (euRangeNode && euRangeNode.nodeClass === NodeClass.Variable) {
-        // double,double
-        const rangeVariant = euRangeNode.readValue().value;
-        return isOutsideDeadbandPercent(
-          oldDataValue.value,
-          newDataValue.value,
-          deadbandValue, rangeVariant.value as PseudoRange);
-      } else {
-        console.log("EURange is not of type Variable");
-      }
-      return true;
-  }
+            const euRangeNode = this.node.getChildByName("EURange") as UAVariable;
+            if (euRangeNode && euRangeNode.nodeClass === NodeClass.Variable) {
+                // double,double
+                const rangeVariant = euRangeNode.readValue().value;
+                return isOutsideDeadbandPercent(
+                    oldDataValue.value,
+                    newDataValue.value,
+                    deadbandValue,
+                    rangeVariant.value as PseudoRange
+                );
+            } else {
+                errorLog("EURange is not of type Variable");
+            }
+            return true;
+        }
+    }
 }
 
-function timestampHasChanged(t1: DateTime, t2: DateTime): boolean {
-  if ((t1 || !t2) || (t2 || !t1)) {
-    return true;
-  }
-  if (!t1 || !t2) {
-    return false;
-  }
-  return (t1 as Date).getTime() !== (t2 as Date).getTime();
+function dateHasChanged(t1: DateTime, t2: DateTime): boolean {
+    if (!t1 || !t2) {
+        // one of them is null/undefined: a change only if the other one is set
+        return !!t1 !== !!t2;
+    }
+    return (t1 as Date).getTime() !== (t2 as Date).getTime();
 }
 
-function isGoodish(statusCode: StatusCode): boolean {
-  return statusCode.value < 0x10000000;
+function apply_dataChange_filter(this: MonitoredItem, newDataValue: DataValue, oldDataValue: DataValue): boolean {
+    /* c8 ignore next */
+    if (!this.filter || !(this.filter instanceof DataChangeFilter)) {
+        throw new Error("Internal Error");
+    }
+
+    const trigger = this.filter.trigger;
+    /* c8 ignore next */
+    if (doDebug) {
+        try {
+            debugLog("filter pass ?", DataChangeTrigger[trigger], this.oldDataValue?.toString(), newDataValue.toString());
+            if (
+                trigger === DataChangeTrigger.Status ||
+                trigger === DataChangeTrigger.StatusValue ||
+                trigger === DataChangeTrigger.StatusValueTimestamp
+            ) {
+                debugLog("statusCodeHasChanged ", statusCodeHasChanged(newDataValue, oldDataValue));
+            }
+            if (trigger === DataChangeTrigger.StatusValue || trigger === DataChangeTrigger.StatusValueTimestamp) {
+                debugLog(
+                    "valueHasChanged ",
+                    valueHasChanged.call(this, newDataValue, oldDataValue, this.filter?.deadbandType, this.filter?.deadbandValue)
+                );
+            }
+            if (trigger === DataChangeTrigger.StatusValueTimestamp) {
+                debugLog("dateHasChanged ", dateHasChanged(newDataValue.sourceTimestamp, oldDataValue.sourceTimestamp));
+            }
+        } catch (err) {
+            warningLog(err);
+        }
+    }
+    switch (trigger) {
+        case DataChangeTrigger.Status: {
+            //
+            //              Status
+            //              Report a notification ONLY if the StatusCode associated with
+            //              the value changes. See Table 166 for StatusCodes defined in
+            //              this standard. Part 8 specifies additional StatusCodes that are
+            //              valid in particular for device data.
+            return statusCodeHasChanged(newDataValue, oldDataValue);
+        }
+        case DataChangeTrigger.StatusValue: {
+            //              filtering value changes.
+            //              change. The Deadband filter can be used in addition for
+            //              Report a notification if either the StatusCode or the value
+            //              StatusValue
+            //              This is the default setting if no filter is set.
+            return (
+                statusCodeHasChanged(newDataValue, oldDataValue) ||
+                valueHasChanged.call(this, newDataValue, oldDataValue, this.filter.deadbandType, this.filter.deadbandValue)
+            );
+        }
+        default: {
+            // StatusValueTimestamp
+            //              Report a notification if either StatusCode, value or the
+            //              SourceTimestamp change.
+            //
+            //              If a Deadband filter is specified,this trigger has the same behavior as STATUS_VALUE_1.
+            //
+            //              If the DataChangeFilter is not applied to the monitored item, STATUS_VALUE_1
+            //              is the default reporting behavior
+            assert(trigger === DataChangeTrigger.StatusValueTimestamp);
+            // OPC 10000-4 (1.05) 7.22.2, DataChangeTrigger STATUS_VALUE_TIMESTAMP_2:
+            //   "If a Deadband filter is specified, this trigger has the same behaviour as STATUS_VALUE_1."
+            // So the SourceTimestamp is only a trigger when no Deadband is in effect.
+            const deadbandInEffect = this.filter.deadbandType !== DeadbandType.None;
+            return (
+                (!deadbandInEffect && dateHasChanged(newDataValue.sourceTimestamp, oldDataValue.sourceTimestamp)) ||
+                statusCodeHasChanged(newDataValue, oldDataValue) ||
+                valueHasChanged.call(this, newDataValue, oldDataValue, this.filter.deadbandType, this.filter.deadbandValue)
+            );
+        }
+    }
 }
 
-function apply_datachange_filter(
-  this: MonitoredItem,
-  newDataValue: DataValue, oldDataValue: DataValue
-): boolean {
-  /* istanbul ignore next */
-  if (!this.filter || !(this.filter instanceof DataChangeFilter)) {
-    throw new Error("Internal Error");
-  }
-  assert(this.filter instanceof DataChangeFilter);
-  assert(newDataValue instanceof DataValue);
-  assert(oldDataValue instanceof DataValue);
+const s = (a: unknown) => JSON.stringify(a, null, "  ");
 
-  const trigger = this.filter.trigger;
-
-  switch (trigger) {
-    case DataChangeTrigger.Status: // Status
-      //              Report a notification ONLY if the StatusCode associated with
-      //              the value changes. See Table 166 for StatusCodes defined in
-      //              this standard. Part 8 specifies additional StatusCodes that are
-      //              valid in particular for device data.
-      return statusCodeHasChanged(newDataValue, oldDataValue);
-
-    case DataChangeTrigger.StatusValue: // StatusValue
-      //              Report a notification if either the StatusCode or the value
-      //              change. The Deadband filter can be used in addition for
-      //              filtering value changes.
-      //              This is the default setting if no filter is set.
-      return statusCodeHasChanged(newDataValue, oldDataValue) ||
-        valueHasChanged.call(this, newDataValue, oldDataValue,
-          this.filter.deadbandType, this.filter.deadbandValue);
-
-    default: // StatusValueTimestamp
-      //              Report a notification if either StatusCode, value or the
-      //              SourceTimestamp change.
-      //
-      //              If a Deadband filter is specified,this trigger has the same behaviour as STATUS_VALUE_1.
-      //
-      //              If the DataChangeFilter is not applied to the monitored item, STATUS_VALUE_1
-      //              is the default reporting behaviour
-      assert(trigger === DataChangeTrigger.StatusValueTimestamp);
-      return timestampHasChanged(newDataValue.sourceTimestamp, oldDataValue.sourceTimestamp) ||
-        statusCodeHasChanged(newDataValue, oldDataValue) ||
-        valueHasChanged.call(this, newDataValue, oldDataValue,
-          this.filter.deadbandType, this.filter.deadbandValue);
-  }
-  return false;
+interface IDataValueWithSafeGuardTag {
+    _$monitoredItem?: string;
+}
+interface IMonitoredItemWithSafeGuard {
+    _$safeGuard?: string;
 }
 
-function apply_filter(
-  this: MonitoredItem,
-  newDataValue: DataValue
-) {
+function safeGuardRegister(monitoredItem: MonitoredItem) {
+    (monitoredItem.oldDataValue as unknown as IDataValueWithSafeGuardTag)._$monitoredItem = monitoredItem.node?.nodeId?.toString();
+    (monitoredItem as unknown as IMonitoredItemWithSafeGuard)._$safeGuard = s(monitoredItem.oldDataValue);
+}
+function safeGuardVerify(monitoredItem: MonitoredItem) {
+    const monitoredItemEx = monitoredItem as unknown as IMonitoredItemWithSafeGuard;
+    if (monitoredItemEx._$safeGuard) {
+        const verif = s(monitoredItem.oldDataValue || "");
+        if (verif !== monitoredItemEx._$safeGuard) {
+            errorLog(verif, monitoredItemEx._$safeGuard);
+            throw new Error("Internal error: DataValue has been altered !!!");
+        }
+    }
+}
+function apply_filter(this: MonitoredItem, newDataValue: DataValue) {
+    if (this.oldDataValue === badDataUnavailable) {
+        return true; // keep
+    }
 
-  if (!this.oldDataValue) {
-    return true; // keep
-  }
-  if (this.filter instanceof DataChangeFilter) {
-    return apply_datachange_filter.call(this, newDataValue, this.oldDataValue);
-  }
-  return true; // keep
-  // else {
-  //      // if filter not set, by default report changes to Status or Value only
-  //      return !sameDataValue(newDataValue, this.oldDataValue, TimestampsToReturn.Neither);
-  // }
-  // return true; // keep
+    /* c8 ignore next */
+    doDebug && safeGuardVerify(this);
+
+    if (this.filter instanceof DataChangeFilter) {
+        return apply_dataChange_filter.call(this, newDataValue, this.oldDataValue);
+    } else {
+        // if filter not set, by default report changes to Status or Value only
+        if (newDataValue.statusCode.value !== this.oldDataValue.statusCode.value) {
+            return true; // Keep because statusCode has changed ...
+        }
+        return !sameVariant(newDataValue.value, this.oldDataValue.value);
+    }
 }
 
-function setSemanticChangeBit(notification: any) {
-  if (notification && notification.hasOwnProperty("value")) {
-    notification.value.statusCode =
-      StatusCode.makeStatusCode(notification.value.statusCode, "SemanticChanged");
-  }
+function setSemanticChangeBit(notification: QueueItem | DataValue): void {
+    if (notification instanceof MonitoredItemNotification) {
+        notification.value.statusCode = StatusCode.makeStatusCode(
+            notification.value.statusCode || StatusCodes.Good,
+            "SemanticChanged"
+        );
+    } else if (notification instanceof DataValue) {
+        notification.statusCode = StatusCode.makeStatusCode(notification.statusCode || StatusCodes.Good, "SemanticChanged");
+    }
 }
 
 const useCommonTimer = true;
 
 export interface MonitoredItemOptions extends MonitoringParameters {
+    monitoringMode: MonitoringMode;
+    /**
+     * the monitoredItem Id assigned by the server to this monitoredItem.
+     */
+    monitoredItemId: number;
+    itemToMonitor?: ReadValueIdOptions;
+    timestampsToReturn?: TimestampsToReturn;
+    /**
+     * the MinSupportedSampleRate the server advertises: the floor of the revised sampling
+     * interval when 0 is requested. Defaults to MonitoredItem.minimumSamplingInterval.
+     */
+    minSupportedSampleRate?: number;
 
-  monitoringMode: MonitoringMode;
-  /**
-   * the monitoredItem Id assigned by the server to this monitoredItem.
-   */
-  monitoredItemId: number;
-  itemToMonitor?: ReadValueIdOptions;
-  timestampsToReturn?: TimestampsToReturn;
-
-  // MonitoringParameters
-  filter: (ExtensionObject | null);
-  /**
-   * if discardOldest === true, older items are removed from the queue when queue overflows
-   */
-  discardOldest: boolean;
-  /**
-   * the size of the queue.
-   */
-  queueSize: number;
-  /**
-   * the monitored item sampling interval ..
-   */
-  samplingInterval: number;
-  /**
-   * the client handle
-   */
-  clientHandle: number;
+    // MonitoringParameters
+    filter: ExtensionObject | null;
+    /**
+     * if discardOldest === true, older items are removed from the queue when queue overflows
+     */
+    discardOldest: boolean;
+    /**
+     * the size of the queue.
+     */
+    queueSize: number;
+    /**
+     * the monitored item sampling interval ..
+     */
+    samplingInterval: number;
+    /**
+     * the client handle
+     */
+    clientHandle: number;
 }
 
 export interface BaseNode2 extends EventEmitter {
-  nodeId: NodeId;
-  browseName: QualifiedNameOptions;
-  nodeClass: NodeClass;
-  dataType: NodeId;
-  addressSpace: any;
+    nodeId: NodeId;
+    browseName: QualifiedNameOptions;
+    nodeClass: NodeClass;
+    dataType: NodeId;
+    addressSpace: AddressSpace;
 
-  readAttribute(context: SessionContext | null, attributeId: AttributeIds): DataValue;
+    readAttribute(context: SessionContext | null, attributeId: AttributeIds): DataValue;
 }
 
-export type QueueItem = MonitoredItemNotification | EventFieldList;
-
-type TimerKey = NodeJS.Timer;
+export interface IServerSession2 {
+    sessionContext: ISessionContext;
+}
 
 export interface ISubscription {
-  $session?: any;
-  subscriptionDiagnostics: SubscriptionDiagnosticsDataType;
+    readonly id?: number;
+    $session?: IServerSession2;
+    subscriptionDiagnostics: SubscriptionDiagnosticsDataType;
+    getMonitoredItem(monitoredItemId: number): MonitoredItem | null;
+    // ServerCapabilities filter limits (OPC UA Part 5), used to validate EventFilters on modify
+    readonly maxWhereClauseParameters?: number;
+    readonly maxSelectClauseParameters?: number;
 }
+
+function _isSourceNewerThan(a: DataValue, b?: DataValue): boolean {
+    if (!b) {
+        return true;
+    }
+    const at = a.sourceTimestamp?.getTime() || 0;
+    const bt = b.sourceTimestamp?.getTime() || 0;
+
+    if (at === bt) {
+        return a.sourcePicoseconds > b.sourcePicoseconds;
+    }
+    return at > bt;
+}
+
+const badDataUnavailable = new DataValue({ statusCode: StatusCodes.BadDataUnavailable }); // unset initially
 /**
  * a server side monitored item
  *
@@ -324,843 +448,1485 @@ export interface ISubscription {
  * - It is up to the  event receiver to call {{#crossLink "MonitoredItem/recordValue:method"}}{{/crossLink}}.
  *
  */
-export class MonitoredItem extends EventEmitter {
-
-  public get node(): BaseNode | null {
-    return this._node;
-  }
-
-  public set node(someNode: BaseNode | null) {
-    throw new Error("Unexpected way to set node");
-  }
-
-  public static registry = new ObjectRegistry();
-  public static minimumSamplingInterval = 50;              // 50 ms as a minimum sampling interval
-  public static defaultSamplingInterval = 1500;            // 1500 ms as a default sampling interval
-  public static maximumSamplingInterval = 1000 * 60 * 60;  // 1 hour !
-
-  public samplingInterval: number = -1;
-  public monitoredItemId: number;
-  public overflow: boolean;
-  public oldDataValue?: DataValue;
-  public monitoringMode: MonitoringMode;
-  public timestampsToReturn: TimestampsToReturn;
-  public itemToMonitor: any;
-  public filter: MonitoringFilter | null;
-  public discardOldest: boolean = true;
-  public queueSize: number = 0;
-  public clientHandle?: number;
-  public $subscription?: ISubscription;
-  public _samplingId?: TimerKey | string;
-  public samplingFunc: ((
-    this: MonitoredItem,
-    value: DataValue,
-    callback: (err: Error | null, dataValue?: DataValue) => void
-  ) => void) | null = null;
-
-  private _node: BaseNode | null;
-  private queue: QueueItem[];
-  private _semantic_version: number;
-  private _is_sampling: boolean = false;
-  private _on_opcua_event_received_callback: any;
-  private _attribute_changed_callback: any;
-  private _value_changed_callback: any;
-  private _semantic_changed_callback: any;
-  private _on_node_disposed_listener: any;
-
-  constructor(options: MonitoredItemOptions) {
-
-    super();
-
-    assert(options.hasOwnProperty("monitoredItemId"));
-    assert(!options.monitoringMode, "use setMonitoring mode explicitly to activate the monitored item");
-
-    options.itemToMonitor = options.itemToMonitor || defaultItemToMonitor;
-
-    this._samplingId = undefined;
-
-    this.filter = null;
-    this._set_parameters(options);
-
-    this.monitoredItemId = options.monitoredItemId; // ( known as serverHandle)
-
-    this.queue = [];
-    this.overflow = false;
-
-    this.oldDataValue = new DataValue({ statusCode: StatusCodes.BadDataUnavailable }); // unset initially
-
-    // user has to call setMonitoringMode
-    this.monitoringMode = MonitoringMode.Invalid;
-
-    this.timestampsToReturn = options.timestampsToReturn || TimestampsToReturn.Neither;
-
-    this.itemToMonitor = options.itemToMonitor;
-
-    this._node = null;
-    this._semantic_version = 0;
-
-    if (doDebug) {
-      debugLog("Monitoring ", options.itemToMonitor.toString());
+export class MonitoredItem extends EventEmitter implements MonitoredItemBase {
+    public get node(): MonitorableNode | null {
+        return this._node;
     }
 
-    this._on_node_disposed_listener = null;
-
-    MonitoredItem.registry.register(this);
-  }
-
-  public setNode(node: BaseNode) {
-    assert(!this.node || this.node === node, "node already set");
-    this._node = node;
-    this._semantic_version = (node as any).semantic_version;
-    this._on_node_disposed_listener = () => this._on_node_disposed(this._node!);
-    this._node.on("dispose", this._on_node_disposed_listener);
-  }
-
-  public setMonitoringMode(monitoringMode: MonitoringMode) {
-
-    assert(monitoringMode !== MonitoringMode.Invalid);
-
-    if (monitoringMode === this.monitoringMode) {
-      // nothing to do
-      return;
+    public set node(_someNode: UAVariable | UAObject | UAMethod | null) {
+        throw new Error("Unexpected way to set node");
     }
 
-    const old_monitoringMode = this.monitoringMode;
+    public static registry = new ObjectRegistry();
+    public static minimumSamplingInterval = 50; // 50 ms as a minimum sampling interval
+    public static defaultSamplingInterval = 1500; // 1500 ms as a default sampling interval
+    public static maximumSamplingInterval = 1000 * 60 * 60; // 1 hour !
 
-    this.monitoringMode = monitoringMode;
+    public samplingInterval = -1;
+    public monitoredItemId: number;
+    public overflow: boolean;
+    public oldDataValue: DataValue;
 
-    if (this.monitoringMode === MonitoringMode.Disabled) {
+    #monitoringMode: MonitoringMode = MonitoringMode.Invalid;
 
-      this._stop_sampling();
-
-      // OPCUA 1.03 part 4 : $5.12.4
-      // setting the mode to DISABLED causes all queued Notifications to be deleted
-      this.queue = [];
-      this.overflow = false;
-    } else {
-      assert(this.monitoringMode === MonitoringMode.Sampling || this.monitoringMode === MonitoringMode.Reporting);
-
-      // OPCUA 1.03 part 4 : $5.12.1.3
-      // When a MonitoredItem is enabled (i.e. when the MonitoringMode is changed from DISABLED to
-      // SAMPLING or REPORTING) or it is created in the enabled state, the Server shall report the first
-      // sample as soon as possible and the time of this sample becomes the starting point for the next
-      // sampling interval.
-      const recordInitialValue = (old_monitoringMode === MonitoringMode.Invalid ||
-        old_monitoringMode === MonitoringMode.Disabled);
-
-      this._start_sampling(recordInitialValue);
-
-    }
-  }
-
-  /**
-   * Terminate the  MonitoredItem.
-   * @method terminate
-   *
-   * This will stop the internal sampling timer.
-   */
-  public terminate() {
-    this._stop_sampling();
-  }
-
-  public dispose() {
-    if (doDebug) {
-      debugLog("DISPOSING MONITORED ITEM", this._node!.nodeId.toString());
+    public get monitoringMode() {
+        return this.#monitoringMode;
     }
 
-    this._stop_sampling();
+    public timestampsToReturn: TimestampsToReturn;
+    // attributeId is always populated by the time a MonitoredItem is constructed (see _validate_parameters
+    // and the OPC UA spec: it is mandatory on a ReadValueId used to create a MonitoredItem)
+    public itemToMonitor: ReadValueIdOptions & { attributeId: AttributeIds };
+    public filter: MonitoringFilter | null;
+    public discardOldest = true;
+    public queueSize = 0;
+    public clientHandle: UInt32;
+    public $subscription?: ISubscription;
+    public _samplingId?: NodeJS.Timeout | string;
+    public samplingFunc: SamplingFunc | null = null;
+
+    private _node: MonitorableNode | null;
+    public queue: QueueItem[];
+    private _semantic_version: number;
+    private _is_sampling = false;
+    private _onSampled?: (err: Error | null, dataValue?: DataValue) => void;
+    private _holdSample = false;
+    private _heldSample?: DataValue;
+    private _on_opcua_event_received_callback: ((eventData: IEventData) => void) | null = null;
+    // what stops the events of a node that filters them itself (subscribeEvents)
+    private _unsubscribeEvents: (() => void) | null = null;
+    private _attribute_changed_callback: ((dataValue: DataValue, indexRange?: NumericRange | null) => void) | null = null;
+    private _value_changed_callback: ((dataValue: DataValue, indexRange?: NumericRange | null) => void) | null = null;
+    private _semantic_changed_callback: (() => void) | null = null;
+    private _on_node_disposed_listener: (() => void) | null;
+    private _linkedItems?: number[];
+    private _triggeredNotifications?: QueueItem[];
+
+    private readonly _minSupportedSampleRate: number;
+    /**
+     * true when the Value is delivered on change (value_changed listener, no sampling timer):
+     * 0 was requested on a Variable whose MinimumSamplingInterval is 0.
+     */
+    private _exceptionBased = false;
+    /**
+     * the coalescing window of an exception-based item: while it is open, further changes are
+     * folded into _pendingDataValue and the latest one is recorded when the window ends.
+     */
+    private _coalesceTimer: NodeJS.Timeout | null = null;
+    private _pendingDataValue: DataValue | null = null;
+
+    constructor(options: MonitoredItemOptions) {
+        super();
+
+        assert(Object.hasOwn(options, "monitoredItemId"));
+        assert(!options.monitoringMode, "use setMonitoring mode explicitly to activate the monitored item");
+
+        options.itemToMonitor = options.itemToMonitor || defaultItemToMonitor;
+        // _set_parameters reads the attributeId: an item on a non-Value attribute keeps a requested 0
+        this.itemToMonitor = options.itemToMonitor as ReadValueIdOptions & { attributeId: AttributeIds };
+
+        this._minSupportedSampleRate = options.minSupportedSampleRate ?? MonitoredItem.minimumSamplingInterval;
+        this._samplingId = undefined;
+        this.clientHandle = 0; // invalid
+        this.filter = null;
+        this._set_parameters(options);
+
+        this.monitoredItemId = options.monitoredItemId; // ( known as serverHandle)
 
-    MonitoredItem.registry.unregister(this);
-
-    if (this._on_node_disposed_listener) {
-      this._node!.removeListener("dispose", this._on_node_disposed_listener);
-      this._on_node_disposed_listener = null;
-    }
-
-    // x assert(this._samplingId === null,"Sampling Id must be null");
-    this.oldDataValue = undefined;
-    this.queue = [];
-    this.itemToMonitor = null;
-    this.filter = null;
-    this.monitoredItemId = 0;
-    this._node = null;
-    this._semantic_version = 0;
-
-    this.$subscription = undefined;
-
-    this.removeAllListeners();
-
-    assert(!this._samplingId);
-    assert(!this._value_changed_callback);
-    assert(!this._semantic_changed_callback);
-    assert(!this._attribute_changed_callback);
-    assert(!this._on_opcua_event_received_callback);
-    this._on_opcua_event_received_callback = null;
-    this._attribute_changed_callback = null;
-    this._semantic_changed_callback = null;
-    this._on_opcua_event_received_callback = null;
-
-  }
-
-  public get isSampling(): boolean {
-    return !!this._samplingId || _.isFunction(this._value_changed_callback) ||
-      _.isFunction(this._attribute_changed_callback);
-  }
-
-  /**
-   * @param dataValue       the whole dataValue
-   * @param skipChangeTest  indicates whether recordValue should  not check that dataValue is really
-   *                                  different from previous one, ( by checking timestamps but also variant value)
-   * @private
-   *
-   * Notes:
-   *  - recordValue can only be called within timer event
-   *  - for performance reason, dataValue may be a shared value with the underlying node,
-   *    therefore recordValue must clone the dataValue to make sure it retains a snapshot
-   *    of the contain at the time recordValue was called.
-   *
-   */
-  public recordValue(
-    dataValue: DataValue,
-    skipChangeTest: boolean,
-    indexRange?: NumericRange
-  ) {
-
-    assert(dataValue instanceof DataValue);
-    assert(dataValue !== this.oldDataValue,
-      "recordValue expects different dataValue to be provided");
-
-    assert(!dataValue.value || dataValue.value !== this.oldDataValue!.value,
-      "recordValue expects different dataValue.value to be provided");
-
-    assert(!dataValue.value || dataValue.value.isValid(),
-      "expecting a valid variant value");
-
-    const hasSemanticChanged = this.node && ((this.node as any).semantic_version !== this._semantic_version);
-
-    // xx   console.log("`\n----------------------------",skipChangeTest,this.clientHandle,
-    //             this.node.listenerCount("value_changed"),this.node.nodeId.toString());
-    // xx   console.log("events ---- ",this.node.eventNames().join("-"));
-    // xx    console.log("indexRange = ",indexRange ? indexRange.toString() :"");
-    // xx    console.log("this.itemToMonitor.indexRange = ",this.itemToMonitor.indexRange.toString());
-
-    if (!hasSemanticChanged && indexRange && this.itemToMonitor.indexRange) {
-      // we just ignore changes that do not fall within our range
-      // ( unless semantic bit has changed )
-      if (!NumericRange.overlap(indexRange as NumericalRange0, this.itemToMonitor.indexRange)) {
-        return; // no overlap !
-      }
-    }
-
-    assert(this.itemToMonitor, "must have a valid itemToMonitor(have this monitoredItem been disposed already ?");
-    // extract the range that we are interested with
-    dataValue = extractRange(dataValue, this.itemToMonitor.indexRange);
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog("MonitoredItem#recordValue",
-        this.node!.nodeId.toString(),
-        this.node!.browseName.toString(), " has Changed = ", !sameDataValue(dataValue, this.oldDataValue!));
-    }
-
-    // if semantic has changed, value need to be enqueued regardless of other assumptions
-    if (hasSemanticChanged) {
-      return this._enqueue_value(dataValue);
-    }
-
-    const useIndexRange = this.itemToMonitor.indexRange && !this.itemToMonitor.indexRange.isEmpty();
-
-    if (!skipChangeTest) {
-      const hasChanged = !sameDataValue(dataValue, this.oldDataValue!);
-      if (!hasChanged) {
-        return;
-      }
-    }
-
-    if (!apply_filter.call(this, dataValue)) {
-      debugLog("filter did not pass");
-      return;
-    }
-
-    if (useIndexRange) {
-      // when an indexRange is provided , make sure that no record happens unless
-      // extracted variant in the selected range  has really changed.
-
-      // istanbul ignore next
-      if (doDebug) {
-        debugLog("Current : ", this.oldDataValue!.toString());
-        debugLog("New : ", dataValue.toString());
-        debugLog("indexRange=", indexRange);
-      }
-
-      if (sameVariant(dataValue.value, this.oldDataValue!.value)) {
-        return;
-      }
-    }
-    // store last value
-    this._enqueue_value(dataValue);
-
-  }
-
-  get hasMonitoredItemNotifications(): boolean {
-    return this.queue.length > 0;
-  }
-
-  public extractMonitoredItemNotifications() {
-
-    if (this.monitoringMode !== MonitoringMode.Reporting) {
-      return [];
-    }
-    const notifications = this.queue;
-    this._empty_queue();
-
-    // apply semantic changed bit if necessary
-    if (notifications.length > 0 && this.node && this._semantic_version < (this.node as any).semantic_version) {
-
-      const dataValue = notifications[notifications.length - 1];
-      setSemanticChangeBit(dataValue);
-      this._semantic_version = (this.node as any).semantic_version;
-    }
-
-    return notifications;
-  }
-
-  public modify(
-    timestampsToReturn: TimestampsToReturn,
-    monitoringParameters: MonitoringParameters
-  ): MonitoredItemModifyResult {
-
-    assert(monitoringParameters instanceof MonitoringParameters);
-
-    const old_samplingInterval = this.samplingInterval;
-
-    this.timestampsToReturn = timestampsToReturn || this.timestampsToReturn;
-
-    if (old_samplingInterval !== 0 && monitoringParameters.samplingInterval === 0) {
-      monitoringParameters.samplingInterval = MonitoredItem.minimumSamplingInterval; // fastest possible
-    }
-
-    this._set_parameters(monitoringParameters);
-
-    this._adjust_queue_to_match_new_queue_size();
-
-    this._adjust_sampling(old_samplingInterval);
-
-    if (monitoringParameters.filter) {
-      const statusCodeFilter = validateFilter(monitoringParameters.filter, this.itemToMonitor, this.node!);
-      if (statusCodeFilter.isNot(StatusCodes.Good)) {
-        return new MonitoredItemModifyResult({
-          statusCode: statusCodeFilter
-        });
-      }
-    }
-
-    // validate filter
-    // note : The DataChangeFilter does not have an associated result structure.
-    const filterResult = null; // new subscription_service.DataChangeFilter
-
-    return new MonitoredItemModifyResult({
-      filterResult,
-      revisedQueueSize: this.queueSize,
-      revisedSamplingInterval: this.samplingInterval,
-      statusCode: StatusCodes.Good
-    });
-
-  }
-
-  public resendInitialValues() {
-    // tte first Publish response(s) after the TransferSubscriptions call shall contain the current values of all
-    // Monitored Items in the Subscription where the Monitoring Mode is set to Reporting.
-    // the first Publish response after the TransferSubscriptions call shall contain only the value changes since
-    // the last Publish response was sent.
-    // This parameter only applies to MonitoredItems used for monitoring Attribute changes.
-    this._stop_sampling();
-    this._start_sampling(true);
-  }
-
-  /**
-   * @method _on_sampling_timer
-   * @private
-   * request
-   *
-   */
-  private _on_sampling_timer() {
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog("MonitoredItem#_on_sampling_timer",
-        this.node ? this.node.nodeId.toString() : "null", " isSampling?=", this._is_sampling);
-    }
-
-    if (this._samplingId) {
-
-      assert(this.monitoringMode === MonitoringMode.Sampling || this.monitoringMode === MonitoringMode.Reporting);
-
-      if (this._is_sampling) {
-        // previous sampling call is not yet completed..
-        // there is nothing we can do about it except waiting until next tick.
-        // note : see also issue #156 on github
-        return;
-      }
-      // xx console.log("xxxx ON SAMPLING");
-      assert(!this._is_sampling, "sampling func shall not be re-entrant !! fix it");
-
-      if (!this.samplingFunc) {
-        throw new Error("internal error : missing samplingFunc");
-      }
-
-      this._is_sampling = true;
-
-      this.samplingFunc.call(this, this.oldDataValue!, (err: Error | null, newDataValue?: DataValue) => {
-
-        if (!this._samplingId) {
-          // item has been dispose .... the monitored item has been disposed while the async sampling func
-          // was taking place ... just ignore this
-          return;
-        }
-        if (err) {
-          console.log(" SAMPLING ERROR =>", err);
-        } else {
-          // only record value if source timestamp is newer
-          // xx if (newDataValue.sourceTimestamp > this.oldDataValue.sourceTimestamp) {
-          this._on_value_changed(newDataValue!);
-          // xx }
-        }
-        this._is_sampling = false;
-      });
-
-    } else {
-      /* istanbul ignore next */
-      debugLog("_on_sampling_timer call but MonitoredItem has been terminated !!! ");
-    }
-  }
-
-  private _stop_sampling() {
-
-    // debugLog("MonitoredItem#_stop_sampling");
-    if (!this.node) {
-      throw new Error("Internal Error");
-    }
-    if (this._on_opcua_event_received_callback) {
-      assert(_.isFunction(this._on_opcua_event_received_callback));
-      this.node.removeListener("event", this._on_opcua_event_received_callback);
-      this._on_opcua_event_received_callback = null;
-    }
-
-    if (this._attribute_changed_callback) {
-      assert(_.isFunction(this._attribute_changed_callback));
-
-      const event_name = makeAttributeEventName(this.itemToMonitor.attributeId);
-      this.node.removeListener(event_name, this._attribute_changed_callback);
-      this._attribute_changed_callback = null;
-    }
-
-    if (this._value_changed_callback) {
-      // samplingInterval was 0 for a exception-based data Item
-      // we setup a event listener that we need to unwind here
-      assert(_.isFunction(this._value_changed_callback));
-      assert(!this._samplingId);
-
-      this.node.removeListener("value_changed", this._value_changed_callback);
-      this._value_changed_callback = null;
-    }
-
-    if (this._semantic_changed_callback) {
-      assert(_.isFunction(this._semantic_changed_callback));
-      assert(!this._samplingId);
-      this.node.removeListener("semantic_changed", this._semantic_changed_callback);
-      this._semantic_changed_callback = null;
-
-    }
-    if (this._samplingId) {
-      this._clear_timer();
-    }
-
-    assert(!this._samplingId);
-    assert(!this._value_changed_callback);
-    assert(!this._semantic_changed_callback);
-    assert(!this._attribute_changed_callback);
-    assert(!this._on_opcua_event_received_callback);
-
-  }
-
-  private _on_value_changed(dataValue: DataValue, indexRange?: NumericRange) {
-    assert(dataValue instanceof DataValue);
-    this.recordValue(dataValue, false, indexRange);
-  }
-
-  private _on_semantic_changed() {
-    const dataValue: DataValue = (this.node! as UAVariable).readValue();
-    this._on_value_changed(dataValue);
-  }
-
-  private _on_opcua_event(eventData: IEventData) {
-
-    // TO DO : => Improve Filtering, bearing in mind that ....
-    // Release 1.04 8 OPC Unified Architecture, Part 9
-    // 4.5 Condition state synchronization
-    // To ensure a Client is always informed, the three special EventTypes
-    // (RefreshEndEventType, RefreshStartEventType and RefreshRequiredEventType)
-    // ignore the Event content filtering associated with a Subscription and will always be
-    // delivered to the Client.
-
-    // istanbul ignore next
-    if (!this.filter || !(this.filter instanceof EventFilter)) {
-      throw new Error("Internal Error : a EventFilter is requested");
-    }
-
-    const addressSpace: AddressSpace = eventData.$eventDataSource?.addressSpace as AddressSpace;
-
-    if (!checkWhereClause(addressSpace, SessionContext.defaultContext, this.filter.whereClause, eventData)) {
-      return;
-    }
-
-    const selectClauses = this.filter.selectClauses
-      ? this.filter.selectClauses
-      : ([] as SimpleAttributeOperand[]);
-
-    const eventFields: Variant[] = extractEventFields(SessionContext.defaultContext, selectClauses, eventData);
-
-    // istanbul ignore next
-    if (doDebug) {
-      console.log(" RECEIVED INTERNAL EVENT THAT WE ARE MONITORING");
-      console.log(this.filter ? this.filter.toString() : "no filter");
-      eventFields.forEach((e: any) => {
-        console.log(e.toString());
-      });
-    }
-
-    this._enqueue_event(eventFields);
-  }
-
-  private _getSession(): any {
-    if (!this.$subscription) {
-      return null;
-    }
-    if (!this.$subscription.$session) {
-      return null;
-    }
-    return this.$subscription.$session;
-  }
-
-  private _start_sampling(recordInitialValue?: boolean) {
-
-    if (!this.node) {
-      throw new Error("Internal Error");
-    }
-    // make sure oldDataValue is scrapped so first data recording can happen
-    this.oldDataValue = new DataValue({ statusCode: StatusCodes.BadDataUnavailable }); // unset initially
-
-    this._stop_sampling();
-
-    const context = new SessionContext({
-      // xx  server: this.server,
-      session: this._getSession()
-    });
-
-    if (this.itemToMonitor.attributeId === AttributeIds.EventNotifier) {
-
-      // istanbul ignore next
-      if (doDebug) {
-        debugLog("xxxxxx monitoring EventNotifier on",
-          this.node.nodeId.toString(), this.node.browseName.toString());
-      }
-      // we are monitoring OPCUA Event
-      this._on_opcua_event_received_callback = this._on_opcua_event.bind(this);
-      this.node.on("event", this._on_opcua_event_received_callback);
-
-      return;
-    }
-    if (this.itemToMonitor.attributeId !== AttributeIds.Value) {
-
-      // sampling interval only applies to Value Attributes.
-      this.samplingInterval = 0; // turned to exception-based regardless of requested sampling interval
-
-      // non value attribute only react on value change
-      this._attribute_changed_callback = this._on_value_changed.bind(this);
-      const event_name = makeAttributeEventName(this.itemToMonitor.attributeId);
-
-      this.node.on(event_name, this._attribute_changed_callback);
-
-      if (recordInitialValue) {
-        // read initial value
-        const dataValue = this.node.readAttribute(context, this.itemToMonitor.attributeId);
-        this.recordValue(dataValue, true);
-
-      }
-      return;
-    }
-
-    if (this.samplingInterval === 0) {
-
-      // we have a exception-based dataItem : event based model, so we do not need a timer
-      // rather , we setup the "value_changed_event";
-      this._value_changed_callback = this._on_value_changed.bind(this);
-      this._semantic_changed_callback = this._on_semantic_changed.bind(this);
-
-      this.node.on("value_changed", this._value_changed_callback);
-      this.node.on("semantic_changed", this._semantic_changed_callback);
-
-      // initiate first read
-      if (recordInitialValue) {
-        (this.node as UAVariable).readValueAsync(context, (err: Error | null, dataValue?: DataValue) => {
-          if (!err && dataValue) {
-            this.recordValue(dataValue, true);
-          }
-        });
-      }
-    } else {
-
-      this._set_timer();
-      if (recordInitialValue) {
-        setImmediate(() => {
-          // xx console.log("Record Initial Value ",this.node.nodeId.toString());
-          // initiate first read (this requires this._samplingId to be set)
-          this._on_sampling_timer();
-        });
-      }
-    }
-
-  }
-
-  private _set_parameters(monitoredParameters: MonitoringParameters) {
-    _validate_parameters(monitoredParameters);
-    this.clientHandle = monitoredParameters.clientHandle;
-
-    // The Server may support data that is collected based on a sampling model or generated based on an
-    // exception-based model. The fastest supported sampling interval may be equal to 0, which indicates
-    // that the data item is exception-based rather than being sampled at some period. An exception-based
-    // model means that the underlying system does not require sampling and reports data changes.
-    if (this.node && this.node.nodeClass === NodeClass.Variable) {
-      this.samplingInterval = _adjust_sampling_interval(monitoredParameters.samplingInterval,
-        this.node ? (this.node as UAVariable).minimumSamplingInterval : 0);
-    } else {
-      this.samplingInterval = _adjust_sampling_interval(monitoredParameters.samplingInterval,
-        0);
-    }
-    this.discardOldest = monitoredParameters.discardOldest;
-    this.queueSize = _adjust_queue_size(monitoredParameters.queueSize);
-
-    // change filter
-    this.filter = monitoredParameters.filter as MonitoringFilter || null;
-
-  }
-
-  private _setOverflowBit(notification: any) {
-
-    if (notification.hasOwnProperty("value")) {
-      assert(notification.value.statusCode.equals(StatusCodes.Good));
-      notification.value.statusCode =
-        StatusCode.makeStatusCode(notification.value.statusCode, "Overflow | InfoTypeDataValue");
-      assert(_.isEqual(notification.value.statusCode, StatusCodes.GoodWithOverflowBit));
-      assert(notification.value.statusCode.hasOverflowBit);
-    }
-    // console.log(chalk.cyan("Setting Ovver"), !!this.$subscription, !!this.$subscription!.subscriptionDiagnostics);
-    if (this.$subscription && this.$subscription.subscriptionDiagnostics) {
-      this.$subscription.subscriptionDiagnostics.monitoringQueueOverflowCount++;
-      console.log(" this.$subscription.subcriptionDiagnosticInfo.monitoringQueueOverflowCount = ", this.$subscription.subscriptionDiagnostics.monitoringQueueOverflowCount);
-    }
-    // to do eventQueueOverFlowCount
-  }
-
-  private _enqueue_notification(
-    notification: MonitoredItemNotification | EventFieldList
-  ) {
-
-    if (this.queueSize === 1) {
-      // https://reference.opcfoundation.org/v104/Core/docs/Part4/5.12.1/#5.12.1.5
-      // If the queue size is one, the queue becomes a buffer that always contains the newest
-      // Notification. In this case, if the sampling interval of the MonitoredItem is faster 
-      // than the publishing interval of the Subscription, the MonitoredItem will be over 
-      // sampling and the Client will always receive the most up-to-date value. 
-      // The discard policy is ignored if the queue size is one.
-      // ensure queuesize
-      if (!this.queue || this.queue.length !== 1) {
         this.queue = [];
-      }
-      this.queue[0] = notification;
-      assert(this.queue.length === 1);
+        this.overflow = false;
 
-    } else {
-      if (this.discardOldest) {
+        this.oldDataValue = badDataUnavailable;
 
-        // push new value to queue
-        this.queue.push(notification);
+        // user has to call setMonitoringMode
+        this.#monitoringMode = MonitoringMode.Invalid;
 
-        if (this.queue.length > this.queueSize) {
+        this.timestampsToReturn = coerceTimestampsToReturn(options.timestampsToReturn);
 
-          this.overflow = true;
+        this._node = null;
+        this._semantic_version = 0;
 
-          this.queue.shift(); // remove front element
-
-          // set overflow bit
-          this._setOverflowBit(this.queue[0]);
+        /* c8 ignore next */
+        if (doDebug) {
+            debugLog("Monitoring ", options.itemToMonitor.toString());
         }
 
-      } else {
-        if (this.queue.length < this.queueSize) {
+        this._on_node_disposed_listener = null;
 
-          this.queue.push(notification);
+        MonitoredItem.registry.register(this);
+    }
+
+    public setNode(node: MonitorableNode): void {
+        assert(!this.node || this.node === node, "node already set");
+        this._node = node;
+        this._semantic_version = "semantic_version" in node ? node.semantic_version : 0;
+        // note: dispose() always removes this listener before nulling this._node, so _node is
+        // guaranteed non-null whenever the "dispose" event actually reaches this callback
+        this._on_node_disposed_listener = () => {
+            if (!this._node) {
+                throw new Error("MonitoredItem#_on_node_disposed_listener: expecting a valid node");
+            }
+            this._on_node_disposed(this._node as unknown as BaseNode);
+        };
+        (this._node as unknown as EventEmitter).on("dispose", this._on_node_disposed_listener);
+    }
+
+    public setMonitoringMode(monitoringMode: MonitoringMode): StatusCode {
+        if (monitoringMode === MonitoringMode.Invalid) {
+            return StatusCodes.BadInvalidArgument;
+        }
+        if (monitoringMode === this.monitoringMode) {
+            // Already in that mode: the request is satisfied, so the operation is
+            // Good. OPC 10000-4 5.12.4 lists Good and Bad_MonitoredItemIdInvalid as
+            // the *operation* results of SetMonitoringMode; Bad_NothingToDo is a
+            // *service* result, for a request carrying no monitoredItemIds at all.
+            // Returning it per item made an idempotent set fail: CTT Monitor Basic
+            // 020 sets an already disabled item to Disabled and requires Good.
+            return StatusCodes.Good;
+        }
+        const old_monitoringMode = this.monitoringMode;
+
+        if (monitoringMode === MonitoringMode.Disabled) {
+            this.#monitoringMode = monitoringMode;
+            this._stop_sampling();
+            // OPCUA 1.03 part 4 : $5.12.4
+            // setting the mode to DISABLED causes all queued Notifications to be deleted
+            this._empty_queue();
+        } else if (monitoringMode === MonitoringMode.Sampling || monitoringMode === MonitoringMode.Reporting) {
+            this.#monitoringMode = monitoringMode;
+
+            // OPCUA 1.03 part 4 : $5.12.1.3
+            // When a MonitoredItem is enabled (i.e. when the MonitoringMode is changed from DISABLED to
+            // SAMPLING or REPORTING) or it is created in the enabled state, the Server shall report the first
+            // sample as soon as possible and the time of this sample becomes the starting point for the next
+            // sampling interval.
+            const recordInitialValue =
+                old_monitoringMode === MonitoringMode.Invalid || old_monitoringMode === MonitoringMode.Disabled;
+            const _installEventHandler = old_monitoringMode === MonitoringMode.Invalid;
+            this._start_sampling(recordInitialValue);
         } else {
-
-          this.overflow = true;
-
-          this._setOverflowBit(notification);
-          this.queue[this.queue.length - 1] = notification;
+            return StatusCodes.BadInternalError;
         }
-      }
-    }
-    assert(this.queue.length >= 1);
-  }
 
-  private _makeDataChangeNotification(dataValue: DataValue): MonitoredItemNotification {
-    const attributeId = this.itemToMonitor.attributeId;
-    dataValue = apply_timestamps(dataValue, this.timestampsToReturn, attributeId);
-    return new MonitoredItemNotification({
-      clientHandle: this.clientHandle,
-      value: dataValue
-    });
-  }
-
-  /**
-   * @method _enqueue_value
-   * @param dataValue {DataValue} the dataValue to enquue
-   * @private
-   */
-  private _enqueue_value(dataValue: DataValue) {
-
-    // preconditions:
-
-    assert(dataValue instanceof DataValue);
-    // lets verify that, if status code is good then we have a valid Variant in the dataValue
-    assert(!isGoodish(dataValue.statusCode) || dataValue.value instanceof Variant);
-    // xx assert(isGoodish(dataValue.statusCode) || util.isNullOrUndefined(dataValue.value) );
-    // let's check that data Value is really a different object
-    // we may end up with corrupted queue if dataValue are recycled and stored as is in notifications
-    assert(dataValue !== this.oldDataValue, "dataValue cannot be the same object twice!");
-
-    // Xx // todo ERN !!!! PLEASE CHECK this !!!
-    // Xx // let make a clone, so we have a snapshot
-    // Xx dataValue = dataValue.clone();
-
-    // let's check that data Value is really a different object
-    // we may end up with corrupted queue if dataValue are recycled and stored as is in notifications
-    assert(!this.oldDataValue || !dataValue.value || (dataValue.value !== this.oldDataValue.value),
-      "dataValue cannot be the same object twice!");
-
-    if (!(!this.oldDataValue || !this.oldDataValue.value
-      || !dataValue.value || !(dataValue.value.value instanceof Object)
-      || (dataValue.value.value !== this.oldDataValue.value.value)) && !(dataValue.value.value instanceof Date)) {
-      throw new Error("dataValue.value.value cannot be the same object twice! "
-        + this.node!.browseName.toString() + " " + dataValue.toString() + "  " +
-        chalk.cyan(this.oldDataValue.toString()));
+        return StatusCodes.Good;
     }
 
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog("MonitoredItem#_enqueue_value", this.node!.nodeId.toString());
+    /*
+     * Terminate the  MonitoredItem.
+     * This will stop the internal sampling timer.
+     */
+    public terminate(): void {
+        this._stop_sampling();
     }
 
-    this.oldDataValue = dataValue;
-    const notification = this._makeDataChangeNotification(dataValue);
-    this._enqueue_notification(notification);
-  }
-
-  private _makeEventFieldList(eventFields: any[]): EventFieldList {
-    assert(_.isArray(eventFields));
-    return new EventFieldList({
-      clientHandle: this.clientHandle,
-      eventFields
-    });
-  }
-
-  private _enqueue_event(eventFields: any[]) {
-    if (doDebug) {
-      debugLog(" MonitoredItem#_enqueue_event");
-    }
-    const notification = this._makeEventFieldList(eventFields);
-    this._enqueue_notification(notification);
-  }
-
-  private _empty_queue() {
-    // empty queue
-    this.queue = [];
-    this.overflow = false;
-  }
-
-  private _clear_timer() {
-
-    if (this._samplingId) {
-      if (useCommonTimer) {
-        removeFromTimer(this);
-      } else {
-        clearInterval(this._samplingId as NodeJS.Timer);
-      }
-      this._samplingId = undefined;
-    }
-  }
-
-  private _set_timer() {
-
-    assert(this.samplingInterval >= MonitoredItem.minimumSamplingInterval);
-    assert(!this._samplingId);
-
-    if (useCommonTimer) {
-      this._samplingId = appendToTimer(this);
-    } else {
-      // settle periodic sampling
-      this._samplingId = setInterval(() => {
-        this._on_sampling_timer();
-      }, this.samplingInterval);
-    }
-    // xx console.log("MonitoredItem#_set_timer",this._samplingId);
-  }
-
-  private _adjust_queue_to_match_new_queue_size() {
-
-    // adjust queue size if necessary
-    if (this.queueSize < this.queue.length) {
-
-      if (this.discardOldest) {
-        this.queue.splice(0, this.queue.length - this.queueSize);
-      } else {
-
-        const lastElement = this.queue[this.queue.length - 1];
-        // only keep queueSize first element, discard others
-        this.queue.splice(this.queueSize);
-        this.queue[this.queue.length - 1] = lastElement;
-      }
-    }
-    if (this.queueSize <= 1) {
-      this.overflow = false;
-      // unset OverFlowBit
-      if (this.queue.length === 1) {
-        if (this.queue[0] instanceof MonitoredItemNotification) {
-
-          const el = this.queue[0] as MonitoredItemNotification;
-          if (el.value.statusCode.hasOverflowBit) {
-            (el.value.statusCode as any).unset("Overflow | InfoTypeDataValue");
-          }
+    public dispose(): void {
+        /* c8 ignore next */
+        if (doDebug) {
+            debugLog("DISPOSING MONITORED ITEM", this._node?.nodeId.toString());
         }
-      }
+
+        this._stop_sampling();
+
+        MonitoredItem.registry.unregister(this);
+
+        if (this._on_node_disposed_listener) {
+            (this._node as BaseNode).removeListener("dispose", this._on_node_disposed_listener);
+            this._on_node_disposed_listener = null;
+        }
+
+        // x assert(this._samplingId === null,"Sampling Id must be null");
+        this.oldDataValue = badDataUnavailable;
+        this.queue = [];
+        this.itemToMonitor = null as unknown as ReadValueIdOptions & { attributeId: AttributeIds };
+        this.filter = null;
+        this.monitoredItemId = 0;
+        this._node = null;
+        this._semantic_version = 0;
+
+        this.$subscription = undefined;
+
+        this.removeAllListeners();
+
+        assert(!this._samplingId);
+        assert(!this._coalesceTimer);
+        assert(!this._value_changed_callback);
+        assert(!this._semantic_changed_callback);
+        assert(!this._attribute_changed_callback);
+        assert(!this._on_opcua_event_received_callback);
+        this._on_opcua_event_received_callback = null;
+        this._attribute_changed_callback = null;
+        this._semantic_changed_callback = null;
+        this._on_opcua_event_received_callback = null;
     }
-    assert(this.queue.length <= this.queueSize);
-  }
 
-  private _adjust_sampling(old_samplingInterval: number) {
-    if (old_samplingInterval !== this.samplingInterval) {
-      this._start_sampling(false);
+    public get isSampling(): boolean {
+        return (
+            !!this._samplingId ||
+            typeof this._value_changed_callback === "function" ||
+            typeof this._attribute_changed_callback === "function"
+        );
     }
-  }
 
-  private _on_node_disposed(node: BaseNode) {
-    this._on_value_changed(new DataValue({
-      sourceTimestamp: new Date(),
-      statusCode: StatusCodes.BadNodeIdInvalid
-    }));
-    this._stop_sampling();
-    node.removeListener("dispose", this._on_node_disposed_listener);
-    this._on_node_disposed_listener = null;
-  }
+    /**
+     * true when the Value attribute is delivered on change rather than sampled by a timer:
+     * the client requested a samplingInterval of 0 on a Variable whose MinimumSamplingInterval
+     * is 0. The revised samplingInterval is then the coalescing window (0 = every change).
+     */
+    public get isExceptionBased(): boolean {
+        return this._exceptionBased;
+    }
 
+    public toJSON(): Record<string, string | number | undefined> {
+        return {
+            nodeId: this.node?.nodeId.toString(),
+            samplingInterval: this.samplingInterval,
+            monitoredItemId: this.monitoredItemId
+        };
+    }
+
+    public toString(): string {
+        let str = "";
+        str += `monitored item nodeId : ${this.node?.nodeId.toString()} \n`;
+        str += `    sampling interval : ${this.samplingInterval} \n`;
+        str += `    monitoredItemId   : ${this.monitoredItemId} \n`;
+        return str;
+    }
+
+    public [Symbol.for("nodejs.util.inspect.custom")](): string {
+        return this.toString();
+    }
+    /**
+     * @param dataValue       the whole dataValue
+     * @param skipChangeTest  indicates whether recordValue should  not check that dataValue is really
+     *                                  different from previous one, ( by checking timestamps but also variant value)
+     * @private
+     *
+     * Notes:
+     *  - recordValue can only be called within timer event
+     *  - for performance reason, dataValue may be a shared value with the underlying node,
+     *    therefore recordValue must clone the dataValue to make sure it retains a snapshot
+     *    of the contain at the time recordValue was called.
+     *
+     * return true if the value has been recorded, false if not.
+     *
+     * Value will not be recorded :
+     *   * if the range do not overlap
+     *   * is !skipChangeTest and value is equal to previous value
+     *
+     */
+    public recordValue(dataValue: DataValue, skipChangeTest?: boolean, indexRange?: NumericRange): boolean {
+        if (!this.itemToMonitor) {
+            // we must have a valid itemToMonitor(have this monitoredItem been disposed already ?)
+            // c8 ignore next
+            doDebug && debugLog("recordValue => Rejected", this.node?.browseName.toString(), " because no itemToMonitor");
+            return false;
+        }
+
+        if (dataValue === this.oldDataValue) {
+            errorLog("recordValue expects different dataValue to be provided");
+        }
+        doDebug && assert(!dataValue.value || dataValue.value.isValid(), "expecting a valid variant value");
+
+        const hasSemanticChanged =
+            this.node && ("semantic_version" in this.node ? this.node.semantic_version : 0) !== this._semantic_version;
+
+        if (!hasSemanticChanged && indexRange && this.itemToMonitor.indexRange) {
+            // we just ignore changes that do not fall within our range
+            // ( unless semantic bit has changed )
+            if (!NumericRange.overlap(indexRange as NumericalRange0, this.itemToMonitor.indexRange as NumericalRange0)) {
+                // c8 ignore next
+                doDebug && debugLog("recordValue => Rejected", this.node?.browseName.toString(), " because no range not overlap");
+                return false; // no overlap !
+            }
+        }
+
+        // extract the range that we are interested with
+        // without an index range there is nothing to extract: _enqueue_value keeps its own copy,
+        // so the only branch that writes into dataValue (the SemanticChanged bit) copies it first
+        const indexRangeToExtract = this.itemToMonitor.indexRange;
+        const hasIndexRange = !!indexRangeToExtract && !indexRangeToExtract.isEmpty();
+        if (hasIndexRange) {
+            dataValue = extractRange(dataValue, indexRangeToExtract);
+        }
+
+        // c8 ignore next
+        if (doDebug2) {
+            // c8 ignore next
+            doDebug &&
+                debugLog(
+                    "MonitoredItem#recordValue",
+                    this.node?.nodeId.toString(),
+                    this.node?.browseName.toString(),
+                    " has Changed = ",
+                    !sameDataValue(dataValue, this.oldDataValue),
+                    "skipChangeTest = ",
+                    skipChangeTest,
+                    "hasSemanticChanged = ",
+                    hasSemanticChanged
+                );
+        }
+
+        // if semantic has changed, value need to be enqueued regardless of other assumptions
+        if (hasSemanticChanged) {
+            // c8 ignore next
+            doDebug && debugLog("_enqueue_value => because hasSemanticChanged");
+            if (!hasIndexRange) {
+                dataValue = dataValue.clone();
+            }
+            setSemanticChangeBit(dataValue);
+            this._semantic_version = (this.node as UAVariable).semantic_version;
+            this._enqueue_value(dataValue);
+            // c8 ignore next
+            doDebug && debugLog("recordValue => OK ", this.node?.browseName.toString(), " because hasSemanticChanged");
+            return true;
+        }
+
+        const useIndexRange = hasIndexRange;
+
+        if (!skipChangeTest) {
+            const hasChanged = !sameDataValue(dataValue, this.oldDataValue);
+            if (!hasChanged) {
+                // c8 ignore next
+                doDebug2 &&
+                    debugLog(
+                        "recordValue => Rejected ",
+                        this.node?.browseName.toString(),
+                        " because !skipChangeTest && sameDataValue"
+                    );
+                return false;
+            }
+        }
+
+        if (!skipChangeTest && !apply_filter.call(this, dataValue)) {
+            // c8 ignore next
+            if (doDebug) {
+                debugLog("recordValue => Rejected ", this.node?.browseName.toString(), " because apply_filter");
+                debugLog("current Value =>", this.oldDataValue?.toString());
+                debugLog("proposed Value =>", dataValue?.toString());
+                debugLog("proposed Value =>", dataValue === this.oldDataValue, dataValue.value === this.oldDataValue?.value);
+            }
+            return false;
+        }
+
+        if (useIndexRange) {
+            // when an indexRange is provided , make sure that no record happens unless
+            // extracted variant in the selected range  has really changed.
+
+            // c8 ignore next
+            if (doDebug) {
+                debugLog("Current : ", this.oldDataValue?.toString());
+                debugLog("New : ", dataValue.toString());
+                debugLog("indexRange=", indexRange);
+            }
+
+            if (this.oldDataValue !== badDataUnavailable && sameVariant(dataValue.value, this.oldDataValue.value)) {
+                // c8 ignore next
+                doDebug &&
+                    debugLog("recordValue => Rejected ", this.node?.browseName.toString(), " because useIndexRange && sameVariant");
+                return false;
+            }
+        }
+
+        // processTriggerItems
+        this.triggerLinkedItems();
+
+        // store last value
+        this._enqueue_value(dataValue);
+        // c8 ignore next
+        doDebug && debugLog("recordValue => OK ", this.node?.browseName.toString());
+        return true;
+    }
+
+    /** the items this one triggers (SetTriggering) */
+    public get linkedItems(): readonly number[] {
+        return this._linkedItems ?? [];
+    }
+
+    public hasLinkItem(linkedMonitoredItemId: number): boolean {
+        if (!this._linkedItems) {
+            return false;
+        }
+        return this._linkedItems.indexOf(linkedMonitoredItemId) > 0;
+    }
+    public addLinkItem(linkedMonitoredItemId: number): StatusCode {
+        if (linkedMonitoredItemId === this.monitoredItemId) {
+            return StatusCodes.BadMonitoredItemIdInvalid;
+        }
+        this._linkedItems = this._linkedItems || [];
+        if (this.hasLinkItem(linkedMonitoredItemId)) {
+            return StatusCodes.BadMonitoredItemIdInvalid; // nothing to do
+        }
+        this._linkedItems.push(linkedMonitoredItemId);
+        return StatusCodes.Good;
+    }
+    public removeLinkItem(linkedMonitoredItemId: number): StatusCode {
+        if (!this._linkedItems || linkedMonitoredItemId === this.monitoredItemId) {
+            return StatusCodes.BadMonitoredItemIdInvalid;
+        }
+        const index = this._linkedItems.indexOf(linkedMonitoredItemId);
+        if (index === -1) {
+            return StatusCodes.BadMonitoredItemIdInvalid;
+        }
+        this._linkedItems.splice(index, 1);
+        return StatusCodes.Good;
+    }
+    /**
+     * @private
+     */
+    private triggerLinkedItems() {
+        if (!this.$subscription || !this._linkedItems) {
+            return;
+        }
+        // see https://reference.opcfoundation.org/v104/Core/docs/Part4/5.12.1/#5.12.1.6
+        for (const linkItem of this._linkedItems) {
+            const linkedMonitoredItem = this.$subscription.getMonitoredItem(linkItem);
+            if (!linkedMonitoredItem) {
+                // monitoredItem may have been deleted
+                continue;
+            }
+            if (linkedMonitoredItem.monitoringMode === MonitoringMode.Disabled) {
+                continue;
+            }
+            if (linkedMonitoredItem.monitoringMode === MonitoringMode.Reporting) {
+                continue;
+            }
+            assert(linkedMonitoredItem.monitoringMode === MonitoringMode.Sampling);
+
+            // c8 ignore next
+            if (doDebug) {
+                debugLog("triggerLinkedItems => ", this.node?.nodeId.toString(), linkedMonitoredItem.node?.nodeId.toString());
+            }
+            linkedMonitoredItem.trigger();
+        }
+    }
+
+    get hasMonitoredItemNotifications(): boolean {
+        return this.queue.length > 0 || (this._triggeredNotifications !== undefined && this._triggeredNotifications.length > 0);
+    }
+
+    /**
+     * @private
+     */
+    private trigger() {
+        setImmediate(() => {
+            this._triggeredNotifications = this._triggeredNotifications || [];
+            const notifications = this.extractMonitoredItemNotifications(true);
+            this._triggeredNotifications = ([] as QueueItem[]).concat(this._triggeredNotifications, notifications);
+        });
+    }
+
+    public extractMonitoredItemNotifications(bForce = false): QueueItem[] {
+        if (!bForce && this.monitoringMode === MonitoringMode.Sampling && this._triggeredNotifications) {
+            const notifications1 = this._triggeredNotifications;
+            this._triggeredNotifications = undefined;
+            return notifications1;
+        }
+        if (!bForce && this.monitoringMode !== MonitoringMode.Reporting) {
+            return [];
+        }
+        const notifications = this.queue;
+        this._empty_queue();
+
+        // apply semantic changed bit if necessary
+        if (notifications.length > 0 && this.node && this._semantic_version < (this.node as UAVariable).semantic_version) {
+            const dataValue = notifications[notifications.length - 1];
+            setSemanticChangeBit(dataValue);
+            assert(this.node.nodeClass === NodeClass.Variable);
+            this._semantic_version = (this.node as UAVariable).semantic_version;
+        }
+
+        return notifications;
+    }
+
+    public modify(
+        timestampsToReturn: TimestampsToReturn | null,
+        monitoringParameters: MonitoringParameters | null
+    ): MonitoredItemModifyResult {
+        assert(monitoringParameters instanceof MonitoringParameters);
+
+        const old_samplingInterval = this.samplingInterval;
+        const old_exceptionBased = this._exceptionBased;
+
+        this.timestampsToReturn = timestampsToReturn || this.timestampsToReturn;
+
+        if (!monitoringParameters) {
+            return new MonitoredItemModifyResult({
+                revisedQueueSize: this.queueSize,
+                revisedSamplingInterval: this.samplingInterval,
+                filterResult: null,
+                statusCode: StatusCodes.Good
+            });
+        }
+        if (
+            this.itemToMonitor.attributeId === AttributeIds.Value &&
+            !old_exceptionBased &&
+            monitoringParameters.samplingInterval === 0
+        ) {
+            // a sampled item stays sampled: 0 asks for the fastest timer, not for on-change delivery
+            // (an item on another attribute is never sampled: it keeps the 0 it asked for)
+            monitoringParameters.samplingInterval = MonitoredItem.minimumSamplingInterval; // fastest possible
+        }
+
+        // spec says: Illegal request values for parameters that can be revised do not generate errors. Instead the
+        // server will choose default values and indicate them in the corresponding revised parameter
+        this._set_parameters(monitoringParameters);
+
+        this._adjust_queue_to_match_new_queue_size();
+
+        this._adjustSampling(old_samplingInterval, old_exceptionBased);
+
+        if (monitoringParameters.filter) {
+            if (!this.node) {
+                throw new Error("setMonitoringParameters: expecting a valid node");
+            }
+            const statusCodeFilter = validateFilter(
+                monitoringParameters.filter,
+                this.itemToMonitor,
+                this.node as unknown as BaseNode,
+                {
+                    maxWhereClauseParameters: this.$subscription?.maxWhereClauseParameters,
+                    maxSelectClauseParameters: this.$subscription?.maxSelectClauseParameters
+                }
+            );
+            if (statusCodeFilter.isNot(StatusCodes.Good)) {
+                return new MonitoredItemModifyResult({
+                    statusCode: statusCodeFilter
+                });
+            }
+        }
+
+        // validate filter
+        // note : The DataChangeFilter does not have an associated result structure.
+        const filterResult = null; // new subscription_service.DataChangeFilter
+
+        return new MonitoredItemModifyResult({
+            filterResult,
+            revisedQueueSize: this.queueSize,
+            revisedSamplingInterval: this.samplingInterval,
+            statusCode: StatusCodes.Good
+        });
+    }
+
+    public async resendInitialValue(): Promise<void> {
+        // the first Publish response(s) after the TransferSubscriptions call shall contain the current values of all
+        // Monitored Items in the Subscription where the Monitoring Mode is set to Reporting.
+        // the first Publish response after the TransferSubscriptions call shall contain only the value changes since
+        // the last Publish response was sent.
+        // This parameter only applies to MonitoredItems used for monitoring Attribute changes.
+
+        // c8 ignore next
+        if (!this.node) return;
+
+        const sessionContext = this.getSessionContext() || SessionContext.defaultContext;
+
+        // c8 ignore next
+        if (!sessionContext) return;
+
+        // no need to resend if a value is already in the queue
+        if (this.queue.length > 0) return;
+
+        const theValueToResend =
+            this.oldDataValue !== badDataUnavailable
+                ? this.oldDataValue
+                : this.node.readAttribute(sessionContext, this.itemToMonitor.attributeId);
+        this.oldDataValue = badDataUnavailable;
+        this._enqueue_value(theValueToResend);
+    }
+
+    private getSessionContext(): ISessionContext | null {
+        const session = this._getSession();
+        if (!session) {
+            return null;
+        }
+        const sessionContext: ISessionContext = session.sessionContext;
+        return sessionContext;
+    }
+    /**
+     * @private
+     * @param clock the clock read the sampler shares between the items it samples together (read again when omitted)
+     * @param hold  keep a value obtained at once for {@link _record_held_sample} instead of recording it: the
+     *              sampler stamps the values of its items with one clock read made once they have all answered
+     */
+    private _on_sampling_timer(clock?: PreciseClock, hold?: boolean) {
+        if (this.monitoringMode === MonitoringMode.Disabled) {
+            return;
+        }
+
+        // Use default context if session is not available
+        const sessionContext = this.getSessionContext() || SessionContext.defaultContext;
+
+        if (!sessionContext) {
+            warningLog("MonitoredItem#_on_sampling_timer : ", this.node?.nodeId.toString(), "cannot find session");
+            return;
+        }
+        // c8 ignore next
+        if (doDebug2) {
+            // c8 ignore next
+            doDebug &&
+                debugLog(
+                    "MonitoredItem#_on_sampling_timer",
+                    this.node ? this.node.nodeId.toString() : "null",
+                    " isSampling?=",
+                    this._is_sampling
+                );
+        }
+
+        if (this._samplingId) {
+            assert(this.monitoringMode === MonitoringMode.Sampling || this.monitoringMode === MonitoringMode.Reporting);
+
+            if (this._is_sampling) {
+                // previous sampling call is not yet completed..
+                // there is nothing we can do about it except waiting until next tick.
+                // note : see also issue #156 on github
+
+                // Note: some server returns GoodOverload here
+                const _statusCode = StatusCodes.GoodOverload;
+
+                return;
+            }
+            assert(!this._is_sampling, "sampling func shall not be re-entrant !! fix it");
+
+            // c8 ignore next
+            if (!this.samplingFunc) {
+                throw new Error("internal error : missing samplingFunc");
+            }
+
+            this._is_sampling = true;
+
+            // made once per item, not once per sample: it only refers to the item
+            this._onSampled ??= (err: Error | null, newDataValue?: DataValue) => {
+                if (!this._samplingId) {
+                    // item has been disposed. The monitored item has been disposed while the async sampling func
+                    // was taking place ... just ignore this
+                    return;
+                }
+                // c8 ignore next
+                if (err) {
+                    errorLog(" SAMPLING ERROR =>", err);
+                } else if (!newDataValue) {
+                    errorLog(" SAMPLING ERROR => samplingFunc completed without error but returned no dataValue");
+                } else if (this._holdSample) {
+                    this._heldSample = newDataValue;
+                } else {
+                    // only record value if source timestamp is newer
+                    // xx if (newDataValue && isSourceNewerThan(newDataValue, this.oldDataValue)) {
+                    this._on_value_changed(newDataValue);
+                    // xx }
+                }
+                this._is_sampling = false;
+            };
+            // only a value obtained during this call is held: one that comes later is recorded when it comes
+            this._holdSample = hold === true;
+            this.samplingFunc.call(this, sessionContext, this.oldDataValue, this._onSampled, clock);
+            this._holdSample = false;
+        } else {
+            /* c8 ignore next */
+            // c8 ignore next
+            doDebug && debugLog("_on_sampling_timer call but MonitoredItem has been terminated !!! ");
+        }
+    }
+
+    /**
+     * @internal called by the sampler (node_sampler.ts)
+     * records the value held by {@link _on_sampling_timer}. A server timestamp that is the shared clock's (`readAt`,
+     * recognised by its Date) was stamped for the sampler: it becomes `answeredAt`, read once the items sampled
+     * together had all answered, so it is not earlier than a source timestamp taken while they answered. A server
+     * timestamp the value came with is left as it is.
+     */
+    public _record_held_sample(readAt: PreciseClock, answeredAt: PreciseClock): void {
+        const dataValue = this._heldSample;
+        if (!dataValue) {
+            return;
+        }
+        this._heldSample = undefined;
+        if (!this._samplingId) {
+            return; // disposed meanwhile
+        }
+        if (dataValue.serverTimestamp === readAt.timestamp) {
+            dataValue.serverTimestamp = answeredAt.timestamp;
+            dataValue.serverPicoseconds = answeredAt.picoseconds;
+        }
+        this._on_value_changed(dataValue);
+    }
+
+    private _stop_sampling() {
+        // debugLog("MonitoredItem#_stop_sampling");
+        /* c8 ignore next */
+        if (!this.node) {
+            throw new Error("Internal Error");
+        }
+        if (this._on_opcua_event_received_callback) {
+            assert(typeof this._on_opcua_event_received_callback === "function");
+            (this.node as BaseNode).removeListener("event", this._on_opcua_event_received_callback);
+            this._on_opcua_event_received_callback = null;
+        }
+        if (this._unsubscribeEvents) {
+            this._unsubscribeEvents();
+            this._unsubscribeEvents = null;
+        }
+
+        if (this._attribute_changed_callback) {
+            assert(typeof this._attribute_changed_callback === "function");
+
+            const event_name = makeAttributeEventName(this.itemToMonitor.attributeId);
+            (this.node as BaseNode).removeListener(event_name, this._attribute_changed_callback);
+            this._attribute_changed_callback = null;
+        }
+
+        if (this._value_changed_callback) {
+            // exception-based data item: we setup a event listener that we need to unwind here
+            assert(typeof this._value_changed_callback === "function");
+            assert(!this._samplingId);
+
+            (this.node as UAVariable).removeListener("value_changed", this._value_changed_callback);
+            this._value_changed_callback = null;
+            this._close_coalesce_window();
+        }
+
+        if (this._semantic_changed_callback) {
+            assert(typeof this._semantic_changed_callback === "function");
+            (this.node as UAVariable).removeListener("semantic_changed", this._semantic_changed_callback);
+            this._semantic_changed_callback = null;
+        }
+        if (this._samplingId) {
+            this._clear_timer();
+        }
+
+        assert(!this._samplingId);
+        assert(!this._coalesceTimer);
+        assert(!this._value_changed_callback);
+        assert(!this._semantic_changed_callback);
+        assert(!this._attribute_changed_callback);
+        assert(!this._on_opcua_event_received_callback);
+    }
+
+    private _on_value_changed(dataValue: DataValue, indexRange?: NumericRange | null) {
+        assert(dataValue instanceof DataValue);
+        this.recordValue(dataValue, false, indexRange ?? undefined);
+    }
+
+    /**
+     * the value_changed listener of an exception-based item.
+     *
+     * At most one notification per revised samplingInterval: the first change after a quiet
+     * period is recorded at once and opens a window; changes inside the window are folded, the
+     * latest one being recorded when the window ends - what a sampling server would deliver
+     * at that instant. The DataChangeFilter and the queue logic are applied by recordValue as
+     * usual. This also bounds the cost of a fast writer, which the queue alone did not.
+     */
+    private _on_value_changed_exception_based(dataValue: DataValue, indexRange?: NumericRange | null) {
+        // The value_changed listener is attached to the node and carries no session, so this value
+        // has not passed the node's read gate. Apply that gate on every delivery, as the sampled
+        // path does: a session that may not read the node receives the refusal status in place of
+        // the value. The gate runs readValue's checks in its order (see the inner comment). The
+        // refusal DataValue is built here rather than read through readAttribute(), because a
+        // detached (compact-store) node does not answer readAttribute() with its value. A readable
+        // node keeps the change value; an in-process context has no session and is always permitted.
+        //
+        // TODO: Read, HistoryRead, Write and this path each resolve these checks on their own; one
+        // address-space read-refusal helper would let them share a single gate.
+        const restrictedNode = this.node as UAVariable | undefined;
+        if (restrictedNode) {
+            const sessionContext = this.getSessionContext() || SessionContext.defaultContext;
+            if (sessionContext.session) {
+                const liveNamespace = (restrictedNode.namespace as { addressSpace?: unknown })?.addressSpace !== undefined;
+                const canCheckRestriction = restrictedNode.accessRestrictions !== undefined || liveNamespace;
+                const canCheckPermission = restrictedNode.rolePermissions !== undefined || liveNamespace;
+                // readValue's order: security mode, then the access level, the Read permission and
+                // the user access level. On the front-thread delegation the node is a detached proxy
+                // whose access levels are not filled in - only its role permissions are - so the
+                // access-level checks (isReadable / isUserReadable) run only on a live namespace,
+                // while the permission check runs whenever it can be resolved. The order is preserved
+                // on a live node.
+                let refusal: StatusCode | undefined;
+                if (canCheckRestriction && sessionContext.isAccessRestricted(restrictedNode)) {
+                    refusal = StatusCodes.BadSecurityModeInsufficient;
+                } else if (liveNamespace && !restrictedNode.isReadable(sessionContext)) {
+                    refusal = StatusCodes.BadNotReadable;
+                } else if (canCheckPermission && !sessionContext.checkPermission(restrictedNode, PermissionType.Read)) {
+                    refusal = StatusCodes.BadUserAccessDenied;
+                } else if (liveNamespace && !restrictedNode.isUserReadable(sessionContext)) {
+                    refusal = StatusCodes.BadNotReadable;
+                }
+                if (refusal) {
+                    // stamp the refusal with the current clock, as readValue does.
+                    const { timestamp, picoseconds } = getCurrentClock();
+                    dataValue = new DataValue({
+                        statusCode: refusal,
+                        sourceTimestamp: timestamp,
+                        sourcePicoseconds: picoseconds,
+                        serverTimestamp: timestamp,
+                        serverPicoseconds: picoseconds
+                    });
+                }
+            }
+        }
+        if (this.samplingInterval <= 0) {
+            // the server advertises MinSupportedSampleRate 0: every change goes out
+            this._on_value_changed(dataValue, indexRange);
+            return;
+        }
+        if (!this._coalesceTimer) {
+            this._on_value_changed(dataValue, indexRange);
+            this._coalesceTimer = setTimeout(() => this._on_coalesce_window_end(), this.samplingInterval);
+            return;
+        }
+        // inside the window: recordValue would ignore a write outside the monitored range, so do not
+        // let it stand for the value at the end of the window
+        if (
+            indexRange &&
+            this.itemToMonitor.indexRange &&
+            !NumericRange.overlap(indexRange as NumericalRange0, this.itemToMonitor.indexRange as NumericalRange0)
+        ) {
+            return;
+        }
+        this._pendingDataValue = dataValue;
+    }
+
+    private _on_coalesce_window_end() {
+        this._coalesceTimer = null;
+        if (!this._pendingDataValue) {
+            return; // a quiet window: the next change is recorded at once
+        }
+        this._record_pending_value();
+        // something was folded: open the next window, so a steady writer stays at one
+        // notification per interval instead of two (the flush, then the next change at once)
+        this._coalesceTimer = setTimeout(() => this._on_coalesce_window_end(), this.samplingInterval);
+    }
+
+    private _record_pending_value() {
+        const dataValue = this._pendingDataValue;
+        this._pendingDataValue = null;
+        if (dataValue && this.itemToMonitor) {
+            // the folded writes all overlap the monitored range: let recordValue compare the values
+            this._on_value_changed(dataValue);
+        }
+    }
+
+    /**
+     * ends the coalescing window; a folded value is recorded rather than lost, so that
+     * a modify() restarting the item, or a disable, sees the latest value in the queue.
+     */
+    private _close_coalesce_window() {
+        if (this._coalesceTimer) {
+            clearTimeout(this._coalesceTimer);
+            this._coalesceTimer = null;
+        }
+        this._record_pending_value();
+    }
+
+    private _on_semantic_changed() {
+        if (!this.node) {
+            throw new Error("_on_semantic_changed: expecting a valid node");
+        }
+        // OPC 10000-4 7.39: the *next* data change notification the client receives has to carry
+        // the bit. While notifications are still queued - the initial value of a freshly created
+        // item above all - that next notification is one of them, not a new sample, so the queue
+        // is what has to be stamped. Appending a fresh notification instead leaves the client's
+        // first notification bit-less, and since the DataItem's value did not change that extra
+        // notification repeats a value the client is about to receive anyway. CTT Data Access
+        // Semantic Changes 003/004/005/010/013 create the item, write the Property and publish
+        // once, and read the bit off MonitoredItems[0] - the queued initial value.
+        if (this.queue.length > 0) {
+            for (const notification of this.queue) {
+                setSemanticChangeBit(notification);
+            }
+            this._semantic_version = (this.node as UAVariable).semantic_version;
+            return;
+        }
+        // readValue() hands out the node's own DataValue: recordValue stores what it is given, so
+        // a clone is required or the queue would alias the node's live value.
+        const dataValue: DataValue = (this.node as UAVariable).readValue().clone();
+        this._on_value_changed(dataValue);
+    }
+
+    /**
+     * OPC 10000-9 5.5.7: the SubscriptionId argument of ConditionRefresh "indicat[es] which Client
+     * Subscription shall be refreshed"; the bracket is queued "into the Event stream for every
+     * Notifier MonitoredItem in the Subscription" and the Retained Conditions replayed in between
+     * are the ones that "meet the Subscriptions content filter criteria" - that Subscription's.
+     * 5.5.8 narrows both to the single MonitoredItem ConditionRefresh2 names.
+     *
+     * So a refresh belongs to exactly one Subscription (or one MonitoredItem), and this says
+     * whether it is ours. The comparison is by object identity, not by id: the Subscription the
+     * call resolved has to be the very object this MonitoredItem belongs to.
+     */
+    private _is_refresh_addressed_to_me(scope: ConditionRefreshScope): boolean {
+        if ((scope.subscription as unknown) !== (this.$subscription as unknown)) {
+            return false;
+        }
+        // ConditionRefresh2 (5.5.8) names one MonitoredItem; ConditionRefresh (5.5.7) names none
+        return scope.monitoredItemId === undefined || scope.monitoredItemId === this.monitoredItemId;
+    }
+
+    private _on_opcua_event(eventData: IEventData) {
+        // c8 ignore next
+        if (!this.filter || !(this.filter instanceof EventFilter)) {
+            throw new Error("Internal Error : a EventFilter is requested");
+        }
+
+        const addressSpace: AddressSpace = eventData.getEventDataSource().addressSpace as AddressSpace;
+
+        /**
+         * The ConditionRefresh in progress, if any. The address space sets the scope around the
+         * synchronous raise of the bracket and the replay of the Retained Conditions, and clears
+         * it in a `finally`, so it is `null` at every other moment - an Event raised outside a
+         * refresh reaches the where clause below exactly as it always did. It is also `null` for a
+         * refresh asked for by something that owns no Subscription (a PseudoSession, an in-process
+         * caller): nothing is named, so nothing is narrowed.
+         */
+        const scope = (addressSpace as Partial<IConditionRefreshScopeHolder>)._condition_refresh_scope || null;
+
+        if (scope && !this._is_refresh_addressed_to_me(scope)) {
+            // 5.5.7 / 5.5.8: everything a refresh produces - the bracket and the Retained
+            // Conditions replayed between its two halves - belongs to the Subscription the call
+            // named. The address space raises all of it on the Server Object, from where it
+            // bubbles to every event MonitoredItem of every Subscription of every Session, so the
+            // Subscriptions the call did not name have to drop it here.
+            //
+            // The refresh runs synchronously, so nothing else can raise an Event while the scope
+            // is set: what arrives here inside the window is the refresh and nothing else. (5.5.7
+            // step 3 lets a Server intersperse genuinely new Events with the refresh; this Server
+            // never does, because it cannot reach the event loop in between.)
+            return;
+        }
+
+        /**
+         * OPC 10000-9 4.5: "To ensure a Client is always informed, the three special EventTypes
+         * (RefreshEndEventType, RefreshStartEventType and RefreshRequiredEventType) ignore the
+         * Event content filtering associated with a Subscription and will always be delivered to
+         * the Client." The Retained Conditions sent in between still have to "meet the
+         * Subscriptions content filter criteria" (5.5.7), so only the bracket is exempt.
+         *
+         * Without this, a where clause testing a Condition field discards RefreshStart/RefreshEnd
+         * - they are not Conditions and carry no ConditionId - and a Client that filtered down to
+         * one Condition waits for a RefreshEnd that never comes. Measured with the CTT's A & C
+         * Refresh Test_002: the item filtering on a ConditionId received its 78 Condition Events
+         * and neither end of the bracket, while the unfiltered item on the same Subscription
+         * received both.
+         *
+         * The exemption is no wider than that sentence: only those two EventTypes, recognised by
+         * their EventType field, and only inside a refresh addressed to this item - by the test
+         * just above, a refresh addressed elsewhere never gets this far. The select clauses are
+         * untouched: the Client still gets the fields it asked for.
+         *
+         * The third EventType of the sentence, RefreshRequiredEventType, is not raised by a
+         * ConditionRefresh - it is how a Server asks for one - so there is no refresh scope to
+         * recognise it in and nothing here exempts it.
+         */
+        const isRefreshBracketForMe = scope !== null && isRefreshBracketEvent(eventData);
+
+        // OPC 10000-3 PermissionType ReceiveEvents (bit 11): the Session receives the Event only if
+        // it holds the permission on the EventType and on the SourceNode - how Audit Events are
+        // kept for the Roles OPCUAServerOptions.auditEventRoles names. The bracket of the Client's
+        // own refresh is exempt, as it is from the content filter (OPC 10000-9 v1.05.06 §4.5).
+        const sessionContext = this.getSessionContext();
+        if (!isRefreshBracketForMe && sessionContext && !canReceiveEvent(sessionContext, addressSpace, eventData)) {
+            return;
+        }
+
+        if (
+            !isRefreshBracketForMe &&
+            !checkWhereClauseOnAddressSpace(addressSpace, SessionContext.defaultContext, this.filter.whereClause, eventData)
+        ) {
+            return;
+        }
+
+        const selectClauses = this.filter.selectClauses ? this.filter.selectClauses : ([] as SimpleAttributeOperand[]);
+
+        const eventFields: Variant[] = extractEventFields(SessionContext.defaultContext, selectClauses, eventData);
+
+        // c8 ignore next
+        if (doDebug) {
+            debugLog(" RECEIVED INTERNAL EVENT THAT WE ARE MONITORING");
+            debugLog(this.filter ? this.filter.toString() : "no filter");
+            eventFields.forEach((e: Variant) => {
+                debugLog(e.toString());
+            });
+        }
+
+        this._enqueue_event(eventFields);
+    }
+
+    private _getSession(): null | IServerSession2 {
+        if (!this.$subscription) {
+            return null;
+        }
+        if (!this.$subscription.$session) {
+            return null;
+        }
+        return this.$subscription.$session;
+    }
+
+    private _start_sampling(recordInitialValue: boolean): void {
+        // c8 ignore next
+        if (!this.node) {
+            return; // we just want to ignore here ...
+        }
+        this.oldDataValue = badDataUnavailable;
+        if (
+            this.itemToMonitor.attributeId === AttributeIds.EventNotifier &&
+            (this.node as Partial<CompactMonitorableNode>).subscribeEvents
+        ) {
+            // events filtered where they are raised (another thread): the watch is asked for at once, before
+            // the client hears of the item and can call ConditionRefresh for its subscription
+            this.__start_sampling(recordInitialValue);
+            return;
+        }
+        setImmediate(() => this.__start_sampling(recordInitialValue));
+    }
+
+    private __acquireInitialValue(sessionContext: ISessionContext, callback: CallbackT<DataValue>): void {
+        // acquire initial value from the variable/object not itself or from the last known value if we have
+        // one already
+        assert(this.itemToMonitor.attributeId === AttributeIds.Value);
+        assert(this.node);
+        if (this.node?.nodeClass !== NodeClass.Variable) {
+            callback(new Error("Invalid "));
+            return;
+        }
+        const variable = this.node as UAVariable;
+        if (this.oldDataValue === badDataUnavailable) {
+            variable.readValueAsync(sessionContext, (err: Error | null, dataValue?: DataValue) => {
+                callback(err, dataValue);
+            });
+        } else {
+            const o = this.oldDataValue;
+            this.oldDataValue = badDataUnavailable;
+            // c8 ignore next
+            if (doDebug) {
+                safeGuardRegister(this);
+            }
+            callback(null, o);
+        }
+    }
+    private __start_sampling(recordInitialValue?: boolean): void {
+        // c8 ignore next
+        if (!this.node) {
+            return; // we just want to ignore here ...
+        }
+
+        const sessionContext = this.getSessionContext() || SessionContext.defaultContext;
+        // c8 ignore next
+        if (!sessionContext) {
+            return;
+        }
+
+        this._stop_sampling();
+
+        if (this.itemToMonitor.attributeId === AttributeIds.EventNotifier) {
+            // c8 ignore next
+            if (doDebug) {
+                debugLog("xxxxxx monitoring EventNotifier on", this.node.nodeId.toString(), this.node.browseName.toString());
+            }
+            const filtering = this.node as Partial<CompactMonitorableNode>;
+            if (filtering.subscribeEvents && this.filter instanceof EventFilter) {
+                // the node filters its events where they are raised: the item queues the fields it is given
+                this._unsubscribeEvents ??= filtering.subscribeEvents(
+                    this.filter,
+                    sessionContext,
+                    (fields: Variant[]) => this._enqueue_event(fields),
+                    { subscriptionId: this.$subscription?.id ?? 0, monitoredItemId: this.monitoredItemId }
+                );
+                return;
+            }
+            if (!this._on_opcua_event_received_callback) {
+                // we are monitoring OPCUA Event
+                this._on_opcua_event_received_callback = this._on_opcua_event.bind(this);
+                if (this.node && this.node.nodeClass === NodeClass.Object) {
+                    (this.node as unknown as EventEmitter).on("event", this._on_opcua_event_received_callback);
+                }
+            }
+            return;
+        }
+        if (this.itemToMonitor.attributeId !== AttributeIds.Value) {
+            // sampling interval only applies to Value Attributes.
+            this.samplingInterval = 0; // turned to exception-based regardless of requested sampling interval
+
+            // non value attribute only react on value change
+            if (!this._attribute_changed_callback) {
+                this._attribute_changed_callback = this._on_value_changed.bind(this);
+                const event_name = makeAttributeEventName(this.itemToMonitor.attributeId);
+                (this.node as BaseNode).on(event_name, this._attribute_changed_callback);
+            }
+
+            if (recordInitialValue) {
+                // read initial value
+                const dataValue = this.node.readAttribute(sessionContext, this.itemToMonitor.attributeId);
+                this.recordValue(dataValue, true);
+            }
+            return;
+        }
+
+        // A semantic change is not a value change: a sampled item would only notice it at its next
+        // tick, and OPC 10000-4 7.39 wants the *next* notification to carry the SemanticsChanged bit.
+        // CTT Data Access AnalogItemType 008 publishes right after writing EURange, so the item is
+        // told about the change as it happens, whether it is sampled or exception-based.
+        if (!this._semantic_changed_callback && this.node.nodeClass === NodeClass.Variable) {
+            this._semantic_changed_callback = this._on_semantic_changed.bind(this);
+            (this.node as unknown as EventEmitter).on("semantic_changed", this._semantic_changed_callback);
+        }
+
+        if (this._exceptionBased) {
+            // we have a exception-based dataItem : event based model, so we do not need a timer
+            // rather , we setup the "value_changed_event"; samplingInterval is the coalescing window
+            if (!this._value_changed_callback) {
+                this._value_changed_callback = this._on_value_changed_exception_based.bind(this);
+                if (this.node.nodeClass === NodeClass.Variable) {
+                    (this.node as unknown as EventEmitter).on("value_changed", this._value_changed_callback);
+                }
+            }
+
+            // initiate first read
+            if (recordInitialValue) {
+                this.__acquireInitialValue(sessionContext, (err: Error | null, dataValue?: DataValue) => {
+                    if (err) {
+                        warningLog(err.message);
+                    }
+                    if (!err && dataValue) {
+                        this.recordValue(dataValue.clone(), true);
+                    }
+                });
+            }
+        } else {
+            if (recordInitialValue) {
+                this.__acquireInitialValue(sessionContext, (err: Error | null, dataValue?: DataValue) => {
+                    if (err) {
+                        warningLog(err.message);
+                    }
+                    if (!err && dataValue) {
+                        this.recordValue(dataValue, true);
+                    }
+                    this._set_timer();
+                });
+            } else {
+                this._set_timer();
+            }
+        }
+    }
+
+    private _set_parameters(monitoredParameters: MonitoringParameters) {
+        _validate_parameters(monitoredParameters);
+        // only change clientHandle if it is valid (0<X<MAX)
+        if (monitoredParameters.clientHandle !== 0 && monitoredParameters.clientHandle !== 4294967295) {
+            this.clientHandle = monitoredParameters.clientHandle;
+        }
+
+        // The Server may support data that is collected based on a sampling model or generated based on an
+        // exception-based model. The fastest supported sampling interval may be equal to 0, which indicates
+        // that the data item is exception-based rather than being sampled at some period. An exception-based
+        // model means that the underlying system does not require sampling and reports data changes.
+        //
+        // A requested 0 on a Variable whose MinimumSamplingInterval is 0 selects the exception-based model;
+        // the revised samplingInterval is still floored by the advertised MinSupportedSampleRate and is
+        // then the window over which changes are coalesced (see _on_value_changed_exception_based).
+        //
+        // That floor is about sampling a Value. An item on any other attribute is delivered on change
+        // whatever it requested (see _start_sampling), and OPC 10000-4 5.12.1.2 says a Client shall
+        // request 0 when it subscribes for Events: such an item is answered the 0 it asked for.
+        const requestedSamplingInterval = monitoredParameters.samplingInterval;
+        const isValueAttribute = this.itemToMonitor.attributeId === AttributeIds.Value;
+        const node_minimumSamplingInterval =
+            this.node && this.node.nodeClass === NodeClass.Variable ? (this.node as UAVariable).minimumSamplingInterval || 0 : 0;
+        this.samplingInterval =
+            !isValueAttribute && requestedSamplingInterval === 0
+                ? 0
+                : _adjust_sampling_interval(requestedSamplingInterval, node_minimumSamplingInterval, this._minSupportedSampleRate);
+        this._exceptionBased = isValueAttribute && requestedSamplingInterval === 0 && node_minimumSamplingInterval === 0;
+        this.discardOldest = monitoredParameters.discardOldest;
+        const isEventMonitoredItem = this.itemToMonitor.attributeId === AttributeIds.EventNotifier;
+        this.queueSize = _adjust_queue_size(monitoredParameters.queueSize, isEventMonitoredItem);
+
+        // change filter
+        this.filter = (monitoredParameters.filter as MonitoringFilter) || null;
+    }
+
+    private _setOverflowBit(notification: QueueItem) {
+        if (Object.hasOwn(notification, "value")) {
+            const dataChangeNotification = notification as MonitoredItemNotification;
+            dataChangeNotification.value.statusCode = StatusCode.makeStatusCode(
+                dataChangeNotification.value.statusCode,
+                "Overflow | InfoTypeDataValue"
+            );
+            assert(dataChangeNotification.value.statusCode.hasOverflowBit);
+        }
+        if (this.$subscription?.subscriptionDiagnostics) {
+            this.$subscription.subscriptionDiagnostics.monitoringQueueOverflowCount++;
+        }
+        // to do: eventQueueOverflowCount
+    }
+
+    private _enqueue_notification(notification: QueueItem) {
+        if (this.queueSize === 1) {
+            // https://reference.opcfoundation.org/v104/Core/docs/Part4/5.12.1/#5.12.1.5
+            // If the queue size is one, the queue becomes a buffer that always contains the newest
+            // Notification. In this case, if the sampling interval of the MonitoredItem is faster
+            // than the publishing interval of the Subscription, the MonitoredItem will be over
+            // sampling and the Client will always receive the most up-to-date value.
+            // The discard policy is ignored if the queue size is one.
+            // ensure queue size
+            if (this.queue?.length !== 1) {
+                this.queue = [];
+            }
+            this.queue[0] = notification;
+            assert(this.queue.length === 1);
+        } else {
+            if (this.discardOldest) {
+                // push new value to queue
+                this.queue.push(notification);
+
+                if (this.queue.length > this.queueSize) {
+                    this.overflow = true;
+
+                    this.queue.shift(); // remove front element
+
+                    // set overflow bit
+                    this._setOverflowBit(this.queue[0]);
+                }
+            } else {
+                if (this.queue.length < this.queueSize) {
+                    this.queue.push(notification);
+                } else {
+                    this.overflow = true;
+
+                    this._setOverflowBit(notification);
+                    this.queue[this.queue.length - 1] = notification;
+                }
+            }
+        }
+        assert(this.queue.length >= 1);
+    }
+
+    private _makeDataChangeNotification(dataValue: DataValue): MonitoredItemNotification {
+        if (this.clientHandle === -1 || this.clientHandle === 4294967295) {
+            // c8 ignore next
+            doDebug && debugLog("Invalid client handle");
+        }
+        const attributeId = this.itemToMonitor.attributeId;
+        // if dataFilter is specified ....
+        if (this.filter && this.filter instanceof DataChangeFilter) {
+            if (this.filter.trigger === DataChangeTrigger.Status) {
+                /** */
+            }
+        }
+        dataValue = apply_timestamps(dataValue, this.timestampsToReturn, attributeId);
+        // Assign rather than pass through the options constructor: DataValue is registered
+        // with a coerce that always builds a new instance, so `{ value: dataValue }` would
+        // deep-copy the payload a second time - typed arrays included - immediately after
+        // recordValue already cloned it.
+        //
+        // Handing over apply_timestamps' result directly is safe because that is itself a
+        // fresh DataValue: the notification owns its statusCode and timestamps (which
+        // _setOverflowBit and the timestamp handling do write), and shares only the Variant
+        // with oldDataValue, which nothing mutates in place.
+        const notification = new MonitoredItemNotification(null);
+        notification.clientHandle = this.clientHandle;
+        notification.value = dataValue;
+        return notification;
+    }
+
+    /**
+     * @param dataValue {DataValue} the dataValue to enqueue
+     * @private
+     */
+    /**
+     * true: the next value recorded is the baseline the following ones are compared against, and
+     * no notification. What an item rebuilt in another thread of the server for TransferSubscriptions
+     * with sendInitialValues false needs: its first sample tells nothing new to the client.
+     */
+    public silentInitialValue = false;
+
+    public _enqueue_value(dataValue: DataValue) {
+        if (this.silentInitialValue) {
+            this.silentInitialValue = false;
+            this.oldDataValue = dataValue.clone();
+            return;
+        }
+        // preconditions:
+        doDebug && debugLog("_enqueue_value = ", dataValue.toString());
+
+        // lets verify that, if status code is good then we have a valid Variant in the dataValue
+        doDebug && assert(!dataValue.statusCode.isGoodish() || dataValue.value instanceof Variant);
+        // let's check that data Value is really a different object
+        // we may end up with corrupted queue if dataValue are recycled and stored as is in notifications
+        doDebug && assert(dataValue !== this.oldDataValue, "dataValue cannot be the same object twice!");
+
+        // let's check that data Value is really a different object
+        // we may end up with corrupted queue if dataValue are recycled and stored as is in notifications
+        if (
+            !(
+                !this.oldDataValue.value ||
+                !dataValue.value ||
+                !(dataValue.value.value instanceof Object) ||
+                dataValue.value.value !== this.oldDataValue.value.value
+            ) &&
+            !(dataValue.value.value instanceof Date) &&
+            // a shared constant, the one object Variant.clone() does not copy: nothing to corrupt
+            !(dataValue.value.value instanceof StatusCode)
+        ) {
+            throw new Error(
+                "dataValue.value.value cannot be the same object twice! " +
+                    this.node?.browseName.toString() +
+                    " " +
+                    dataValue.toString() +
+                    "  " +
+                    chalk.cyan(this.oldDataValue.toString())
+            );
+        }
+
+        // c8 ignore next
+        if (doDebug) {
+            debugLog("MonitoredItem#_enqueue_value", this.node?.nodeId.toString());
+            safeGuardVerify(this);
+        }
+        this.oldDataValue = dataValue.clone();
+
+        // A queue of one only ever holds the newest notification (OPC 10000-4 5.12.1.5). While the one it
+        // holds has not been taken by a publish (extraction swaps in a new queue array), nothing else holds
+        // it, so the new sample is written into it rather than into a new notification: an item sampled
+        // faster than it is published otherwise made one notification per sample for one per publish.
+        const pending = this.queueSize === 1 && this.queue.length === 1 ? this.queue[0] : undefined;
+        const reused = pending instanceof MonitoredItemNotification && pending.value ? pending : null;
+        if (reused) {
+            reused.clientHandle = this.clientHandle;
+            apply_timestamps_into(reused.value, this.oldDataValue, this.timestampsToReturn, this.itemToMonitor.attributeId);
+        }
+        // the notification is built first, and from the stamped DataValue: apply_timestamps hands
+        // back a fresh DataValue, so clearing the bit below cannot reach the queued notification.
+        const notification = reused ? null : this._makeDataChangeNotification(this.oldDataValue);
+
+        // The SemanticsChanged bit marks one notification (OPC 10000-4 7.39); it is not a new state
+        // of the value, which did not change at all. oldDataValue is the baseline the next sample is
+        // compared against, so leaving the bit in it makes that sample differ by StatusCode alone:
+        // the item then reports a second, bit-less data change for an unchanged value, and that is
+        // the one the client reads as MonitoredItems[0] once the stamped notification has been
+        // delivered or discarded. CTT Data Access AnalogItemType 008 and Semantic Changes
+        // 010/013/014-017 all read the bit off a publish that follows a drained queue, and all saw
+        // that second notification instead ("Expected <16384> but got <0>").
+        if (this.oldDataValue.statusCode.hasSemanticChangedBit) {
+            this.oldDataValue.statusCode = coerceStatusCode(
+                this.oldDataValue.statusCode.value & ~extraStatusCodeBits.SemanticChanged
+            );
+        }
+
+        // c8 ignore next
+        if (doDebug) {
+            safeGuardRegister(this);
+        }
+
+        if (notification) {
+            this._enqueue_notification(notification);
+        }
+    }
+
+    private _makeEventFieldList(eventFields: Variant[]): EventFieldList {
+        return new EventFieldList({
+            clientHandle: this.clientHandle,
+            eventFields
+        });
+    }
+
+    private _enqueue_event(eventFields: Variant[]) {
+        // c8 ignore next
+        if (doDebug) {
+            debugLog(" MonitoredItem#_enqueue_event");
+        }
+        const notification = this._makeEventFieldList(eventFields);
+        this._enqueue_notification(notification);
+    }
+
+    private _empty_queue() {
+        // empty queue
+        this.queue = [];
+        this.overflow = false;
+    }
+
+    private _clear_timer() {
+        if (this._samplingId) {
+            if (useCommonTimer) {
+                removeFromTimer(this);
+            } else {
+                clearInterval(this._samplingId);
+            }
+            this._samplingId = undefined;
+        }
+    }
+
+    private _set_timer() {
+        if (!this.itemToMonitor) {
+            // item has already been deleted
+            // so do not create the timer !
+            return;
+        }
+
+        assert(this.samplingInterval >= MonitoredItem.minimumSamplingInterval);
+        assert(!this._samplingId);
+
+        if (useCommonTimer) {
+            this._samplingId = appendToTimer(this);
+        } else {
+            // settle periodic sampling
+            this._samplingId = setInterval(() => {
+                this._on_sampling_timer();
+            }, this.samplingInterval);
+        }
+    }
+
+    private _adjust_queue_to_match_new_queue_size() {
+        // adjust queue size if necessary
+        if (this.queueSize < this.queue.length) {
+            if (this.discardOldest) {
+                this.queue.splice(0, this.queue.length - this.queueSize);
+            } else {
+                const lastElement = this.queue[this.queue.length - 1];
+                // only keep queueSize first element, discard others
+                this.queue.splice(this.queueSize);
+                this.queue[this.queue.length - 1] = lastElement;
+            }
+        }
+        if (this.queueSize <= 1) {
+            this.overflow = false;
+            // unset OverFlowBit
+            if (this.queue.length === 1) {
+                if (this.queue[0] instanceof MonitoredItemNotification) {
+                    const el = this.queue[0] as MonitoredItemNotification;
+                    if (el.value.statusCode.hasOverflowBit) {
+                        // on a copy: the value may carry a status code it shares with its source,
+                        // which can be a constant of the StatusCodes table
+                        const statusCode = StatusCode.makeStatusCode(el.value.statusCode);
+                        statusCode.unset("Overflow");
+                        // the info bits (0:9) that remain, such as the limit bits, still need their InfoType
+                        if ((statusCode.value & 0x3ff) === 0) {
+                            statusCode.unset("InfoTypeDataValue");
+                        }
+                        el.value.statusCode = statusCode;
+                    }
+                }
+            }
+        }
+        assert(this.queue.length <= this.queueSize);
+    }
+
+    private _adjustSampling(old_samplingInterval: number, old_exceptionBased: boolean) {
+        // a sampled item and an exception-based one can report the same interval: compare the mode too
+        if (old_samplingInterval !== this.samplingInterval || old_exceptionBased !== this._exceptionBased) {
+            this._start_sampling(false);
+        }
+    }
+
+    private _on_node_disposed(node: BaseNode) {
+        // a folded value must not land behind the BadNodeIdInvalid one
+        this._close_coalesce_window();
+        this._on_value_changed(
+            new DataValue({
+                sourceTimestamp: new Date(),
+                statusCode: StatusCodes.BadNodeIdInvalid
+            })
+        );
+        this._stop_sampling();
+        if (this._on_node_disposed_listener) {
+            node.removeListener("dispose", this._on_node_disposed_listener);
+            this._on_node_disposed_listener = null;
+        }
+    }
 }

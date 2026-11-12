@@ -1,0 +1,73 @@
+import type { CertificateManager } from "node-opcua-certificate-manager";
+import type { NodeId } from "node-opcua-nodeid";
+import { FileTransactionManager } from "../file_transaction_manager.js";
+
+export type ActionQueue = (() => Promise<void>)[];
+
+export interface IPushCertificateManagerServer {
+    applicationGroup?: CertificateManager;
+    userTokenGroup?: CertificateManager;
+    httpsGroup?: CertificateManager;
+    applicationUri: string;
+    /** DNS host names to request in a CreateSigningRequest's SAN, matching the server's own self-signed certificate. */
+    dns?: string[];
+    /** IP addresses to request in a CreateSigningRequest's SAN, matching the server's own self-signed certificate. */
+    ip?: string[];
+
+    getCertificateManager(groupName: string): CertificateManager | null;
+    getCertificateTypes(groupName: string): NodeId[] | undefined;
+    emit(eventName: string | symbol, ...args: unknown[]): boolean;
+}
+
+export class PushCertificateManagerInternalContext {
+    public readonly map: { [key: string]: CertificateManager } = {};
+    public readonly certificateTypes: { [key: string]: NodeId[] } = {};
+    public readonly fileTransactionManager = new FileTransactionManager();
+    public tmpCertificateManager?: CertificateManager;
+    public actionQueue: ActionQueue = [];
+    public operationInProgress = false;
+
+    constructor(private readonly server: IPushCertificateManagerServer) {}
+
+    get applicationGroup() {
+        return this.server.applicationGroup;
+    }
+    get userTokenGroup() {
+        return this.server.userTokenGroup;
+    }
+    get httpsGroup() {
+        return this.server.httpsGroup;
+    }
+    get applicationUri() {
+        return this.server.applicationUri;
+    }
+    get dns() {
+        return this.server.dns;
+    }
+    get ip() {
+        return this.server.ip;
+    }
+
+    getCertificateManager(groupName: string) {
+        return this.server.getCertificateManager(groupName);
+    }
+    getCertificateTypes(groupName: string) {
+        return this.server.getCertificateTypes(groupName);
+    }
+    emit(eventName: string | symbol, ...args: unknown[]) {
+        return this.server.emit(eventName, ...args);
+    }
+
+    public async dispose(): Promise<void> {
+        if (this.tmpCertificateManager) {
+            await this.tmpCertificateManager.dispose();
+            this.tmpCertificateManager = undefined;
+        }
+
+        if (this.fileTransactionManager) {
+            await this.fileTransactionManager.abortTransaction();
+        }
+
+        this.actionQueue.length = 0;
+    }
+}

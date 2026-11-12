@@ -1,0 +1,23 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { UInt32 } from "node-opcua-basic-types";
+import type { UAAnalogUnit } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { UABaseInterface, UABaseInterface_Base } from "node-opcua-nodeset-ua/dist/ua_base_interface.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/PADIM/                          |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |IAmperometricSignalConditionSetType i=1064                  |
+ * |isAbstract      |true                                                        |
+ */
+export interface UAIAmperometricSignalConditionSet_Base extends UABaseInterface_Base {
+    sensorCleaningsCounter?: UAProperty<UInt32, DataType.UInt32>;
+    sensorNextCalibration?: UAAnalogUnit<UInt32, DataType.UInt32>;
+    sensorSterilisationsCounter?: UAProperty<UInt32, DataType.UInt32>;
+    sensingElementTemperature?: UAAnalogUnit<number, DataType.Float>;
+}
+export interface UAIAmperometricSignalConditionSet extends UABaseInterface, UAIAmperometricSignalConditionSet_Base {}

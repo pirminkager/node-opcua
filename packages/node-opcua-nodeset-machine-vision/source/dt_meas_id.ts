@@ -1,0 +1,22 @@
+import type { UAString } from "node-opcua-basic-types";
+import type { LocalizedText } from "node-opcua-data-model";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { DTStructure } from "node-opcua-nodeset-ua/dist/dt_structure.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |           |                                                            |
+ * |-----------|------------------------------------------------------------|
+ * | namespace |http://opcfoundation.org/UA/MachineVision                   |
+ * | nodeClass |DataType                                                    |
+ * | name      |MeasIdDataType                                              |
+ * | isAbstract|false                                                       |
+ */
+export interface DTMeasId extends DTStructure {
+  /** Id is an identifier/name for identifying the measurement operation. This identifier is passed by the client to the vision system so no assumptions can be made about its uniqueness or other properties.*/
+  id: UAString; // String ns=4;i=3017
+  /** Optional short human readable description of the measurement.*/
+  description?: LocalizedText; // LocalizedText ns=0;i=21
+}
+export interface UDTMeasId extends ExtensionObject, DTMeasId {};

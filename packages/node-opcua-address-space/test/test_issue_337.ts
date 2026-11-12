@@ -1,17 +1,12 @@
-import * as should from "should";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 
 import { NumericRange } from "node-opcua-numeric-range";
-import { Variant } from "node-opcua-variant";
-import { DataType } from "node-opcua-variant";
-import { VariantArrayType } from "node-opcua-variant";
+import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
+import should from "should";
+import type { AddressSpace } from "../dist/api/index.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
 
-import { AddressSpace } from "..";
-import { getMiniAddressSpace } from "..";
-
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("Testing bug found in #337", () => {
-
     let addressSpace: AddressSpace;
     before(async () => {
         addressSpace = await getMiniAddressSpace();
@@ -24,7 +19,6 @@ describe("Testing bug found in #337", () => {
     });
 
     it("should handle Matrix ", () => {
-
         const namespace = addressSpace.getOwnNamespace();
 
         const n = namespace.addVariable({
@@ -33,6 +27,7 @@ describe("Testing bug found in #337", () => {
             dataType: "Double",
             nodeId: "ns=1;s=Position",
             organizedBy: addressSpace.rootFolder.objects,
+            minimumSamplingInterval: 100,
             value: {
                 get: () => {
                     return new Variant({
@@ -43,14 +38,12 @@ describe("Testing bug found in #337", () => {
                     });
                 }
             },
-            valueRank: 2,
+            valueRank: 2
         });
 
         const dataValue = n.readValue(null, new NumericRange());
         dataValue.isValid().should.eql(true);
         dataValue.value.arrayType.should.eql(VariantArrayType.Matrix);
-        dataValue.value.dimensions!.should.eql([3, 3]);
-
+        should(dataValue.value.dimensions).eql([3, 3]);
     });
-
 });

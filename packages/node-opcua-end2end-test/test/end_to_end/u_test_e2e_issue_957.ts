@@ -1,0 +1,34 @@
+import "should";
+import type { EventEmitter } from "node:events";
+import { type ClientSession, OPCUAClient } from "node-opcua";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { waitForEvent } from "../../test_helpers/utils.js";
+import type { UmbrellaTestContext } from "./_helper_umbrella.js";
+
+export function t(test: UmbrellaTestContext) {
+    describe("Testing bug #957 - ServerCertificate is an empty buffer", () => {
+        const RENEWAL_TIMEOUT_MS = 10_000; // safety timeout for event wait
+
+        it("should create a client session when server certificate is an empty buffer (not null)", async () => {
+            const client = OPCUAClient.create({ defaultSecureTokenLifetime: 1000 });
+
+            // Emulate empty certificate condition (certificate provided but zero length per original bug).
+            // serverCertificate is readonly on the public OPCUAClient interface; bypass it here for the injection.
+            (client as { serverCertificate?: Buffer }).serverCertificate = Buffer.alloc(0);
+
+            await client.connect(test.endpointUrl!);
+            let session: ClientSession | null = null;
+            try {
+                session = await client.createSession();
+
+                // Wait for first token renewal to prove secure channel lifecycle works with empty server cert
+                await waitForEvent(client as unknown as EventEmitter, "security_token_renewed", RENEWAL_TIMEOUT_MS);
+            } finally {
+                if (session) {
+                    await session.close();
+                }
+                await client.disconnect();
+            }
+        });
+    });
+}

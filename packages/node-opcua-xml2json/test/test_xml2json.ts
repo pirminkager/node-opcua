@@ -1,33 +1,20 @@
-// tslint:disable:no-console
-import * as mocha from "mocha";
-import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
-import { should } from "should";
-import {
-    ParserLike,
-    ReaderStateParserLike,
-    Xml2Json,
-    XmlAttributes
-} from "..";
+import fs from "node:fs";
+import path from "node:path";
+import { make_debugLog } from "node-opcua-debug";
+import should from "should";
+import { type ParserLike, type ReaderStateParserLike, Xml2Json, type XmlAttributes } from "../dist/source/index.js";
+import { Xml2JsonFs } from "../dist/source/nodejs/xml2json_fs.js";
+import { testPath } from "./paths.js";
 
-const doDebug = checkDebugFlag(__filename);
-const debugLog = make_debugLog(__filename);
-
-const _should = should;
-
-type ErrorCallback = (err?: Error) => void;
+const debugLog = make_debugLog("TEST");
 
 describe("XMLToJSON", () => {
-
-    it("should parse a simple xml data string", (done: ErrorCallback) => {
-
+    it("should parse a simple xml data string", () => {
         let init_called = false;
         let finish_called = false;
         const parser = new Xml2Json({
-
             parser: {
-
                 person: {
-
                     init(name: string, attrs: XmlAttributes) {
                         debugLog("person:init name = ", name);
                         name.should.equal("person");
@@ -57,81 +44,97 @@ describe("XMLToJSON", () => {
         });
 
         parser.parseString(
-            "<employees>" +
-            "   <person name='John'>" +
-            "     <address>Paris</address>" +
-            "   </person>" +
-            "</employees>", () => {
+            "<employees>" + "   <person name='John'>" + "     <address>Paris</address>" + "   </person>" + "</employees>"
+        );
 
-                init_called.should.equal(true);
+        init_called.should.equal(true);
 
-                finish_called.should.equal(true);
+        finish_called.should.equal(true);
 
-                (parser as any).obj.should.eql({ name: "John", address: "Paris" });
-                done();
-            });
-
+        (parser as unknown as { obj: Record<string, unknown> }).obj.should.eql({ name: "John", address: "Paris" });
     });
 
-    it("should parse a UTF8 encoded xml file with a BOM", function (this: any, done: ErrorCallback) {
+    async function createXMLFileWithBOM(filename: string) {
+        const xmlContent = `<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <element>Hello, World!</element>
+</root>`;
 
-        const nodesets = require("node-opcua-nodesets");
+        // Prepend the BOM character
+        const xmlWithBom = `\uFEFF${xmlContent}`;
 
-        // accommodate for slow RPI
-        if (process.arch === "arm") {
-            this.timeout(40000);
-            this.slow(20000);
-        }
-        const xml_file = nodesets.standard_nodeset_file;
-        const parser = new Xml2Json({});
-        parser.parse(xml_file, (err?: Error) => {
-            done(err);
+        // Write to a file
+        await fs.promises.writeFile(filename, xmlWithBom, "utf8");
+    }
+    it("should parse a UTF8 encoded xml file with a BOM", async () => {
+        const fixturesDir = testPath("fixtures");
+        await fs.promises.mkdir(fixturesDir, { recursive: true });
+
+        const xml_file = path.join(fixturesDir, "nodeset-with-bom.xml");
+        await createXMLFileWithBOM(xml_file);
+
+        let parsedObj: Record<string, string> | null = null;
+
+        const parser = new Xml2JsonFs({
+            parser: {
+                root: {
+                    init() {
+                        this.obj = {};
+                    },
+                    parser: {
+                        element: {
+                            finish() {
+                                this.parent.obj.element = this.text;
+                            }
+                        }
+                    },
+                    finish() {
+                        parsedObj = this.obj;
+                    }
+                }
+            }
         });
+        await parser.parse(xml_file);
+
+        should(parsedObj).not.be.null();
+        should(parsedObj).eql({ element: "Hello, World!" });
+
+        // Clean up temp fixture
+        await fs.promises.unlink(xml_file);
     });
 
-    it("should parse a escaped string", (done: ErrorCallback) => {
-
+    it("should parse a escaped string", () => {
         let displayName: string | null = null;
 
         const parser = new Xml2Json({
-
             parser: {
                 DisplayName: {
-                    finish(this: any) {
+                    finish() {
                         displayName = this.text;
                     }
                 }
             }
         });
 
-        parser.parseString(
-            "<object>" +
-            "  <DisplayName>&lt;HelloWorld&gt;</DisplayName>" +
-            "</object>", () => {
-
-                displayName!.should.eql("<HelloWorld>");
-
-                done();
-            });
+        parser.parseString("<object>" + "  <DisplayName>&lt;HelloWorld&gt;</DisplayName>" + "</object>");
+        should(displayName).eql("<HelloWorld>");
     });
 
-    it("should parse a array", (done: ErrorCallback) => {
+    it("should parse a array", () => {
+        type ParseFunc = (text: string) => unknown;
 
-        function BasicType_parser1(
-            dataType: string,
-            parseFunc: (this: any, text: string) => any
-        ): ParserLike {
-
+        function BasicType_parser1(dataType: string, parseFunc: ParseFunc): ParserLike {
             const _parser: ParserLike = {};
 
+            // contextually typed against ReaderStateParserLike, so `this` below is inferred
+            // (no explicit `this: any` needed) — same open extension point as the library itself.
             const r: ReaderStateParserLike = {
-
-                init(this: any, name: string, attrs: XmlAttributes) {
+                init(_name: string, _attrs: XmlAttributes) {
                     this.value = 0;
                 },
 
-                finish(this: any) {
-                    this.value = parseFunc.call(this, this.text);
+                finish() {
+                    this.value = parseFunc(this.text);
                     // xx console.log("xxx.... parser, ", this.value);
                 }
             };
@@ -139,24 +142,21 @@ describe("XMLToJSON", () => {
             return _parser;
         }
 
-        function ListOf1(
-            dataType: string,
-            parseFunc: any
-        ) {
+        function ListOf1(dataType: string, parseFunc: ParseFunc): ReaderStateParserLike {
             return {
-                init(this: any) {
+                init() {
                     this.listData = [];
                 },
 
                 parser: BasicType_parser1(dataType, parseFunc),
 
-                finish(this: any) {
+                finish() {
                     this.parent.array = {
                         value: this.listData
                     };
                     // xx console.log("xxx.... finish, ", this.parent.parent);
                 },
-                endElement(this: any, element: string) {
+                endElement(_element: string) {
                     this.listData.push(this.parser[dataType].value);
                     // xx console.log("xxx.... endElement, ", this.listData);
                 }
@@ -184,14 +184,8 @@ describe("XMLToJSON", () => {
                 <uax:Float>32</uax:Float>
                 <uax:Float>33</uax:Float>
             </uax:ListOfFloat>
-        </Value>`, () => {
-            done();
-        });
-
+        </Value>`
+        );
     });
-    it("should parse a array 2", (done: ErrorCallback) => {
-
-        done();
-    });
+    it("should parse a array 2", () => {});
 });
-

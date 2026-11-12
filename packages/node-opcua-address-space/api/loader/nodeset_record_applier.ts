@@ -1,0 +1,946 @@
+/**
+ * @module node-opcua-address-space
+ *
+ * The consumer that turns {@link NodesetRecord}s into nodes of an address space: it registers
+ * the namespaces the header declares, translates every id from the file's namespace table to
+ * the address space's, applies the loader options, creates the node and queues the post-load
+ * tasks (values, extension objects, data-type registration) that run once every document is in.
+ */
+import type {
+    AddReferenceTypeOptions,
+    BaseNode,
+    CreateNodeOptions,
+    IAddressSpace,
+    UADataType,
+    UAReference,
+    UAVariable,
+    UAVariableType
+} from "node-opcua-address-space-base";
+import { assert } from "node-opcua-assert";
+import { StatusCodes } from "node-opcua-basic-types";
+import {
+    type AccessLevelFlag,
+    type AccessRestrictionsFlag,
+    coerceLocalizedText,
+    makeAccessLevelFlag,
+    makeAccessRestrictionsFlag,
+    NodeClass,
+    QualifiedName
+} from "node-opcua-data-model";
+import { checkDebugFlag, make_debugLog, make_errorLog } from "node-opcua-debug";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import { getBuiltInType } from "node-opcua-factory";
+import { NodeId, resolveNodeId } from "node-opcua-nodeid";
+import { Argument, type RolePermissionTypeOptions } from "node-opcua-types";
+import { DataType, VariantArrayType, type VariantOptions } from "node-opcua-variant";
+import semver from "semver";
+import type { AddressSpacePrivate } from "../../impl/address_space_private.js";
+import type { NamespacePrivate } from "../../impl/namespace_private.js";
+import { isMassivelyUsedReferenceType, ReferenceImpl } from "../../impl/reference_impl.js";
+import type { UAVariableImpl } from "../../impl/ua_variable_impl.js";
+import type { NodeSetLoaderOptions } from "../interfaces/nodeset_loader_options.js";
+import { makeSemverCompatible } from "./make_semver_compatible.js";
+import {
+    type NodesetHeaderRecord,
+    type NodesetModelRecord,
+    type NodesetNodeRecord,
+    type NodesetRecord,
+    type NodesetRecordConsumer,
+    XmlExtensionObjectFragment
+} from "./nodeset_record.js";
+import { createXMLExtensionObjectDecodingTask } from "./parsers/extension_object_parser.js";
+
+const doDebug = checkDebugFlag("load_nodeset2");
+const debugLog = make_debugLog("load_nodeset2");
+const errorLog = make_errorLog("load_nodeset2");
+
+export type Task = (addressSpace: IAddressSpace) => Promise<void>;
+
+/** the work deferred until every document is loaded, in the order it runs */
+export interface LoaderTaskQueues {
+    postTasks: Task[];
+    postTasks0_InitializeVariable: Task[];
+    postTasks0_DecodePojoString: Task[];
+    postTasks1_InitializeVariable: Task[];
+    postTasks2_AssignedExtensionObjectToDataValue: Task[];
+    pendingSimpleTypeToRegister: { name: string; dataTypeNodeId: NodeId }[];
+}
+export function makeLoaderTaskQueues(): LoaderTaskQueues {
+    return {
+        postTasks: [],
+        postTasks0_InitializeVariable: [],
+        postTasks0_DecodePojoString: [],
+        postTasks1_InitializeVariable: [],
+        postTasks2_AssignedExtensionObjectToDataValue: [],
+        pendingSimpleTypeToRegister: []
+    };
+}
+
+function convertAccessLevel(accessLevel?: string | null): AccessLevelFlag {
+    const accessLevelN: number = parseInt(accessLevel || "1", 10); // CurrentRead if not specified
+    return makeAccessLevelFlag(accessLevelN);
+}
+
+/**
+ * the XSD gives UserAccessLevel a default of 1, but a nodeset that raises AccessLevel and stays
+ * silent on UserAccessLevel means "the user may do whatever the node allows", not "read only".
+ * Falling back on accessLevel is what every other stack does and what node-opcua has always done;
+ * what changes here is that an *explicit* UserAccessLevel is no longer dropped.
+ */
+function convertUserAccessLevel(userAccessLevel: string | null | undefined, accessLevel: AccessLevelFlag): AccessLevelFlag {
+    if (userAccessLevel === undefined || userAccessLevel === null || userAccessLevel === "") {
+        return accessLevel;
+    }
+    return convertAccessLevel(userAccessLevel);
+}
+
+function convertAccessRestrictions(accessRestrictions?: string | null): AccessRestrictionsFlag | undefined {
+    if (accessRestrictions === undefined || accessRestrictions === null || accessRestrictions === "") {
+        // undefined is not None: it means "inherit the namespace default"
+        return undefined;
+    }
+    const value = parseInt(accessRestrictions, 10);
+    if (Number.isNaN(value)) {
+        errorLog("load_nodeset2: ignoring invalid AccessRestrictions attribute", accessRestrictions);
+        return undefined;
+    }
+    return makeAccessRestrictionsFlag(value);
+}
+
+function makeDefaultVariant(
+    addressSpace: IAddressSpace,
+    dataTypeNode: NodeId,
+    valueRank: number,
+    arrayDimensions?: number[] | null
+): VariantOptions | undefined {
+    let variant: VariantOptions = { dataType: DataType.Null };
+
+    const nodeDataType = addressSpace.findNode(dataTypeNode) as UADataType;
+    if (nodeDataType?.basicDataType) {
+        const basicDataType = nodeDataType.basicDataType;
+        if (basicDataType === DataType.Variant) {
+            // the DataType is BaseDataType, or an abstract type that resolves to it, so there is
+            // no concrete default to synthesise. That is the same situation as a Variable whose
+            // DataType the document never stated, and it now gets the same answer: a null value
+            // waiting for its first update.
+            //
+            // Returning undefined here left the variable on the constructor's
+            // UncertainInitialValue, so two documents that say the same thing disagreed about the
+            // status code of a value neither of them carries -- an omitted DataType against an
+            // explicit i=24, which is the XSD default for that very attribute.
+            return { dataType: DataType.Null };
+        }
+
+        if (basicDataType === DataType.ExtensionObject) {
+            return { dataType: DataType.ExtensionObject, value: null };
+        }
+        const builtInType = getBuiltInType(DataType[basicDataType]);
+        if (builtInType === undefined || builtInType === null) {
+            errorLog("Cannot find builtInType for ", basicDataType);
+            return { dataType: DataType.Null };
+        }
+        const dv = builtInType.defaultValue;
+        const value = typeof dv === "function" ? dv() : dv;
+
+        let arrayType: VariantArrayType;
+        /*
+         *  * n > 1                     : the Value is an array with the specified number of dimensions.
+         *  * OneDimension (1):           The value is an array with one dimension.
+         *  * OneOrMoreDimensions (0):    The value is an array with one or more dimensions.
+         *  * Scalar (-1):                The value is not an array.
+         *  * Any (-2):                   The value can be a scalar or an array with any number of dimensions.
+         *  * ScalarOrOneDimension (-3):  The value can be a scalar or a one dimensional array.
+         */
+        switch (valueRank) {
+            case -3: //  ScalarOrOneDimension (-3):
+            case -2: // any
+            case -1:
+                arrayType = VariantArrayType.Scalar;
+                variant = { dataType: basicDataType, value, arrayType };
+                break;
+            case 0: // one or more dimension
+            case 1: // one dimension
+                arrayType = VariantArrayType.Array;
+                variant = { dataType: basicDataType, value: [], arrayType };
+                break;
+            default:
+                arrayType = VariantArrayType.Matrix;
+                variant = { dataType: basicDataType, value: [], arrayType, dimensions: arrayDimensions };
+                break;
+        }
+    }
+    return variant;
+}
+
+/**
+ * a Matrix variant is "uninitialized" when it carries no element (value=[]) but declares
+ * non-zero dimensions (e.g. ArrayDimensions="256,128"). Such a variant is internally inconsistent
+ * (value.length !== product(dimensions)) and, if serialized, produces a spec-violating wire form.
+ */
+function isUninitializedMatrix(value: VariantOptions): boolean {
+    if (value.arrayType !== VariantArrayType.Matrix) {
+        return false;
+    }
+    const length = Array.isArray(value.value) ? value.value.length : 0;
+    if (length !== 0) {
+        return false;
+    }
+    const dimensions = value.dimensions;
+    if (!dimensions || dimensions.length === 0) {
+        return false;
+    }
+    const product = dimensions.reduce((n, p) => n * p, 1);
+    return product > 0;
+}
+
+/**
+ * a <Definition> Name worth keeping on the node: one the document spelled bare. A "<n>:Name" is a
+ * namespace index into the writing document's own table, which means nothing in any other document,
+ * so it is dropped here and rebuilt from the browse name when a document is written back out.
+ */
+function definitionNameToKeep(name: string | undefined): string | undefined {
+    if (!name || /^[0-9]+:/.test(name)) return undefined;
+    return name;
+}
+
+const UA_NAMESPACE_URI = "http://opcfoundation.org/UA/";
+const reg = /ns=([0-9]+);(.*)/;
+
+interface INodePermissions {
+    accessRestrictions?: AccessRestrictionsFlag;
+    /** what the document declared, whatever this loader enforces; see BaseNode */
+    declaredAccessRestrictions?: string;
+    rolePermissions?: RolePermissionTypeOptions[];
+}
+
+/** see NodesetRecordApplier.takePendingBackReferences */
+export interface PendingBackReferences {
+    /** nodes whose document said which of their references are one-sided: nothing else to propagate */
+    settled: Set<BaseNode>;
+    /** the one-sided references, with the node holding each */
+    references: Array<[BaseNode, UAReference]>;
+}
+
+export class NodesetRecordApplier implements NodesetRecordConsumer {
+    /** the back references the load owes, and the nodes it owes nothing else for; see takePendingBackReferences */
+    private pending: PendingBackReferences = { settled: new Set(), references: [] };
+
+    private readonly addressSpace: AddressSpacePrivate;
+    private readonly applyRolePermissions: boolean;
+    private readonly applyAccessRestrictions: boolean;
+
+    // per document: the file's namespace table to the address space's, and what was translated
+    private table: number[] = [];
+    private aliasMap = new Map<string, NodeId>();
+    private translatedStrings = new Map<string, NodeId>();
+    private translatedIds = new Map<number | string, NodeId>();
+    private headerSeen = false;
+
+    constructor(
+        addressSpace: IAddressSpace,
+        private readonly options: NodeSetLoaderOptions,
+        private readonly queues: LoaderTaskQueues
+    ) {
+        this.addressSpace = addressSpace as AddressSpacePrivate;
+        // two independent switches: who may do what is a property of the model and applies by
+        // default, whereas how the channel must be secured is a property of the deployment and
+        // is opt-in. See NodeSetLoaderOptions.
+        this.applyRolePermissions = (options.permissions ?? "apply") === "apply";
+        this.applyAccessRestrictions = (options.accessRestrictions ?? "ignore") === "apply";
+    }
+
+    public apply(record: NodesetRecord): void {
+        if (record.kind === "header") {
+            this.applyHeader(record);
+            return;
+        }
+        if (!this.headerSeen) {
+            throw new Error("NodesetRecordApplier: a node record came before the header record");
+        }
+        this.applyNode(record);
+    }
+
+    // #region header: namespaces, translation table, aliases
+    private applyHeader(header: NodesetHeaderRecord): void {
+        this.table = [];
+        this.aliasMap.clear();
+        this.translatedStrings.clear();
+        this.translatedIds.clear();
+        this.headerSeen = true;
+
+        for (const model of header.models) {
+            this.addNamespace(model);
+        }
+        if (header.models.length === 0) {
+            // special case for old nodeset file version 1.02 where no models exists
+            for (const namespaceUri of header.namespaceUris) {
+                if (this.addressSpace.getNamespace(namespaceUri)) {
+                    continue;
+                }
+                this.addNamespace({ modelUri: namespaceUri, version: "1.0.0", requiredModels: [] });
+            }
+        }
+        // the file's table: the UA namespace, then the declared URIs in order. A URI that repeats
+        // (the UA namespace listed again) takes no slot, as it never did.
+        const found = new Set<string>();
+        for (const namespaceUri of [UA_NAMESPACE_URI, ...header.namespaceUris]) {
+            if (found.has(namespaceUri)) {
+                continue;
+            }
+            found.add(namespaceUri);
+            const namespace = this.addressSpace.getNamespace(namespaceUri);
+            /* c8 ignore next */
+            if (!namespace) {
+                throw new Error(
+                    `cannot find namespace for ${namespaceUri}\nplease make sure to initialize your address space with the corresponding nodeset files`
+                );
+            }
+            doDebug &&
+                debugLog(
+                    " _register_namespace_uri = ",
+                    namespaceUri,
+                    "index in Xml=",
+                    this.table.length,
+                    " index in addressSpace",
+                    namespace.index
+                );
+            this.table.push(namespace.index);
+        }
+        for (const [aliasName, fileLocal] of Object.entries(header.aliases)) {
+            const nodeId = this.translate(fileLocal);
+            this.aliasMap.set(aliasName, nodeId);
+            this.addressSpace.getNamespace(nodeId.namespace).addAlias(aliasName, nodeId);
+        }
+    }
+
+    private addNamespace(model: NodesetModelRecord): NamespacePrivate {
+        const addressSpace = this.addressSpace;
+        if (model.requiredModels.length > 0) {
+            // check that required models exist already in the address space
+            for (const requiredModel of model.requiredModels) {
+                const existingNamespace = addressSpace.getNamespace(requiredModel.modelUri);
+
+                // c8 ignore next
+                if (!existingNamespace) {
+                    errorLog(
+                        "Please ensure that the required namespace",
+                        requiredModel.modelUri,
+                        "is loaded first when loading",
+                        model.modelUri
+                    );
+                    throw new Error(`LoadNodeSet : Cannot find namespace for ${requiredModel.modelUri}`);
+                }
+                /**
+                 *  from https://reference.opcfoundation.org/Core/docs/Part6/F.2/
+                 *  The version of the model defined in the UANodeSet.
+                 *  This is a human-readable string and not intended for programmatic comparisons.
+                 */
+                const isLowerVersion = (existingVersion: string, requiredVersion: string): boolean => {
+                    const existingSemver = makeSemverCompatible(existingVersion);
+                    const requiredSemver = makeSemverCompatible(requiredVersion);
+                    return semver.lt(existingSemver, requiredSemver);
+                };
+
+                if (isLowerVersion(existingNamespace.version, requiredModel.version)) {
+                    errorLog(
+                        "Expecting ",
+                        requiredModel.modelUri,
+                        " with version to be at least",
+                        requiredModel.version,
+                        " but namespace version is ",
+                        existingNamespace.version
+                    );
+                }
+                if (existingNamespace.publicationDate.getTime() < requiredModel.publicationDate.getTime()) {
+                    errorLog(
+                        "Expecting ",
+                        requiredModel.modelUri,
+                        " with publicationDate at least ",
+                        requiredModel.publicationDate.toUTCString(),
+                        " but namespace publicationDate is ",
+                        existingNamespace.publicationDate.toUTCString()
+                    );
+                }
+            }
+        }
+
+        let namespace: NamespacePrivate;
+        // Model must not be already registered
+        const existingNamespace = addressSpace.getNamespace(model.modelUri);
+        if (existingNamespace) {
+            namespace = existingNamespace;
+        } else {
+            namespace = addressSpace.registerNamespace(model.modelUri);
+            namespace.setRequiredModels(model.requiredModels);
+        }
+
+        namespace.version = model.version;
+        namespace.publicationDate = model.publicationDate || namespace.publicationDate;
+        return namespace;
+    }
+    // #endregion
+
+    // #region translation
+    private translateNamespaceIndex(fileIndex: number): number {
+        const namespaceIndex = this.table[fileIndex];
+        // c8 ignore next
+        if (namespaceIndex === undefined) {
+            errorLog("Error; namespace_uri_translation", this.table);
+            throw new Error(`_translateNamespaceIndex() ! Cannot find namespace definition for index ${fileIndex}`);
+        }
+        return namespaceIndex;
+    }
+
+    /** a file-local id to the address space's, built once per distinct id */
+    private translate(fileLocal: NodeId): NodeId {
+        const value = fileLocal.value;
+        const key =
+            typeof value === "number"
+                ? fileLocal.namespace * 4294967296 + value
+                : `${fileLocal.namespace}|${fileLocal.identifierType}|${String(value)}`;
+        let nodeId = this.translatedIds.get(key);
+        if (!nodeId) {
+            const namespace = this.translateNamespaceIndex(fileLocal.namespace);
+            nodeId = namespace === fileLocal.namespace ? fileLocal : new NodeId(fileLocal.identifierType, value, namespace);
+            this.translatedIds.set(key, nodeId);
+        }
+        return nodeId;
+    }
+    private translateOrNull(fileLocal: NodeId | null | undefined): NodeId | null {
+        return fileLocal ? this.translate(fileLocal) : null;
+    }
+    private translateQualifiedName(fileLocal: QualifiedName): QualifiedName {
+        return new QualifiedName({ namespaceIndex: this.translateNamespaceIndex(fileLocal.namespaceIndex), name: fileLocal.name });
+    }
+
+    /**
+     * an id given as text, the way the XML body of a deferred extension object carries them:
+     * an alias, or `ns=<file index>;...`
+     */
+    private readonly translateString = (text: string): NodeId => {
+        const aliased = this.aliasMap.get(text);
+        if (aliased) {
+            return aliased;
+        }
+        const translated = this.translatedStrings.get(text);
+        if (translated) {
+            return translated;
+        }
+        let nodeIdString = text;
+        const m = text.match(reg);
+        if (m) {
+            nodeIdString = `ns=${this.translateNamespaceIndex(parseInt(m[1], 10))};${m[2]}`;
+        }
+        const result = resolveNodeId(nodeIdString);
+        this.translatedStrings.set(text, result);
+        return result;
+    };
+
+    /**
+     * the ids a value may hold, by data type; everything else passes through. A record is not
+     * the applier's to change: another consumer may read it after this one, so what is
+     * translated is a copy
+     */
+    private translateValue(value: VariantOptions): VariantOptions {
+        const mapValue = (fix: (e: unknown) => unknown): VariantOptions => ({
+            ...value,
+            value: Array.isArray(value.value) ? value.value.map(fix) : fix(value.value)
+        });
+        switch (value.dataType) {
+            case DataType.NodeId:
+            case DataType.ExpandedNodeId:
+                return mapValue((e) => (e instanceof NodeId ? this.translate(e) : e));
+            case DataType.QualifiedName:
+                return mapValue((q) => {
+                    if (q && typeof q === "object" && typeof (q as QualifiedName).namespaceIndex === "number") {
+                        return new QualifiedName({
+                            namespaceIndex: this.translateNamespaceIndex((q as QualifiedName).namespaceIndex),
+                            name: (q as QualifiedName).name
+                        });
+                    }
+                    return q;
+                });
+            case DataType.ExtensionObject:
+                return mapValue((e) => {
+                    if (e instanceof Argument && e.dataType instanceof NodeId) {
+                        const argument = new Argument({});
+                        argument.name = e.name;
+                        argument.dataType = this.translate(e.dataType);
+                        argument.valueRank = e.valueRank;
+                        argument.arrayDimensions = e.arrayDimensions;
+                        argument.description = e.description;
+                        return argument;
+                    }
+                    return e;
+                });
+            default:
+                return value;
+        }
+    }
+    // #endregion
+
+    // #region nodes
+    private canIgnore(record: NodesetNodeRecord): boolean {
+        if (record.releaseStatus === "Draft" && !this.options.loadDraftNodes) {
+            // c8 ignore next
+            doDebug && debugLog("Ignoring Draft            =", NodeClass[record.nodeClass], record.browseName.toString());
+            return true;
+        }
+        if (record.releaseStatus === "Deprecated" && !this.options.loadDeprecatedNodes) {
+            // c8 ignore next
+            doDebug && debugLog("Ignoring Deprecate        =", NodeClass[record.nodeClass], record.browseName.toString());
+            return true;
+        }
+        return false;
+    }
+
+    private permissions(record: NodesetNodeRecord): INodePermissions {
+        let rolePermissions: RolePermissionTypeOptions[] | undefined;
+        if (this.applyRolePermissions) {
+            if (record.rolePermissions) {
+                rolePermissions = record.rolePermissions.map((r) => ({
+                    roleId: this.translate(r.roleId),
+                    permissions: r.permissions
+                }));
+            } else if (record.hasNoPermissions) {
+                // HasNoPermissions="true" is not the same as an absent <RolePermissions>: the former
+                // grants nothing at all, the latter inherits the namespace default. An empty array
+                // is how BaseNode distinguishes the two.
+                rolePermissions = [];
+            }
+        }
+        return {
+            accessRestrictions: this.applyAccessRestrictions ? convertAccessRestrictions(record.accessRestrictions) : undefined,
+            // kept whatever the option says: the option governs what is enforced, not what the
+            // document declared, and an exporter needs the latter
+            declaredAccessRestrictions: record.accessRestrictions,
+            rolePermissions
+        };
+    }
+
+    private common(record: NodesetNodeRecord) {
+        return {
+            nodeClass: record.nodeClass,
+            nodeId: record.nodeId.isEmpty() ? null : this.translate(record.nodeId),
+            browseName: this.translateQualifiedName(record.browseName),
+            references: this.references(record),
+            // documentation, not behaviour, but the document said it and it must survive the trip
+            releaseStatus: record.releaseStatus,
+            nodesetDocumentation: record.documentation,
+            nodesetCategory: record.category,
+            designToolOnly: record.designToolOnly,
+            ...this.permissions(record)
+        };
+    }
+
+    /** the node's references as the node will hold them, one per reference of the record, in its order */
+    private references(record: NodesetNodeRecord): UAReference[] {
+        return record.references.map(
+            (r) =>
+                new ReferenceImpl({
+                    isForward: r.isForward,
+                    nodeId: this.translate(r.nodeId),
+                    referenceType: this.translate(r.referenceType)
+                })
+        );
+    }
+
+    /**
+     * what the end of the load must do about the inverses of a node's references: a reference the
+     * document marks as not declared from the other end is kept for one propagation, and the node
+     * is settled; a node whose references carry no such information is left to the end-of-load
+     * sweep, which propagates it whole. `references` are those built by {@link references} from
+     * the same record, in the same order.
+     */
+    private settle(node: BaseNode, record: NodesetNodeRecord, references: UAReference[]): void {
+        const pending: UAReference[] = [];
+        for (let i = 0; i < references.length; i++) {
+            const declared = record.references[i].inverseDeclared;
+            if (declared === undefined) {
+                return;
+            }
+            if (!declared && !isMassivelyUsedReferenceType(references[i].referenceType)) {
+                pending.push(references[i]);
+            }
+        }
+        this.pending.settled.add(node);
+        for (const reference of pending) {
+            this.pending.references.push([node, reference]);
+        }
+    }
+
+    /**
+     * what the end of the load must do about back references: the one-sided references of the
+     * settled nodes, to propagate one by one, and the settled nodes themselves, which the sweep
+     * over every node skips. Taken once by the loader's terminate step and dropped after it: the
+     * set lives for the load, not on the nodes
+     */
+    public takePendingBackReferences(): PendingBackReferences {
+        const pending = this.pending;
+        this.pending = { settled: new Set(), references: [] };
+        return pending;
+    }
+
+    private createNode(params: CreateNodeOptions, record: NodesetNodeRecord): BaseNode {
+        // c8 ignore next
+        if (!(params.nodeId instanceof NodeId)) {
+            throw new Error("invalid param expecting a valid nodeId");
+        } // already translated
+        const namespace = this.addressSpace.getNamespace(params.nodeId.namespace);
+        const node = namespace.internalCreateNode(params) as BaseNode;
+        // Whether the document declared ArrayDimensions at all. node-opcua synthesizes [0] on the
+        // variables it generates itself -- EnumStrings, the variables it materializes from a
+        // structure's fields -- so [0] on a node means either "the document said 0" or "nobody
+        // said anything", and an exporter that cannot tell them apart must either invent the
+        // attribute everywhere or drop it everywhere. Recorded here, where the document is still
+        // in hand, rather than guessed at afterwards
+        if (record.arrayDimensions !== undefined && record.arrayDimensions !== null) {
+            (node as { arrayDimensionsWereDeclared?: boolean }).arrayDimensionsWereDeclared = true;
+        }
+        this.settle(node, record, params.references as UAReference[]);
+        return node;
+    }
+
+    private applyNode(record: NodesetNodeRecord): void {
+        if (this.canIgnore(record)) {
+            return;
+        }
+        switch (record.nodeClass) {
+            case NodeClass.Object:
+                this.createNode(
+                    {
+                        ...this.common(record),
+                        parentNodeId: this.translateOrNull(record.parentNodeId),
+                        isAbstract: record.isAbstract,
+                        eventNotifier: record.eventNotifier,
+                        symbolicName: record.symbolicName ?? null,
+                        displayName: record.displayName,
+                        description: record.description
+                    } as CreateNodeOptions,
+                    record
+                );
+                return;
+            case NodeClass.ObjectType:
+                this.createNode(
+                    {
+                        ...this.common(record),
+                        isAbstract: record.isAbstract,
+                        eventNotifier: record.eventNotifier,
+                        displayName: record.displayName,
+                        description: record.description
+                    } as CreateNodeOptions,
+                    record
+                );
+                return;
+            case NodeClass.ReferenceType: {
+                const params = {
+                    ...this.common(record),
+                    isAbstract: record.isAbstract,
+                    symmetric: !!record.symmetric,
+                    displayName: record.displayName,
+                    description: record.description,
+                    inverseName: record.inverseName
+                } as unknown as AddReferenceTypeOptions;
+                // c8 ignore next
+                if (!(params.nodeId instanceof NodeId)) {
+                    throw new Error("invalid param");
+                } // already translated
+                const node = this.addressSpace.getNamespace(params.nodeId.namespace).addReferenceType(params);
+                this.settle(node, record, params.references as UAReference[]);
+                return;
+            }
+            case NodeClass.DataType:
+                this.applyDataType(record);
+                return;
+            case NodeClass.Variable:
+                this.applyVariable(record);
+                return;
+            case NodeClass.VariableType:
+                this.applyVariableType(record);
+                return;
+            case NodeClass.Method:
+                this.createNode(
+                    {
+                        ...this.common(record),
+                        parentNodeId: this.translateOrNull(record.parentNodeId),
+                        methodDeclarationId: this.translateOrNull(record.methodDeclarationId),
+                        displayName: record.displayName,
+                        description: record.description
+                    } as CreateNodeOptions,
+                    record
+                );
+                return;
+            case NodeClass.View:
+                this.createNode(
+                    {
+                        ...this.common(record),
+                        containsNoLoops: record.containsNoLoops,
+                        eventNotifier: record.eventNotifier,
+                        displayName: record.displayName,
+                        description: record.description
+                    } as CreateNodeOptions,
+                    record
+                );
+                return;
+            default:
+                throw new Error(`NodesetRecordApplier: unexpected node class ${record.nodeClass}`);
+        }
+    }
+
+    private applyDataType(record: NodesetNodeRecord): void {
+        const fields = (record.definition?.fields ?? []).map((field) => ({
+            ...field,
+            dataType: field.dataType ? this.translate(field.dataType) : null
+        }));
+        const params = {
+            ...this.common(record),
+            nodeId: record.nodeId.isEmpty() ? undefined : this.translate(record.nodeId),
+            isAbstract: record.isAbstract || false,
+            displayName: record.displayName ?? "",
+            description: record.description ?? "",
+            symbolicName: record.symbolicName,
+            partialDefinition: fields,
+            // the address space models no OptionSet, so the flag and the fields above are all that
+            // is left of the declaration; without them the DataType cannot be written back out
+            isOptionSet: record.definition?.isOptionSet,
+            isUnion: record.definition?.isUnion,
+            // the <Definition> Name, but only when the document spelled it bare. The catalogue uses
+            // both spellings, and a "<n>:Name" prefix is an index into the table of the document
+            // that wrote it -- carrying it into another document would name a different namespace,
+            // so a prefixed name is left to be recomputed from the browse name on the way out
+            definitionName: definitionNameToKeep(record.definition?.name)
+        } as unknown as CreateNodeOptions;
+
+        let capturedDataTypeNode: UADataType | undefined = this.createNode(params, record) as UADataType;
+        const queues = this.queues;
+        const processBasicDataType = async (_addressSpace2: IAddressSpace) => {
+            if (!capturedDataTypeNode) return;
+            const definitionName = capturedDataTypeNode.browseName.name || "";
+            const isStructure = capturedDataTypeNode.isStructure();
+            const isEnumeration = capturedDataTypeNode.isEnumeration();
+            if (!isEnumeration && !isStructure && capturedDataTypeNode.nodeId.namespace !== 0) {
+                // add a custom basic type that is not a structure nor a enumeration
+                queues.pendingSimpleTypeToRegister.push({ name: definitionName, dataTypeNodeId: capturedDataTypeNode.nodeId });
+            }
+            capturedDataTypeNode = undefined;
+        };
+        queues.postTasks.push(processBasicDataType);
+    }
+
+    /**
+     * the value of a record, translated, with the extension objects still waiting as XML replaced
+     * by null and their decode queued; the deferred getter yields them once decoded
+     */
+    private prepareValue(record: NodesetNodeRecord, value: VariantOptions): VariantOptions {
+        value = this.translateValue(value);
+        if (value.dataType !== DataType.ExtensionObject) {
+            return value;
+        }
+        const nodeId = record.nodeId.isEmpty() ? NodeId.nullNodeId : this.translate(record.nodeId);
+        const translateString = this.translateString;
+        if (value.value instanceof XmlExtensionObjectFragment) {
+            const fragment = value.value;
+            let captured: ExtensionObject | null = null;
+            this.queues.postTasks0_DecodePojoString.push(
+                createXMLExtensionObjectDecodingTask(
+                    translateString,
+                    this.translate(fragment.typeId),
+                    fragment.bodyXML,
+                    (extensionObject) => {
+                        captured = extensionObject;
+                    }
+                )
+            );
+            this.assignExtensionObjectLater(nodeId, () => captured);
+            return { dataType: DataType.ExtensionObject, arrayType: VariantArrayType.Scalar, value: null };
+        }
+        if (Array.isArray(value.value) && value.value.some((e) => e instanceof XmlExtensionObjectFragment)) {
+            const list: (ExtensionObject | null)[] = value.value.map((e) => (e instanceof XmlExtensionObjectFragment ? null : e));
+            value.value.forEach((e, index) => {
+                if (!(e instanceof XmlExtensionObjectFragment)) return;
+                this.queues.postTasks0_DecodePojoString.push(
+                    createXMLExtensionObjectDecodingTask(
+                        translateString,
+                        this.translate(e.typeId),
+                        e.bodyXML,
+                        (extensionObject) => {
+                            list[index] = extensionObject;
+                        }
+                    )
+                );
+            });
+            this.assignExtensionObjectLater(nodeId, () => list as ExtensionObject[]);
+            return { dataType: DataType.ExtensionObject, arrayType: VariantArrayType.Array, value: null };
+        }
+        return value;
+    }
+
+    private assignExtensionObjectLater(nodeId: NodeId, deferred: () => ExtensionObject | ExtensionObject[] | null): void {
+        // let's create the mechanism that postpone the assignment of the extension object
+        const task = async (addressSpace2: IAddressSpace) => {
+            const extensionObjOrArray = deferred();
+            assert(nodeId, "expecting a nodeid");
+            const node = addressSpace2.findNode(nodeId);
+            if (!node) return;
+
+            if (node.nodeClass === NodeClass.Variable) {
+                const v = node as UAVariable;
+                assert(v.getBasicDataType() === DataType.ExtensionObject, "expecting an extension object");
+                if (extensionObjOrArray != null) {
+                    v.bindExtensionObject(extensionObjOrArray, { createMissingProp: false });
+                }
+            } else if (node.nodeClass === NodeClass.VariableType) {
+                const v = node as UAVariableType;
+                (v as unknown as { value: { value: unknown } }).value.value = extensionObjOrArray;
+            }
+        };
+        this.queues.postTasks2_AssignedExtensionObjectToDataValue.push(task);
+    }
+
+    private variableCommon(record: NodesetNodeRecord) {
+        return {
+            ...this.common(record),
+            parentNodeId: this.translateOrNull(record.parentNodeId),
+            dataType: this.translateOrNull(record.dataType),
+            valueRank: record.valueRank ?? -1,
+            arrayDimensions: record.arrayDimensions ?? null,
+            minimumSamplingInterval: record.minimumSamplingInterval ?? 0,
+            displayName: record.displayName !== undefined ? (coerceLocalizedText(record.displayName) ?? undefined) : undefined,
+            description: record.description !== undefined ? (coerceLocalizedText(record.description) ?? undefined) : undefined
+        };
+    }
+
+    private applyVariable(record: NodesetNodeRecord): void {
+        const accessLevel = convertAccessLevel(record.accessLevel);
+        const value = record.value ? this.prepareValue(record, record.value) : undefined;
+        const params = {
+            ...this.variableCommon(record),
+            historizing: record.historizing ?? false,
+            accessLevel,
+            userAccessLevel: convertUserAccessLevel(record.userAccessLevel, accessLevel)
+            // no value here: an empty one made the constructor bind a getter and a setter on every
+            // variable, five closures each; an unbound variable reads and writes through the
+            // defaults, and the value is set below or by a post task once its data type is known
+        } as unknown as CreateNodeOptions;
+
+        const addressSpace = this.addressSpace;
+        let capturedVariable: UAVariable | undefined;
+        // the value can be set now when its data type is already in the address space: nothing
+        // else in the post-load steps runs before it; only an extension object waits for the
+        // data types to be extracted
+        const dataType = this.translateOrNull(record.dataType);
+        const dataTypeReady = dataType !== null && value?.dataType !== DataType.ExtensionObject && this.isDataTypeReady(dataType);
+        if (dataTypeReady) {
+            const variable = this.createNode(params, record) as UAVariable;
+            this.setInitialValueNow(variable, value);
+            return;
+        }
+        if (value && value.dataType !== DataType.Null) {
+            let capturedValue: VariantOptions | undefined = value;
+            const task = async (_addressSpace2: IAddressSpace) => {
+                if (!capturedVariable) return;
+                const cv = capturedVariable;
+                (cv as UAVariableImpl)._setInitialDataValue(capturedValue as VariantOptions);
+                capturedValue = undefined;
+                capturedVariable = undefined;
+            };
+            if (capturedValue.dataType !== DataType.ExtensionObject) {
+                this.queues.postTasks0_InitializeVariable.push(task);
+            } else {
+                // do them later when every thing is created
+                this.queues.postTasks1_InitializeVariable.push(task);
+            }
+        } else {
+            const task = async (_addressSpace2: IAddressSpace) => {
+                if (!capturedVariable) return;
+                const cv = capturedVariable;
+                const defaultValue = makeDefaultVariant(addressSpace, cv.dataType, cv.valueRank, cv.arrayDimensions);
+                if (defaultValue) {
+                    // a Matrix variable declared with fixed ArrayDimensions but no <Value> is built with
+                    // an empty value (value=[]) yet non-zero declared dimensions. This is an *uninitialized*
+                    // and internally inconsistent matrix (value.length !== product(dimensions)). Advertising
+                    // it as Good would put a spec-violating matrix on the wire (ArraySize 0 + non-empty
+                    // ArrayDimensions), so flag it as BadWaitingForInitialData like any other missing value.
+                    if (defaultValue.dataType === DataType.Null || isUninitializedMatrix(defaultValue)) {
+                        (cv as UAVariableImpl)._setInitialDataValue(defaultValue, StatusCodes.BadWaitingForInitialData);
+                    } else {
+                        (cv as UAVariableImpl)._setInitialDataValue(defaultValue, StatusCodes.Good);
+                    }
+                    // this value was made up here, not read from the document: the document said
+                    // nothing, and a usable default is served rather than a Bad status. An exporter
+                    // must not write it back out as though the document had declared it, and the
+                    // status code cannot tell it apart from a value the document really did declare
+                    // -- a declared empty string is Good too. So the fact is recorded on the node
+                    (cv as { valueWasSynthesized?: boolean }).valueWasSynthesized = true;
+                }
+                capturedVariable = undefined;
+            };
+            this.queues.postTasks0_InitializeVariable.push(task);
+        }
+        capturedVariable = this.createNode(params, record) as UAVariable;
+    }
+
+    /** a data type node whose basic type resolves: what an initial value needs to be checked against */
+    private isDataTypeReady(dataType: NodeId): boolean {
+        const node = this.addressSpace.findNode(dataType) as UADataType | null;
+        if (!node || node.nodeClass !== NodeClass.DataType) {
+            return false;
+        }
+        try {
+            return node.basicDataType !== undefined;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * what the "initializing simple variables" post task does, done at creation; a value the
+     * variable refuses is logged and skipped, as the post task would
+     */
+    private setInitialValueNow(variable: UAVariable, value: VariantOptions | undefined): void {
+        try {
+            if (value && value.dataType !== DataType.Null) {
+                (variable as UAVariableImpl)._setInitialDataValue(value);
+                return;
+            }
+            const defaultValue = makeDefaultVariant(
+                this.addressSpace,
+                variable.dataType,
+                variable.valueRank,
+                variable.arrayDimensions
+            );
+            if (defaultValue) {
+                if (defaultValue.dataType === DataType.Null || isUninitializedMatrix(defaultValue)) {
+                    (variable as UAVariableImpl)._setInitialDataValue(defaultValue, StatusCodes.BadWaitingForInitialData);
+                } else {
+                    (variable as UAVariableImpl)._setInitialDataValue(defaultValue, StatusCodes.Good);
+                }
+                // made up here, not read from the document: see the note on the other synthesis site
+                (variable as { valueWasSynthesized?: boolean }).valueWasSynthesized = true;
+            }
+        } catch (err) {
+            errorLog(
+                `[NODE-OPCUA-W36] generateAddressSpace: post-loading task failed during "initializing simple variables" and was skipped: ${(err as Error).message}`
+            );
+        }
+    }
+
+    private applyVariableType(record: NodesetNodeRecord): void {
+        const value = record.value ? this.prepareValue(record, record.value) : undefined;
+        const params = {
+            ...this.variableCommon(record),
+            // a ValueRank of 0 has always been read as Scalar on a variable type; kept
+            valueRank: record.valueRank || -1,
+            // UAVariableType has no Historizing attribute in the XSD: keep it false
+            historizing: false,
+            isAbstract: record.isAbstract,
+            displayName:
+                record.displayName !== undefined ? (coerceLocalizedText(record.displayName || "") ?? undefined) : undefined,
+            description:
+                record.description !== undefined ? (coerceLocalizedText(record.description || "") ?? undefined) : undefined,
+            value
+        } as unknown as CreateNodeOptions;
+        this.createNode(params, record);
+    }
+    // #endregion
+}

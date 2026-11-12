@@ -1,34 +1,23 @@
-// tslint:disable:no-console
 /* global: describe it before after beforeEach afterEach require*/
-import * as fs from "fs";
-import * as path from "path";
-import * as should from "should";
-
+import fs from "node:fs";
 import { BinaryStream } from "node-opcua-binary-stream";
 import { NodeClass } from "node-opcua-data-model";
 import { hexDump } from "node-opcua-debug";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import { makeNodeId } from "node-opcua-nodeid";
 import { CallRequest } from "node-opcua-service-call";
 import { DataType } from "node-opcua-variant";
-
-import {
-    AddressSpace,
-    generateAddressSpace,
-    UAMethod,
-    UAObject
-} from "..";
+import { AddressSpace, type UAObject } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
+import { getAddressSpaceFixture } from "../test_helpers/get_address_space_fixture.js";
 
 const doDebug = false;
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("CallRequest on custom method", () => {
-
     let addressSpace: AddressSpace;
     before(async () => {
         addressSpace = AddressSpace.create();
-        const xml_file = path.join(__dirname,
-          "../test_helpers/test_fixtures/fixuture_nodeset_objects_with_some_methods.xml");
+        const xml_file = getAddressSpaceFixture("fixuture_nodeset_objects_with_some_methods.xml");
         fs.existsSync(xml_file).should.be.eql(true);
         await generateAddressSpace(addressSpace, xml_file);
     });
@@ -39,7 +28,6 @@ describe("CallRequest on custom method", () => {
     });
 
     it("Q3 should encode and decode a method call request", async () => {
-
         const objectId = makeNodeId(999990, 0);
         const methodId = makeNodeId(999992, 0);
 
@@ -54,15 +42,18 @@ describe("CallRequest on custom method", () => {
         inputArguments.should.be.instanceOf(Array);
 
         const callRequest = new CallRequest({
-
-            methodsToCall: [{
-                inputArguments: [{
-                    dataType: DataType.UInt32,
-                    value: [0xAA, 0xAB, 0xAC]
-                }],
-                methodId,
-                objectId
-            }]
+            methodsToCall: [
+                {
+                    inputArguments: [
+                        {
+                            dataType: DataType.UInt32,
+                            value: [0xaa, 0xab, 0xac]
+                        }
+                    ],
+                    methodId,
+                    objectId
+                }
+            ]
         });
 
         const size = callRequest.binaryStoreSize();
@@ -79,6 +70,5 @@ describe("CallRequest on custom method", () => {
         const callRequest_reloaded = new CallRequest();
         stream.rewind();
         callRequest_reloaded.decode(stream);
-
     });
 });

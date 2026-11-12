@@ -1,0 +1,22 @@
+import type { UADataItem, UADataItem_Base } from "node-opcua-nodeset-ua/dist/ua_data_item.js";
+import type { DataType } from "node-opcua-variant";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * Provides a stable address space view from the
+ * user point of view even if the ADI server address
+ * space changes, after the new configuration is
+ * loaded.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/ADI/                            |
+ * |nodeClass       |VariableType                                                |
+ * |typedDefinition |ProcessVariableType i=2008                                  |
+ * |dataType        |Variant                                                     |
+ * |dataType Name   |(VariantOptions | VariantOptions[]) i=24                    |
+ * |value rank      |-2                                                          |
+ * |isAbstract      |false                                                       |
+ */
+export type UAProcessVariable_Base<T, DT extends DataType> = UADataItem_Base<T, DT>;
+export interface UAProcessVariable<T, DT extends DataType> extends UADataItem<T, DT>, UAProcessVariable_Base<T, DT> {}

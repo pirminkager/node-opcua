@@ -1,9 +1,6 @@
 /**
  * @module node-opcua-basic-types
  */
-import { assert } from "node-opcua-assert";
-import * as _ from "underscore";
-
 export enum AttributeIds {
     NodeId = 1,
     NodeClass = 2,
@@ -33,15 +30,22 @@ export enum AttributeIds {
     UserRolePermissions = 25,
     AccessRestrictions = 26,
     AccessLevelEx = 27,
-    LAST = 27,
     INVALID = 999
 }
+const AttributeIds_LAST = AttributeIds.AccessLevelEx;
 
-// deprecated use getAttributeName(attributeId: AttributeIds);
-export const attributeNameById = _.invert(AttributeIds);
-
-export function isValidAttributeId(attributeId: any) {
-    assert(_.isFinite(attributeId));
-    return attributeId >= 1 && attributeId <= AttributeIds.LAST;
+// see https://github.com/you-dont-need/You-Dont-Need-Lodash-Underscore/issues/296
+function invert(a: { [key: string]: string | number }) {
+    return Object.entries(a).reduce(
+        (c, [k, v]) => {
+            c[v] = k;
+            return c;
+        },
+        {} as { [key: string]: string | number }
+    );
 }
+export const attributeNameById = invert(AttributeIds);
 
+export function isValidAttributeId(attributeId: number): boolean {
+    return attributeId >= 1 && attributeId <= AttributeIds_LAST;
+}

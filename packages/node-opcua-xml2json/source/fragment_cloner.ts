@@ -1,0 +1,61 @@
+import type { IReaderState, Xml2Json, XmlAttributes } from "./xml2json.js";
+
+interface XmlWriter {
+    startElement(elementName: string): this;
+
+    endElement(): this;
+
+    writeAttribute(attributeName: string, attributeValue: string | number): this;
+
+    writeComment(comment: string): this;
+
+    text(str: string): this;
+}
+
+import XMLWriter from "xml-writer";
+
+export class InternalFragmentClonerReaderState implements IReaderState {
+    private _xw: XmlWriter = new XMLWriter(true);
+    public value: string | null = null;
+    public initLevel = 0;
+    public engine?: Xml2Json;
+
+    // the qualified name, not the stripped tag: this reader exists to reproduce a document, and
+    // `<ua:ModelInfo>` written back as `<ModelInfo>` is an element in a different namespace
+    public _on_startElement(_level: number, elementName: string, attrs: XmlAttributes, qualifiedName?: string): void {
+        this._xw.startElement(qualifiedName ?? elementName);
+        for (const [attName, attValue] of Object.entries(attrs)) {
+            this._xw.writeAttribute(attName, attValue);
+        }
+    }
+    public _on_endElement(level: number, elementName: string, _qualifiedName?: string): void {
+        this._xw.endElement();
+        if (this.initLevel === level) {
+            this.value = this._xw.toString();
+            this.engine?._demote(this, this.engine?.currentLevel, elementName);
+            this.engine = undefined;
+            this._on_finish();
+        }
+    }
+    public _on_init(elementName: string, attrs: XmlAttributes, _parent: IReaderState, level: number, engine: Xml2Json): void {
+        this.engine = engine;
+        this.initLevel = level;
+        this._xw = new XMLWriter(true);
+        this._xw.startElement(elementName);
+        for (const [attName, attValue] of Object.entries(attrs)) {
+            this._xw.writeAttribute(attName, attValue);
+        }
+    }
+
+    public _on_finish(): void {
+        /** */
+    }
+
+    public _on_endElement2(_level: number, _elementName: string): void {
+        /** */
+    }
+
+    public _on_text(text: string): void {
+        this._xw.text(text);
+    }
+}

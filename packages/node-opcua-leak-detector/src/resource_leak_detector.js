@@ -1,16 +1,21 @@
-"use strict";
-Error.stackTraceLimit = Infinity;
+Error.stackTraceLimit = 30;
+import chalk from "chalk";
+import { assert } from "node-opcua-assert";
 
-const assert = require("node-opcua-assert").assert;
-const _ = require("underscore");
-const chalk = require("chalk");
+import { ObjectRegistry } from "node-opcua-object-registry";
+import { checkForMemoryLeak, takeMemorySnapshot } from "./mem_leak_detector.js";
 
-
-const ObjectRegistry = require("node-opcua-object-registry").ObjectRegistry;
-ObjectRegistry.doDebug = true;
 const trace = false;
 
-//trace = true;
+const memLeakDetectionDisabled = process.env.MEM_LEAK_DETECTION_DISABLED === "true";
+if (memLeakDetectionDisabled) {
+    console.log("[LeakDetector] ⚠️  Memory leak detection is disabled");
+} else {
+    // if MEM_LEAK_DETECTION_DISABLED is undefined, inform the user that it exists
+    if (process.env.MEM_LEAK_DETECTION_DISABLED === undefined) {
+        console.log("[LeakDetector] ℹ️  Memory leak detection is enabled. Set MEM_LEAK_DETECTION_DISABLED=true to disable it.");
+    }
+}
 
 function get_stack() {
     const stack = (new Error("Stack Trace recording")).stack.split("\n");
@@ -21,18 +26,17 @@ const monitor_intervals = false;
 
 
 function ResourceLeakDetector() {
-    const self = this;
 
-    self.setIntervalCallCount = 0;
-    self.clearIntervalCallCount = 0;
+    this.setIntervalCallCount = 0;
+    this.clearIntervalCallCount = 0;
 
-    self.setTimeoutCallCount = 0;
-    self.clearTimeoutCallCount = 0;
-    self.honoredTimeoutFuncCallCount = 0;
-    self.setTimeoutCallPendingCount = 0;
+    this.setTimeoutCallCount = 0;
+    this.clearTimeoutCallCount = 0;
+    this.honoredTimeoutFuncCallCount = 0;
+    this.setTimeoutCallPendingCount = 0;
 
-    self.interval_map = {};
-    self.timeout_map = {};
+    this.interval_map = {};
+    this.timeout_map = {};
 }
 
 /**
@@ -41,81 +45,114 @@ function ResourceLeakDetector() {
  * @param info
  * @return {boolean}
  */
-ResourceLeakDetector.prototype.verify_registry_counts = function(info) {
+ResourceLeakDetector.prototype.verify_registry_counts = (info) => {
+    const self = ResourceLeakDetector.singleton;
     const errorMessages = [];
 
-    const self = this;
-
     if (self.clearIntervalCallCount !== self.setIntervalCallCount) {
-        errorMessages.push(" setInterval doesn't match number of clearInterval calls : \n      " +
-            " setIntervalCallCount = " + self.setIntervalCallCount +
-            " clearIntervalCallCount = " + self.clearIntervalCallCount);
+        errorMessages.push(` setInterval doesn't match number of clearInterval calls : \n      ` +
+            ` setIntervalCallCount = ${self.setIntervalCallCount}` +
+            ` clearIntervalCallCount = ${self.clearIntervalCallCount}`);
     }
     if ((self.clearTimeoutCallCount + self.honoredTimeoutFuncCallCount) !== self.setTimeoutCallCount) {
-        errorMessages.push(" setTimeout doesn't match number of clearTimeout or achieved timer calls : \n     " +
-            " setTimeoutCallCount = " + self.setTimeoutCallCount +
-            " clearTimeoutCallCount = " + self.clearTimeoutCallCount +
-            " honoredTimeoutFuncCallCount = " + self.honoredTimeoutFuncCallCount);
+        errorMessages.push(` setTimeout doesn't match number of clearTimeout or achieved timer calls : \n     ` +
+            ` setTimeoutCallCount = ${self.setTimeoutCallCount}` +
+            ` clearTimeoutCallCount = ${self.clearTimeoutCallCount}` +
+            ` honoredTimeoutFuncCallCount = ${self.honoredTimeoutFuncCallCount}`);
     }
     if (self.setTimeoutCallPendingCount !== 0) {
-        errorMessages.push(" setTimeoutCallPendingCount is not zero: some timer are still pending " +
-            self.setTimeoutCallPendingCount);
+        errorMessages.push(` setTimeoutCallPendingCount is not zero: some timer are still pending ${self.setTimeoutCallPendingCount}`);
     }
 
     const monitoredResource = ObjectRegistry.registries;
 
+    // The registries are process-global and outlive any one block, so an absolute
+    // count answers the wrong question: it asks "has anything in this process ever
+    // leaked", and blames whichever block happens to run next. Compare against the
+    // baseline taken in start() instead, so a block is judged on what it leaked.
+    const baseline = self._registryBaseline;
+    const countOf = (res) => res.count() - (baseline ? (baseline.get(res) || 0) : 0);
+
+    let totalLeak = 0;
     for (let i = 0; i < monitoredResource.length; i++) {
         const res = monitoredResource[i];
-        if (res.count() !== 0) {
-            errorMessages.push(" some Resource have not been properly terminated: " + res.toString());
+        if (countOf(res) > 0) {
+            errorMessages.push(chalk.cyan(" some Resource have not been properly terminated: \n"));
+            errorMessages.push(` ${res.toString()}`);
         }
+        totalLeak += Math.max(0, countOf(res));
     }
 
     if (errorMessages.length) {
 
-        //xx        if (info) {
-        //xx            console.log(" TRACE : ", info);
-        //xx        }
-        console.log(errorMessages.join("\n"));
-        console.log("----------------------------------------------- more info");
+        if (!info.silent) {
 
-        console.log("||||||||||||||||||||||||||||||||||||||||||||||||||||||||||    setInterval/clearInterval");
-        _.forEach(self.interval_map, function(value, key) {
-            if (value && !value.disposed) {
-                console.log("key =", key, "value.disposed = ", value.disposed);
-                console.log(value.stack);//.split("\n"));
+            console.log(chalk.bgWhite.red("+----------------------------------------------------------------------------------------+"));
+            console.log(chalk.bgWhite.red("|                         RESOURCE LEAK DETECTED !!!                                     |"));
+            console.log(chalk.bgWhite.red("+----------------------------------------------------------------------------------------+"));
+
+            console.log("----------------------------------------------- more info");
+
+            console.log(chalk.cyan("test filename                    : "), self.ctx ? `${self.ctx.test.parent.file}  ${self.ctx.test.parent.title}` : "???");
+            console.log(chalk.cyan("setInterval/clearInterval leaks  : "), Object.entries(self.interval_map).length);
+            for (const [key, value] of Object.entries(self.interval_map)) {
+                if (value && !value.disposed) {
+                    console.log("key =", key, "value.disposed = ", value.disposed);
+                    console.log(value.stack);
+                }
             }
-        });
-
-
-        console.log("||||||||||||||||||||||||||||||||||||||||||||||||||||||||||    setTimeout/clearTimeout");
-        _.forEach(self.timeout_map, function(value, key) {
-            if (value && !value.disposed) {
-                console.log("setTimeout key =", key, "value.disposed = ", value.disposed);
-                console.log(value.stack);//.split("\n"));
+            console.log(chalk.cyan("setTimeout/clearTimeout leaks    : "), Object.entries(self.timeout_map).length);
+            for (const [key, value] of Object.entries(self.timeout_map)) {
+                if (value && !value.disposed) {
+                    console.log("setTimeout key =", key, "value.disposed = ", value.disposed);
+                    console.log(value.stack);
+                }
             }
-        });
+            console.log(chalk.cyan("object leaks                     : "), totalLeak);
+            for (const resource of Object.values(monitoredResource)) {
+                if (countOf(resource) > 0) {
+                    console.log("   ", chalk.yellow(resource.getClassName()).padEnd(38), ":", countOf(resource));
+                }
+            }
 
+            console.log(errorMessages.join("\n"));
 
-        console.log("LEAKS in  => ", self.ctx ? self.ctx.test.parent.file + "  " + self.ctx.test.parent.title : "???");
-        throw new Error("LEAKS !!!" + errorMessages.join("\n"));
+            console.log("you can get trace information if you set NODEOPCUA_REGISTRY=DEBUG and rerun");
+            //
+            throw new Error(`LEAKS !!!${errorMessages.join("\n")}`);
+        }
     }
-
 };
 
-global.hasResourceLeakDetector = true;
-ResourceLeakDetector.prototype.start = function(info) {
+global.hasResourceLeakDetector = false;
+ResourceLeakDetector.prototype.start = (info) => {
 
     global.ResourceLeakDetectorStarted = true;
 
     const self = ResourceLeakDetector.singleton;
+
+
+
     if (trace) {
-        console.log(" starting resourceLeakDetector");
+        console.log("[LeakDetector] 🚀 starting resourceLeakDetector");
     }
-    assert(!self.setInterval_old, "resourceLeakDetector.stop hasn't been called !");
-    assert(!self.clearInterval_old, "resourceLeakDetector.stop hasn't been called !");
-    assert(!self.setTimeout_old, "resourceLeakDetector.stop hasn't been called !");
-    assert(!self.clearTimeout_old, "resourceLeakDetector.stop hasn't been called !");
+    // A block whose `before` hook fails never gets its `afterEach`, so mocha skips the
+    // stop() that would put the timer globals back. Asserting here turns that one failure
+    // into a failure of every block that follows. Restore what the previous block left
+    // behind and carry on: the block that actually failed has already been reported.
+    if (self.setInterval_old || self.clearInterval_old || self.setTimeout_old || self.clearTimeout_old) {
+        console.log(chalk.yellow("[LeakDetector] ⚠️  previous block never called stop() - restoring the timer globals"));
+        // restore in place rather than calling stop(), which would also close handles and
+        // run the leak check - neither belongs in the middle of starting a new block
+        if (self.setInterval_old) { global.setInterval = self.setInterval_old; }
+        if (self.clearInterval_old) { global.clearInterval = self.clearInterval_old; }
+        if (self.setTimeout_old) { global.setTimeout = self.setTimeout_old; }
+        if (self.clearTimeout_old) { global.clearTimeout = self.clearTimeout_old; }
+        self.setInterval_old = null;
+        self.clearInterval_old = null;
+        self.setTimeout_old = null;
+        self.clearTimeout_old = null;
+    }
 
     self.setIntervalCallCount = 0;
     self.clearIntervalCallCount = 0;
@@ -133,18 +170,42 @@ ResourceLeakDetector.prototype.start = function(info) {
     self.interval_map = {};
     self.timeout_map = {};
 
-    self.verify_registry_counts(self, info);
+    // Record what each registry already holds, so stop() can report what THIS block
+    // leaked rather than what the process has accumulated. This used to call
+    // verify_registry_counts(self, info) - one argument too many, so `info` was `self`,
+    // `info.silent` was undefined, and the check could never stay quiet: once anything
+    // anywhere in the process leaked, every later start() threw `LEAKS !!!` from a
+    // `before` hook, and every block after the first leak failed.
+    self._registryBaseline = new Map(ObjectRegistry.registries.map((res) => [res, res.count()]));
+
+    // Track active timer handles for cleanup in stop().
+    // This is a lightweight tracking that doesn't wrap the API (no assertions,
+    // no wrapper objects) — it just records handles so stop() can clear them.
+    self._activeTimeouts = new Set();
+
+    // Snapshot the handles that already exist, so stop() can tell a handle the
+    // block leaked (a server left listening, an unclosed stream) from one it
+    // inherited — stdio, the test runner's own IPC channel, and so on. Only the
+    // former may be closed.
+    self._preexistingHandles = new WeakSet();
+    if (typeof process._getActiveHandles === "function") {
+        for (const h of process._getActiveHandles()) {
+            if (h && typeof h === "object") {
+                self._preexistingHandles.add(h);
+            }
+        }
+    }
 
     if (monitor_intervals) {
-        global.setTimeout = function(func, delay) {
+        global.setTimeout = (func, delay, ...extra) => {
 
-            assert(arguments.length === 2, "current limitation:  setTimeout must be called with 2 arguments");
+            assert(extra.length === 0, "current limitation:  setTimeout must be called with 2 arguments");
             // detect invalid delays
             assert(delay !== undefined);
-            assert(_.isFinite(delay));
+            assert(Number.isFinite(delay));
             if (delay < 0) {
-                console.log("GLOBAL#setTimeout called with a too small delay = " + delay.toString());
-                throw new Error("GLOBAL#setTimeout called with a too small delay = " + delay.toString());
+                console.log(`[LeakDetector] ❌ GLOBAL#setTimeout called with a too small delay = ${delay}`);
+                throw new Error(`[LeakDetector] ❌ GLOBAL#setTimeout called with a too small delay = ${delay}`);
             }
 
             // increase number of pending timers
@@ -155,15 +216,14 @@ ResourceLeakDetector.prototype.start = function(info) {
 
             const key = self.setTimeoutCallCount;
 
-            const timeoutId = self.setTimeout_old(function() {
+            const timeoutId = self.setTimeout_old(() => {
 
                 if (!self.timeout_map[key] || self.timeout_map[key].isCleared) {
-                    // throw new Error("Invalid timeoutId, timer has already been cleared - " + key);
-                    console.log("WARNING : setTimeout:  Invalid timeoutId, timer has already been cleared - " + key);
+                    console.log(`[LeakDetector] ❌ WARNING : setTimeout:  Invalid timeoutId, timer has already been cleared - ${key}`);
                     return;
                 }
                 if (self.timeout_map[key].hasBeenHonored) {
-                    throw new Error("setTimeout:  " + key + " time out has already been honored");
+                    throw new Error(`[LeakDetector] ❌ setTimeout:  ${key} time out has already been honored`);
                 }
                 self.honoredTimeoutFuncCallCount += 1;
                 self.setTimeoutCallPendingCount -= 1;
@@ -175,35 +235,48 @@ ResourceLeakDetector.prototype.start = function(info) {
             }, delay);
 
             self.timeout_map[key] = {
-                timeoutId: timeoutId,
+                timeoutId,
                 disposed: false,
                 stack: get_stack() // stack when created
             };
-            return key + 100000;
+
+            // Return a wrapper that acts as the key (for clearTimeout)
+            // but also exposes ref/unref/hasRef from the real Timeout
+            const wrapper = {
+                [Symbol.toPrimitive]() { return key + 100000; },
+                ref() { timeoutId.ref(); return wrapper; },
+                unref() { timeoutId.unref(); return wrapper; },
+                hasRef() { return timeoutId.hasRef(); },
+                _key: key + 100000
+            };
+            return wrapper;
         };
 
-        global.clearTimeout = function(timeoutId) {
-            // workaround for a bug in 'backoff' module, which call clearTimeout with -1 ( invalid ide)
+        global.clearTimeout = (timeoutId) => {
+            // workaround for a bug in 'backoff' module, which call clearTimeout with -1 ( invalid id)
             if (timeoutId === -1) {
-                console.log("warning clearTimeout is called with illegal timeoutId === 1, this call will be ignored ( backoff module bug?)");
+                console.log("[LeakDetector] ❌ warning clearTimeout is called with illegal timeoutId === -1, this call will be ignored ( backoff module bug?)");
                 return;
             }
 
+            // Support both raw keys (number) and wrapper objects (from our proxy)
+            timeoutId = (timeoutId && timeoutId._key !== undefined) ? timeoutId._key : +timeoutId;
+
             if (timeoutId >= 0 && timeoutId < 100000) {
-                throw new Error("clearTimeout has been called instead of clearInterval");
+                throw new Error("[LeakDetector] ❌ clearTimeout has been called instead of clearInterval");
             }
             timeoutId -= 100000;
 
             if (!self.timeout_map[timeoutId]) {
-                console.log("timeoutId" + timeoutId, " has already been discarded or doesn't exist");
+                console.log(`timeoutId${timeoutId}`, " has already been discarded or doesn't exist");
                 console.log("self.timeout_map", self.timeout_map);
-                throw new Error("clearTimeout: Invalid timeoutId " + timeoutId + " this may happen if clearTimeout is called inside the setTimeout function");
+                throw new Error(`clearTimeout: Invalid timeoutId ${timeoutId} this may happen if clearTimeout is called inside the setTimeout function`);
             }
             if (self.timeout_map[timeoutId].isCleared) {
-                throw new Error("clearTimeout: Invalid timeoutId " + timeoutId + " time out has already been cleared");
+                throw new Error(`clearTimeout: Invalid timeoutId ${timeoutId} time out has already been cleared`);
             }
             if (self.timeout_map[timeoutId].hasBeenHonored) {
-                throw new Error("clearTimeout: Invalid timeoutId " + timeoutId + " time out has already been honored");
+                throw new Error(`clearTimeout: Invalid timeoutId ${timeoutId} time out has already been honored`);
             }
 
             const data = self.timeout_map[timeoutId];
@@ -220,18 +293,41 @@ ResourceLeakDetector.prototype.start = function(info) {
             // call original clearTimeout
             const retValue = self.clearTimeout_old(data.timeoutId);
 
-            //xx delete self.timeout_map[timeoutId];
             return retValue;
         };
 
+    } else {
+        // Lightweight setTimeout/clearTimeout tracking (no assertions, no wrapper IDs).
+        // We just record raw timer handles so stop() can clear leaked ones.
+        // setTimeout(fn, delay, ...args) calls fn(...args): the arguments have to reach fn, or
+        // a caller that passes one gets undefined. undici does this for its parser timeout, so
+        // a fetch whose timeout fired under the detector threw
+        // "Cannot read properties of undefined (reading 'deref')" from inside undici.
+        global.setTimeout = (fn, delay, ...args) => {
+            const handle = self.setTimeout_old(
+                (...callbackArgs) => {
+                    // Timer fired naturally — remove from tracking
+                    self._activeTimeouts.delete(handle);
+                    fn(...callbackArgs);
+                },
+                delay,
+                ...args
+            );
+            self._activeTimeouts.add(handle);
+            return handle;
+        };
+        global.clearTimeout = (handle) => {
+            self._activeTimeouts.delete(handle);
+            return self.clearTimeout_old(handle);
+        };
     }
 
-    global.setInterval = function(func, delay) {
-        assert(arguments.length === 2);
+    global.setInterval = (func, delay, ...extra) => {
+        assert(extra.length === 0);
         assert(delay !== undefined);
-        assert(_.isFinite(delay));
+        assert(Number.isFinite(delay));
         if (delay <= 10) {
-            throw new Error("GLOBAL#setInterval called with a too small delay = " + delay.toString());
+            throw new Error(`[LeakDetector] ⏰ GLOBAL#setInterval called with a too small delay = ${delay}`);
         }
 
         // increase number of pending timers
@@ -245,34 +341,44 @@ ResourceLeakDetector.prototype.start = function(info) {
         try {
             stack = get_stack();
         }
-        catch (err) {
-
+        catch (_err) {
+            /**  */
         }
         self.interval_map[key] = {
-            intervalId: intervalId,
+            intervalId,
             disposed: false,
-            stack: stack
+            stack
         };
 
         if (trace) {
             console.log("setInterval \n", get_stack(), "\n");
         }
 
-        return key;
+        // Return a wrapper that acts as the key (for clearInterval)
+        // but also exposes ref/unref/hasRef from the real Timeout
+        const wrapper = {
+            [Symbol.toPrimitive]() { return key; },
+            ref() { intervalId.ref(); return wrapper; },
+            unref() { intervalId.unref(); return wrapper; },
+            hasRef() { return intervalId.hasRef(); },
+            _key: key
+        };
+        return wrapper;
     };
 
-    global.clearInterval = function(intervalId) {
+    global.clearInterval = (intervalId) => {
 
-        if (intervalId >= 100000) {
-            throw new Error("clearInterval has been called instead of clearTimeout");
+        // Support both raw keys (number) and wrapper objects (from our proxy)
+        const key = (intervalId && intervalId._key !== undefined) ? intervalId._key : +intervalId;
+
+        if (key >= 100000) {
+            throw new Error("[LeakDetector] 🔄 clearInterval has been called instead of clearTimeout");
         }
         self.clearIntervalCallCount += 1;
 
         if (trace) {
-            console.log("clearInterval " + intervalId, get_stack());
+            console.log(`[LeakDetector] 🔄 clearInterval ${key}`, get_stack());
         }
-        const key = intervalId;
-        assert(self.interval_map.hasOwnProperty(key));
 
         const data = self.interval_map[key];
 
@@ -287,11 +393,42 @@ ResourceLeakDetector.prototype.start = function(info) {
 
 };
 
-ResourceLeakDetector.prototype.check = function() {
-
+ResourceLeakDetector.prototype.check = () => {
+    /**  */
 };
 
-ResourceLeakDetector.prototype.stop = function(info) {
+function closeLeakedHandles(self, info) {
+    if (typeof process._getActiveHandles !== "function" || !self._preexistingHandles) {
+        return;
+    }
+    const leaked = process._getActiveHandles().filter(
+        (h) =>
+            h &&
+            typeof h === "object" &&
+            !self._preexistingHandles.has(h) &&
+            typeof h.close === "function" &&
+            (typeof h.hasRef !== "function" || h.hasRef())
+    );
+    self._preexistingHandles = null;
+    if (leaked.length === 0) {
+        return;
+    }
+    if (!info.silent) {
+        const names = leaked.map((h) => (h.constructor ? h.constructor.name : typeof h));
+        console.log(
+            chalk.yellow(`[LeakDetector] ⚠️  ${leaked.length} handle(s) left open: ${names.join(", ")} - closing them`)
+        );
+    }
+    for (const h of leaked) {
+        try {
+            h.close();
+        } catch (_err) {
+            // a handle that refuses to close cannot be helped here
+        }
+    }
+}
+
+ResourceLeakDetector.prototype.stop = (info) => {
     if (!global.ResourceLeakDetectorStarted) {
         return;
     }
@@ -299,9 +436,9 @@ ResourceLeakDetector.prototype.stop = function(info) {
 
     const self = ResourceLeakDetector.singleton;
     if (trace) {
-        console.log(" stop resourceLeakDetector");
+        console.log("[LeakDetector] stop resourceLeakDetector");
     }
-    assert(_.isFunction(self.setInterval_old), " did you forget to call resourceLeakDetector.start() ?");
+    assert(typeof self.setInterval_old === "function", " did you forget to call resourceLeakDetector.start() ?");
 
     global.setInterval = self.setInterval_old;
     self.setInterval_old = null;
@@ -316,24 +453,77 @@ ResourceLeakDetector.prototype.stop = function(info) {
     self.clearTimeout_old = null;
 
 
-    const results = self.verify_registry_counts(info);
-
-    self.interval_map = {};
-    self.timeout_map = {};
-
-
-    // call garbage collector
-    if (_.isFunction(global.gc)) {
-        global.gc(true);
+    // Clear any remaining tracked timeouts/intervals to prevent process hang.
+    // Mocha 12+ does not call process.exit() unless --exit is set, so any
+    // ref'd timer will keep the event loop alive indefinitely.
+    //
+    // This MUST run before verify_registry_counts(), which throws on leak:
+    // a leak report that left the leaked timers armed would hang the mocha
+    // worker for the lifetime of the longest timer instead of failing fast.
+    for (const [, data] of Object.entries(self.interval_map)) {
+        if (data && !data.disposed) {
+            global.clearInterval(data.intervalId);
+        }
+    }
+    for (const [, data] of Object.entries(self.timeout_map)) {
+        if (data && !data.disposed) {
+            global.clearTimeout(data.timeoutId);
+        }
+    }
+    // Also clear lightweight-tracked timeout handles (monitor_intervals=false mode)
+    if (self._activeTimeouts && self._activeTimeouts.size > 0) {
+        // Count only ref'd handles (those that would prevent process exit)
+        const leakedRefHandles = [...self._activeTimeouts].filter(
+            (h) => typeof h.hasRef === "function" && h.hasRef()
+        );
+        if (leakedRefHandles.length > 0 && !info.silent) {
+            console.log(chalk.yellow(`[LeakDetector] ⚠️  ${leakedRefHandles.length} setTimeout handle(s) were not cleared!`));
+        }
+        for (const handle of self._activeTimeouts) {
+            global.clearTimeout(handle);
+        }
+        self._activeTimeouts.clear();
     }
 
-    const doHeapdump = false;
-    if (doHeapdump) {
-        const heapdump = require('heapdump');
-        heapdump.writeSnapshot(function(err, filename) {
-            console.log('dump written to', filename);
-        });
+    // Timers are not the only thing that can keep the event loop alive: a
+    // net.Server left listening or an unclosed stream does too, and mocha 12
+    // does not process.exit() without --exit. Close whatever ref'd handle this
+    // block created and forgot; handles inherited from outside are left alone.
+    closeLeakedHandles(self, info);
+
+    // verify_registry_counts() throws when a leak is detected, and it reports
+    // from interval_map/timeout_map - so the maps are reset in the finally
+    // block, not before, or the leak report would come out empty.
+    let results;
+    try {
+        results = self.verify_registry_counts(info);
+    } finally {
+        self.interval_map = {};
+        self.timeout_map = {};
+        self._registryBaseline = null;
+
+        // call garbage collector
+        if (typeof global.gc === "function") {
+            global.gc(true);
+        }
     }
+
+    // Diagnostic: dump active handles to identify what keeps the event loop alive
+    if (trace && typeof process._getActiveHandles === "function") {
+        const handles = process._getActiveHandles();
+        const refHandles = handles.filter((h) => typeof h.hasRef !== "function" || h.hasRef());
+        console.log(`[LeakDetector] 🔍 stop(): checking ${refHandles.length} active handles`);
+        for (const h of refHandles) {
+            const type = h.constructor ? h.constructor.name : typeof h;
+            console.log(`[LeakDetector]   handle: ${type}`);
+        }
+    }
+
+    // Note: we no longer schedule a process.exit() timer here.
+    // The previous 2s unref'd timer was meant to handle tsx keeping
+    // ref'd stdout handles alive, but it caused premature exits when
+    // run_all_mocha_tests.js runs multiple suites in a single process.
+    // The test runner's own process.exit(failures) handles cleanup.
 
     return results;
 };
@@ -341,77 +531,143 @@ ResourceLeakDetector.prototype.stop = function(info) {
 ResourceLeakDetector.singleton = new ResourceLeakDetector();
 const resourceLeakDetector = ResourceLeakDetector.singleton;
 
-const trace_from_this_project_only = require("node-opcua-debug").trace_from_this_projet_only;
+// Local implementation to break cyclic dependency with node-opcua-debug
+function traceFromThisProjectOnly(err) {
+    const str = [];
+    str.push(" display_trace_from_this_project_only = ");
+    if (err) {
+        str.push(err.message);
+    }
+    err = err || new Error("Error used to extract stack trace");
+    let stack = err.stack;
+    if (stack) {
+        stack = stack.split("\n").filter((el) => el.match(/node-opcua/) && !el.match(/node_modules/));
+        str.push(stack.join("\n"));
+    } else {
+        str.push(" NO STACK TO TRACE !!!!");
+    }
+    return str.join("\n");
+}
 
-exports.installResourceLeakDetector = function(isGlobal, func) {
+let testHasFailed = false;
 
-    const trace = trace_from_this_project_only();
+export function installResourceLeakDetector(isGlobal, func) {
 
+    const _trace = traceFromThisProjectOnly();
+    testHasFailed = false;
+
+    let beforeOverallSnapshot;
+    let afterOverallSnapshot;
+    let beforeSnapshot;
+    let afterSnapshot;
     if (isGlobal) {
-        before(function() {
-            const self = this;
-            resourceLeakDetector.ctx = self.test.ctx;
+        before(function(/*this: Mocha.Suite*/) {
+            testHasFailed = false;
+            resourceLeakDetector.ctx = this.test.ctx;
             resourceLeakDetector.start();
             // make sure we start with a garbage collected situation
             if (global.gc) {
                 global.gc(true);
             }
+            beforeOverallSnapshot = takeMemorySnapshot();
+
         });
-        beforeEach(function() {
-            // make sure we start with a garbage collected situation
-            if (global.gc) {
-                global.gc(true);
-            }
+        beforeEach(() => {
+            // takeMemorySnapshot now does its own major GC; no need for an
+            // explicit gc(true) here. Saves one ~100ms major-GC stall per test.
+            beforeSnapshot = takeMemorySnapshot();
         });
         if (func) {
             func.call(this);
         }
-        after(function() {
-            resourceLeakDetector.stop(null);
+        after(async () => {
+
+            resourceLeakDetector.stop({ silent: testHasFailed });
             resourceLeakDetector.ctx = false;
             // make sure we start with a garbage collected situation
             if (global.gc) {
                 global.gc(true);
             }
+            // give some time to relax
+            afterOverallSnapshot = takeMemorySnapshot();
+            checkForMemoryLeak(beforeOverallSnapshot, afterOverallSnapshot);
+
+        });
+        afterEach(async () => {
+            afterSnapshot = takeMemorySnapshot();
+
         });
 
     } else {
-        beforeEach(function() {
-
-            if (global.gc) {
-                global.gc(true);
-            }
-
-            const self = this;
-            resourceLeakDetector.ctx = self.test.ctx;
+        beforeEach(function(/*this: Mocha.Test*/) {
+            // takeMemorySnapshot now does its own major GC; no separate gc(true) here.
+            resourceLeakDetector.ctx = this.test.ctx;
             resourceLeakDetector.start();
+            beforeSnapshot = takeMemorySnapshot();
         });
-        afterEach(function() {
-            resourceLeakDetector.stop(trace);
+        afterEach(async () => {
+            resourceLeakDetector.stop({ silent: testHasFailed });
             resourceLeakDetector.ctx = false;
             // make sure we start with a garbage collected situation
             if (global.gc) {
                 global.gc(true);
             }
+            // give some time to relax
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            afterSnapshot = takeMemorySnapshot();
+            checkForMemoryLeak(beforeSnapshot, afterSnapshot);
         });
 
     }
 };
 
 const global_describe = describe;
-assert(_.isFunction(global_describe), " expecting mocha to be defined");
+const global_it = it;
+function replacement_it(testName, f) {
+    if (!f) { return; }
+    if (f.length) {
+        const f1 = function(done) {
+            f.call(this, (err) => {
+                if (err) {
+                    testHasFailed = true;
+                }
+                done(err);
+            });
+        };
+        global_it(testName, f1);
+        return;
+    }
+    const ff = async function() {
+        let r;
+        try {
+            r = await f.call(this);
+        }
+        catch (err) {
+            testHasFailed = true;
+            throw err;
+        }
+        return r;
+    };
+    global_it(testName, ff);
+}
+assert(typeof global_describe === "function", " expecting mocha to be defined");
 
-let g_indescribeWithLeakDetector = false;
-exports.describeWithLeakDetector = function(message, func) {
-    if (g_indescribeWithLeakDetector) {
+
+let g_inDescribeWithLeakDetector = false;
+export function describeWithLeakDetector(message, func) {
+
+    if (memLeakDetectionDisabled) {
         return global_describe(message, func);
     }
-    g_indescribeWithLeakDetector = true;
+
+    if (g_inDescribeWithLeakDetector) {
+        return global_describe(message, func);
+    }
+    g_inDescribeWithLeakDetector = true;
+    global.it = replacement_it;
     global_describe.call(this, message, function() {
-        exports.installResourceLeakDetector.call(this, true, func);
-        g_indescribeWithLeakDetector = false;
+        installResourceLeakDetector.call(this, true, func);
+        g_inDescribeWithLeakDetector = false;
+        global.it = global_it;
     });
 };
-
-
-

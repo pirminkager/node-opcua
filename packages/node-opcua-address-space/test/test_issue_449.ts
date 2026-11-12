@@ -1,18 +1,18 @@
-import * as should from "should";
-import { getMiniAddressSpace } from "../";
-
 import { DataValue } from "node-opcua-data-value";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import { StatusCodes } from "node-opcua-status-code";
-import { DataType } from "node-opcua-variant";
-import { Variant } from "node-opcua-variant";
+import { DataType, Variant } from "node-opcua-variant";
+
 import {
-    AddressSpace, AddVariableOptions, BindVariableOptionsVariation1, SessionContext, UAVariable
-} from "..";
+    type AddressSpace,
+    type AddVariableOptions,
+    type BindVariableOptionsVariation1,
+    SessionContext,
+    type UAVariable
+} from "../dist/api/index.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("testing github issue https://github.com/node-opcua/node-opcua/issues/449", () => {
-
     let addressSpace: AddressSpace;
     before(async () => {
         addressSpace = await getMiniAddressSpace();
@@ -22,14 +22,12 @@ describe("testing github issue https://github.com/node-opcua/node-opcua/issues/4
     });
 
     it("#449 should be possible to access this in UAVariable get/set value accessor", async () => {
-
         const namespace = addressSpace.getOwnNamespace();
-        let node: UAVariable;
 
-        // tslint:disable:object-literal-shorthand
         const counterVar: AddVariableOptions = {
             browseName: "TEST",
             dataType: "String",
+            minimumSamplingInterval: 100, // minimumSamplingInterval needed when using a getter
             value: {
                 get: function (this: UAVariable) {
                     // in get - this.browseName works great.
@@ -38,7 +36,7 @@ describe("testing github issue https://github.com/node-opcua/node-opcua/issues/4
                         value: this.browseName.toString()
                     });
                 },
-                set: function (this: UAVariable, variant: Variant) {
+                set: function (this: UAVariable, _variant: Variant) {
                     // in set - it doesn't
                     this.browseName.toString().should.eql("1:TEST");
                     this.should.eql(node);
@@ -47,7 +45,7 @@ describe("testing github issue https://github.com/node-opcua/node-opcua/issues/4
             } as BindVariableOptionsVariation1
         };
 
-        node = namespace.addVariable(counterVar);
+        const node = namespace.addVariable(counterVar);
 
         const dataValue = new DataValue({
             value: {
@@ -58,6 +56,5 @@ describe("testing github issue https://github.com/node-opcua/node-opcua/issues/4
 
         const statusCode = await node.writeValue(SessionContext.defaultContext, dataValue);
         statusCode.should.eql(StatusCodes.Good);
-
     });
 });

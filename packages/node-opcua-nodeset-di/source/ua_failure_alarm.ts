@@ -1,0 +1,13 @@
+import type { UADeviceHealthDiagnosticAlarm, UADeviceHealthDiagnosticAlarm_Base } from "./ua_device_health_diagnostic_alarm.js";
+
+// ----- this file has been automatically generated - do not edit
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/DI/                             |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |FailureAlarmType i=15292                                    |
+ * |isAbstract      |false                                                       |
+ */
+export type UAFailureAlarm_Base = UADeviceHealthDiagnosticAlarm_Base;
+export interface UAFailureAlarm extends UADeviceHealthDiagnosticAlarm, UAFailureAlarm_Base {}

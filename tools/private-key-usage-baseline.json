@@ -1,0 +1,6 @@
+{
+    "node-opcua-client": 2,
+    "node-opcua-common": 8,
+    "node-opcua-server": 1,
+    "node-opcua-server-configuration": 4
+}

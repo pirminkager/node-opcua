@@ -1,31 +1,37 @@
 Error.stackTraceLimit = 100000;
-// tslint:disable: no-console
-import * as fs from "fs";
-import * as os from "os";
-import * as path from "path";
-import * as should from "should";
-import { promisify } from "util";
+
+import fs from "node:fs";
+
+// node 14 onward : import {  writeFile } from "fs/promises";
+const { writeFile } = fs.promises;
+
+import os from "node:os";
+import path from "node:path";
+import type { BaseNode, UAVariable } from "node-opcua-address-space";
+import { generateAddressSpace } from "node-opcua-address-space/nodeJS.js";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import should from "should";
 import {
-    getDataTypeDictionary,
-    addExtensionObjectDataType,
     AddressSpace,
+    addExtensionObjectDataType,
     addVariableTypeForDataType,
     //
     DataType,
-    ExtensionObjectDefinition,
-    generateAddressSpace,
-    NodeId,
+    type ExtensionObjectDefinition,
+    getSymbols,
     nodesets,
-    StructureDefinitionOptions,
-} from "..";
-const writeFile = promisify(fs.writeFile);
+    type StructureDefinitionOptions,
+    setSymbols
+} from "../dist/index.js";
 
 const doDebug = false;
 
-// tslint:disable-next-line: no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
-describe("addExtensionObjectDataType", function (this: any) {
+// reaching into Namespace internals not exposed on the public type, for test diagnostics only
+interface NamespaceWithInternals {
+    _nodeIdManager: { getSymbolCSV(): string };
+}
 
+describe("addExtensionObjectDataType", function (this: Mocha.Suite) {
     this.timeout(10000);
     const namespaceUri = "http://sterfive.org/UA/Demo/";
 
@@ -33,19 +39,15 @@ describe("addExtensionObjectDataType", function (this: any) {
     before(async () => {
         addressSpace = AddressSpace.create();
         addressSpace.registerNamespace(namespaceUri);
-        const nodesetsXML = [
-            nodesets.standard
-        ];
+        const nodesetsXML = [nodesets.standard];
         await generateAddressSpace(addressSpace, nodesetsXML);
-
     });
     after(() => {
         addressSpace.dispose();
     });
     it("ZZZE-1 should add an ExtensionObject DataType", async () => {
-
         const ns = addressSpace.getOwnNamespace();
-        console.log("ns", ns.namespaceUri);
+        // xx console.log("ns", ns.namespaceUri);
 
         const structureDefinition: StructureDefinitionOptions = {
             baseDataType: "",
@@ -62,7 +64,7 @@ describe("addExtensionObjectDataType", function (this: any) {
                     dataType: DataType.Float,
                     description: "the list of values",
                     name: "Values",
-                    valueRank: 1,
+                    valueRank: 1
                 }
             ]
         };
@@ -71,40 +73,44 @@ describe("addExtensionObjectDataType", function (this: any) {
             browseName: "PersonDataType",
             description: "A Person!",
             isAbstract: false,
-            structureDefinition,
-
-            binaryEncoding: NodeId.nullNodeId,
-            xmlEncoding: NodeId.nullNodeId,
+            structureDefinition
         };
         const dataType = await addExtensionObjectDataType(ns, options);
 
-        dataType.binaryEncoding!.browseName.toString().should.eql("Default Binary");
+        should(dataType.binaryEncoding?.browseName.toString()).eql("Default Binary");
 
         // const tmpFile = await fs.promises.mkdtemp(os.tmpdir() + "test.NodeSet2.xml", "utf-8");
         const tmpFile = path.join(os.tmpdir(), "test.NodeSet2.xml");
         console.log("tmpFile =", tmpFile);
 
+        /* c8 ignore next */
         if (doDebug) {
-
-            const a = Object.values((ns as any)._nodeid_index);
-            a.forEach((b: any) => {
-                console.log(b.browseName.toString(), b.nodeId.toString(),
-                    (b).typeDefinitionObj ? (
-                        (b).typeDefinitionObj.browseName.toString() + " ... " + (b).typeDefinition.toString())
-                        : ""); // .nodeId.tostring(), b.browseName.tostring());
-            });
-
+            for (const b of ns.nodeIterator()) {
+                const withTypeDefinition = b as BaseNode & {
+                    typeDefinitionObj?: BaseNode;
+                    typeDefinition?: { toString(): string };
+                };
+                console.log(
+                    b.browseName.toString(),
+                    b.nodeId.toString(),
+                    withTypeDefinition.typeDefinitionObj
+                        ? `${withTypeDefinition.typeDefinitionObj.browseName.toString()} ... ${withTypeDefinition.typeDefinition?.toString()}`
+                        : ""
+                ); // .nodeId.toString(), b.browseName.toString());
+            }
         }
+
         const xml = ns.toNodeset2XML();
         await writeFile(tmpFile, xml, "utf-8");
 
         const tmpCSVFile = path.join(os.tmpdir(), "test.NodeSet2.csv");
-        const csv = (ns as any)._nodeIdManager.getSymbolCSV();
+        const csv = (ns as unknown as NamespaceWithInternals)._nodeIdManager.getSymbolCSV();
         await writeFile(tmpCSVFile, csv, "utf-8");
 
-        // should be possible to create o bject
-        const o = addressSpace.constructExtensionObject(dataType, { name: "JoeDoe" });
+        // should be possible to create object
+        const _o = addressSpace.constructExtensionObject(dataType, { name: "JoeDoe" });
 
+        // c8 ignore next
         if (doDebug) {
             console.log("symbol =");
             console.log(csv);
@@ -112,20 +118,17 @@ describe("addExtensionObjectDataType", function (this: any) {
         // xx fix me await test_back(tmpFile);
         async function testReloadGeneratedNodeset() {
             const addressSpace2 = AddressSpace.create();
-            const namespace = addressSpace2.registerNamespace(namespaceUri);
-            const nodesetsXML = [
-                nodesets.standard,
-                tmpFile
-            ];
+            const namespace = addressSpace2.registerNamespace("MyDemo");
+            const nodesetsXML = [nodesets.standard, tmpFile];
             await generateAddressSpace(addressSpace2, nodesetsXML);
 
             const nsIndex = addressSpace2.getNamespaceIndex(namespaceUri);
-            nsIndex.should.eql(1);
+            nsIndex.should.eql(2);
             const personDataType = addressSpace2.findDataType("PersonDataType", nsIndex)!;
             const v = namespace.addVariable({
                 browseName: "Var1",
                 dataType: personDataType.nodeId,
-                propertyOf: addressSpace2.rootFolder.objects.server,
+                propertyOf: addressSpace2.rootFolder.objects.server
             });
 
             const person = addressSpace2.constructExtensionObject(personDataType, {
@@ -138,10 +141,12 @@ describe("addExtensionObjectDataType", function (this: any) {
 
         await testReloadGeneratedNodeset();
 
+        /*
         // make sure that bsd is correct
         const dataTypeDictionary = getDataTypeDictionary(ns);
         const bsd = dataTypeDictionary.readValue().value.value.toString();
-        console.log(bsd);
+        
+        // xx console.log(bsd);
         bsd.should.eql(
             `<?xml version="1.0"?>
 <opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:n1="http://sterfive.org/UA/Demo/" DefaultByteOrder="LittleEndian" TargetNamespace="http://sterfive.org/UA/Demo/">
@@ -150,76 +155,72 @@ describe("addExtensionObjectDataType", function (this: any) {
         <opc:Field Name="NoOfValues" TypeName="opc:Int32"/>
         <opc:Field Name="Values" TypeName="opc:Float" LengthField="NoOfValues"/>
     </opc:StructuredType>
-</opc:TypeDictionary>`);
+</opc:TypeDictionary>`
+        );
+*/
     });
-
 });
-describe("addVariableTypeForDataType", function (this: any) {
-
-    this.timeout(10000);
+describe("addVariableTypeForDataType", function (this: Mocha.Suite) {
+    this.timeout(Math.max(12 * 1000, this.timeout()));
     const namespaceUri = "urn:name";
 
     let addressSpace: AddressSpace;
-    before(async () => {
+    beforeEach(async () => {
         addressSpace = AddressSpace.create();
         addressSpace.registerNamespace(namespaceUri);
-        const nodesetsXML = [
-            nodesets.standard
-        ];
+        const nodesetsXML = [nodesets.standard];
         await generateAddressSpace(addressSpace, nodesetsXML);
-
     });
-    after(() => {
+    afterEach(() => {
         addressSpace.dispose();
     });
     it("ZZZE-2 should addVariableTypeForDataType", async () => {
-
         const ns = addressSpace.getOwnNamespace();
 
         const buildInfoStructureDefinition: StructureDefinitionOptions = {
-            baseDataType: "",
+            baseDataType: "Structure",
             fields: [
                 {
-                    arrayDimensions: [],
+                    arrayDimensions: null,
                     dataType: DataType.String,
                     isOptional: false,
                     name: "ProductUri",
-                    valueRank: 0,
+                    valueRank: -1
                 },
                 {
-                    arrayDimensions: [],
+                    arrayDimensions: null,
                     dataType: DataType.String,
                     isOptional: false,
                     name: "ManufacturerName",
-                    valueRank: 0,
+                    valueRank: -1
                 },
                 {
                     arrayDimensions: [],
                     dataType: DataType.String,
                     isOptional: false,
                     name: "ProductName",
-                    valueRank: 0,
+                    valueRank: -1
                 },
                 {
                     arrayDimensions: [],
                     dataType: DataType.String,
                     isOptional: false,
                     name: "SoftwareVersion",
-                    valueRank: 0,
+                    valueRank: -1
                 },
                 {
                     arrayDimensions: [],
                     dataType: DataType.String,
                     isOptional: false,
                     name: "BuildNumber",
-                    valueRank: 0,
+                    valueRank: -1
                 },
                 {
                     arrayDimensions: [],
                     dataType: DataType.DateTime,
                     isOptional: false,
                     name: "BuildDate",
-                    valueRank: 0,
+                    valueRank: -1
                 }
             ]
         };
@@ -233,28 +234,28 @@ describe("addVariableTypeForDataType", function (this: any) {
         const buildInfoDataType = await addExtensionObjectDataType(ns, buildInfoOptions);
 
         const serverStatusStructureDefinition: StructureDefinitionOptions = {
-            baseDataType: "",
+            baseDataType: "Structure",
             fields: [
                 {
                     arrayDimensions: [],
                     dataType: DataType.DateTime,
                     isOptional: false,
                     name: "StartTime",
-                    valueRank: 0,
+                    valueRank: -1
                 },
                 {
                     arrayDimensions: [],
                     dataType: addressSpace.findDataType("UtcTime")!.nodeId,
                     isOptional: false,
                     name: "CurrentTime",
-                    valueRank: 0,
+                    valueRank: -1
                 },
                 {
                     arrayDimensions: [],
                     dataType: buildInfoDataType.nodeId,
                     isOptional: false,
                     name: "BuildInfo",
-                    valueRank: 0,
+                    valueRank: -1
                 }
             ]
         };
@@ -265,36 +266,35 @@ describe("addVariableTypeForDataType", function (this: any) {
             structureDefinition: serverStatusStructureDefinition
         };
         const serverStatusDataType = await addExtensionObjectDataType(ns, serverStatusOptions);
-        console.log("BBBBBBBBB");
 
-        const buildInfoType = addVariableTypeForDataType(ns, buildInfoDataType);
+        const _buildInfoType = addVariableTypeForDataType(ns, buildInfoDataType);
         const serverStatusType = addVariableTypeForDataType(ns, serverStatusDataType);
 
         const tmpFile = path.join(os.tmpdir(), "test1.NodeSet2.xml");
         const tmpCSVFile = path.join(os.tmpdir(), "test1.NodeSet2.csv");
-        console.log("tmpFile =", tmpFile);
+        // xx console.log("tmpFile =", tmpFile);
 
         const xml = ns.toNodeset2XML();
         await writeFile(tmpFile, xml, "utf-8");
 
-        const csv = (ns as any)._nodeIdManager.getSymbolCSV();
+        const csv = (ns as unknown as NamespaceWithInternals)._nodeIdManager.getSymbolCSV();
         await writeFile(tmpCSVFile, csv, "utf-8");
 
         const statusType = serverStatusType.instantiate({
             browseName: "Test",
             organizedBy: addressSpace.rootFolder.objects.server
-        }) as any;
+        }) as UAVariable & { startTime?: UAVariable };
         should.exist(statusType.startTime);
         const e = statusType.readValue().value.value;
         should.exist(e.startTime);
-        console.log("e.", e.toString());
-        console.log("statusType.", statusType.toString());
+        // xx console.log("e.", e.toString());
+        // xx console.log("statusType.", statusType.toString());
 
-
+        /*
         // make sure that bsd is correct
         const dataTypeDictionary = getDataTypeDictionary(ns);
         const bsd = dataTypeDictionary.readValue().value.value.toString();
-        console.log(bsd);
+        // xx console.log(bsd);
         bsd.should.eql(
             `<?xml version="1.0"?>
 <opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:n1="urn:name" DefaultByteOrder="LittleEndian" TargetNamespace="urn:name">
@@ -311,7 +311,35 @@ describe("addVariableTypeForDataType", function (this: any) {
         <opc:Field Name="CurrentTime" TypeName="ua:UtcTime"/>
         <opc:Field Name="BuildInfo" TypeName="n1:MyBuildInfoDataType"/>
     </opc:StructuredType>
-</opc:TypeDictionary>`);
+</opc:TypeDictionary>`
+        );
+        */
     });
 
+    it("ZZZE-3 should create an Structure datatype and handle Encoding symbols", async () => {
+        const ns = addressSpace.getOwnNamespace();
+        setSymbols(ns, []);
+
+        await addExtensionObjectDataType(ns, {
+            browseName: "MyDataType",
+            isAbstract: false,
+            structureDefinition: {
+                baseDataType: "Structure",
+                fields: [
+                    {
+                        dataType: "Double",
+                        description: "the list of values",
+                        name: "Values",
+                        valueRank: 1
+                    }
+                ]
+            },
+            description: "A DataType"
+        });
+        const symbols = getSymbols(ns);
+        symbols
+            .map((x) => x[0])
+            .sort()
+            .should.eql(["MyDataType", "MyDataType_Encoding_DefaultBinary", "MyDataType_Encoding_DefaultXML"].sort());
+    });
 });

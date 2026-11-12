@@ -1,0 +1,23 @@
+import type { UAString } from "node-opcua-basic-types";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { DTStructure } from "node-opcua-nodeset-ua/dist/dt_structure.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |           |                                                            |
+ * |-----------|------------------------------------------------------------|
+ * | namespace |http://opcfoundation.org/UA/Glass/Flat/                     |
+ * | nodeClass |DataType                                                    |
+ * | name      |UserProfileType                                             |
+ * | isAbstract|false                                                       |
+ */
+export interface DTUserProfile extends DTStructure {
+  name: UAString; // String ns=0;i=12
+  loginTime: Date; // DateTime ns=0;i=13
+  language: UAString; // String ns=0;i=295
+  measurementFormat: UAString; // String ns=0;i=12
+  accessLevel: UAString; // String ns=0;i=12
+  opcUaUser: boolean; // Boolean ns=0;i=1
+}
+export interface UDTUserProfile extends ExtensionObject, DTUserProfile {};

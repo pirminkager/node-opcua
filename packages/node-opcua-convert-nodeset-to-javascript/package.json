@@ -1,24 +1,45 @@
 {
     "name": "node-opcua-convert-nodeset-to-javascript",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -convert-nodeset-to-javascript",
+    "type": "module",
+    "version": "2.187.26",
+    "description": "pure nodejs OPCUA SDK - module convert-nodeset-to-javascript",
+    "types": "dist/index.d.ts",
+    "main": "dist/index.js",
+    "bin": "dist/main.js",
     "scripts": {
-        "test": "mocha test"
+        "build": "tsc -b",
+        "generate": "tsc -b && tsx source/main.ts",
+        "test": "mocha && npm run test-generated",
+        "test:check": "tsc --noEmit -p test/tsconfig.json",
+        "test-generated": "tsc --build tsconfig-generated.json",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo tmp"
     },
-    "main": "index.js",
+    "engines": {
+        "node": ">=22.13.0"
+    },
     "dependencies": {
-        "node-opcua-address-space": "^2.6.0-alpha.1",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-data-model": "^2.6.0-alpha.1",
-        "node-opcua-factory": "^2.6.0-alpha.1",
-        "node-opcua-nodeid": "^2.6.0-alpha.1",
-        "node-opcua-utils": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
+        "case-anything": "3.1.7",
+        "chalk": "6.0.1",
+        "node-opcua-address-space": "2.187.26",
+        "node-opcua-address-space-base": "2.187.26",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-constants": "2.185.0",
+        "node-opcua-data-model": "2.187.0",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-nodeid": "2.187.0",
+        "node-opcua-nodesets": "2.187.4",
+        "node-opcua-pseudo-session": "2.187.26",
+        "node-opcua-types": "2.187.19",
+        "node-opcua-utils": "2.187.0",
+        "node-opcua-variant": "2.187.19",
+        "ts-morph": "28.0.0",
+        "wordwrap": "^1.0.0"
     },
     "devDependencies": {
-        "node-opcua-packet-analyzer": "^2.6.0-alpha.1",
-        "node-opcua-variant": "^2.6.0-alpha.1",
-        "should": "^13.2.3"
+        "node-opcua-leak-detector": "2.186.7",
+        "node-opcua-packet-analyzer": "2.187.0",
+        "node-opcua-service-translate-browse-path": "2.187.19",
+        "node-opcua-test-helpers": "2.184.0"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -35,5 +56,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

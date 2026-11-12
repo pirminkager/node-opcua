@@ -1,20 +1,20 @@
 // tslint:disable:no-console
 // tslint:disable:object-literal-sort-keys
 // tslint:disable:unused-var
+import { types } from "node:util";
 import {
     ActivateSessionRequest,
     BrowseRequest,
     BrowseResponse,
-    makeBoiler,
     OPCUAServer,
     RegisterServerMethod,
-    Request,
-    Response
+    type Request,
+    type Response
 } from "node-opcua";
+import { makeBoiler } from "../node-opcua-address-space/testHelpers";
 
 async function main() {
     try {
-
         const server = new OPCUAServer({
             registerServerMethod: RegisterServerMethod.LDS
         });
@@ -22,7 +22,6 @@ async function main() {
         await server.initialize();
 
         server.on("request", (request: Request) => {
-
             console.log(request.constructor.name, request.requestHeader.requestHandle);
 
             // you can either check the instance of the request object directl
@@ -35,15 +34,13 @@ async function main() {
             // ... or check its schema name
             switch (request.schema.name) {
                 case "BrowseRequest": {
-                    const browseRequest = request as BrowseRequest;
+                    const _browseRequest = request as BrowseRequest;
                     break;
                 }
                 // etc...
             }
-
         });
         server.on("response", (response: Response) => {
-
             // you can either check the instance of the request object directl
             if (response instanceof BrowseResponse) {
                 console.log("BrowseResponse.results.length =", response.results ? response.results.length : 0);
@@ -59,12 +56,15 @@ async function main() {
             }
         });
         // post-initialize
-        const addressSpace = server.engine.addressSpace!;
+        const addressSpace = server.engine.addressSpace;
+        if (!addressSpace) {
+            throw new Error("addressSpace should be initialized");
+        }
 
         addressSpace.installAlarmsAndConditionsService();
         const namespace = addressSpace.getOwnNamespace();
 
-        const myEventType = namespace.addEventType({
+        const _myEventType = namespace.addEventType({
             browseName: "MyEventType",
             subtypeOf: "TransitionEventType"
         });
@@ -89,16 +89,18 @@ async function main() {
             organizedBy: addressSpace.rootFolder.objects
         });
 
-        const boiler1 = makeBoiler(addressSpace, {
+        const _boiler1 = makeBoiler(addressSpace, {
             browseName: "Boiler1",
             organizedBy: addressSpace.rootFolder.objects
         });
 
         await server.start();
-        console.log(" Server started ", server.endpoints[0].endpointDescriptions()[0].endpointUrl);
+        console.log(" Server started ", server.getEndpointUrl());
     } catch (err) {
-        console.log("Error : ", err.message);
-        console.log(err.stack);
+        if (types.isNativeError(err)) {
+            console.log("Error : ", err.message);
+            console.log(err.stack);
+        }
     }
 }
 

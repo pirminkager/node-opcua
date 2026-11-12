@@ -1,0 +1,17 @@
+import type { UASignal, UASignal_Base } from "./ua_signal.js";
+import type { UATwoStateDiscreteSignalVariable } from "./ua_two_state_discrete_signal_variable.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/PADIM/                          |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |TwoStateDiscreteSignalType i=1037                           |
+ * |isAbstract      |false                                                       |
+ */
+export interface UATwoStateDiscreteSignal_Base extends UASignal_Base {
+    twoStateDiscreteSignal: UATwoStateDiscreteSignalVariable<(boolean | boolean[])>;
+}
+export interface UATwoStateDiscreteSignal extends UASignal, UATwoStateDiscreteSignal_Base {}

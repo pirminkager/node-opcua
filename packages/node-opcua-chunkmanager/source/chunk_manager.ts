@@ -1,21 +1,19 @@
 /***
  * @module node-opcua-chunkmanager
  */
-import { EventEmitter } from "events";
-import * as _ from "underscore";
+import { EventEmitter } from "node:events";
 
 import { assert } from "node-opcua-assert";
 import { BinaryStream } from "node-opcua-binary-stream";
-import { createFastUninitializedBuffer } from "node-opcua-buffer-utils";
 
-import { readMessageHeader } from "./read_message_header";
+import { readMessageHeader } from "./read_message_header.js";
 
 export function verify_message_chunk(messageChunk: Buffer): void {
     assert(messageChunk);
     assert(messageChunk instanceof Buffer);
     const header = readMessageHeader(new BinaryStream(messageChunk));
     if (messageChunk.length !== header.length) {
-        throw new Error(" chunk length = " + messageChunk.length + " message  length " + header.length);
+        throw new Error(` chunk length = ${messageChunk.length} message  length ${header.length}`);
     }
 }
 
@@ -50,10 +48,14 @@ export function verify_message_chunk(messageChunk: Buffer): void {
 //  - The PaddingSize  and Padding  fields are not present if the  MessageChunk  is not encrypted.
 //  - The Signature field is not present if the  MessageChunk  is not signed.
 
-export type WriteHeaderFunc = (chunk: Buffer, isLast: boolean, expectedLength: number) => void;
-export type WriteSequenceHeaderFunc = (chunk: Buffer) => void;
-export type SignBufferFunc = (buffer: Buffer) => Buffer;
-export type EncryptBufferFunc = (buffer: Buffer) => Buffer;
+export type WriteHeaderFunc = (this: ChunkManager, chunk: Buffer, isLast: boolean, expectedLength: number) => void;
+export type WriteSequenceHeaderFunc = (this: ChunkManager, chunk: Buffer) => void;
+export type SignBufferFunc = (this: ChunkManager, buffer: Buffer) => Buffer;
+export type EncryptBufferFunc = (this: ChunkManager, buffer: Buffer) => Buffer;
+/** asynchronous {@link SignBufferFunc} — for a key held by a remote provider (HSM/KMS). */
+export type SignBufferAsyncFunc = (this: ChunkManager, buffer: Buffer) => Promise<Buffer>;
+/** asynchronous {@link EncryptBufferFunc}. */
+export type EncryptBufferAsyncFunc = (this: ChunkManager, buffer: Buffer) => Promise<Buffer>;
 
 export interface IChunkManagerOptions {
     chunkSize: number;
@@ -64,83 +66,130 @@ export interface IChunkManagerOptions {
 
     signBufferFunc?: SignBufferFunc;
     encryptBufferFunc?: EncryptBufferFunc;
+    /**
+     * Asynchronous signing (mutually exclusive with `signBufferFunc`).
+     * When any async func is configured, completed chunks flow through a
+     * serialized task chain — "chunk" events keep their order — and the
+     * caller must finish with {@link ChunkManager.endAsync} instead of
+     * `end()` to observe completion and errors.
+     */
+    signBufferAsyncFunc?: SignBufferAsyncFunc;
+    /** Asynchronous encryption (mutually exclusive with `encryptBufferFunc`). */
+    encryptBufferAsyncFunc?: EncryptBufferAsyncFunc;
     writeSequenceHeaderFunc?: WriteSequenceHeaderFunc;
 
     headerSize: number;
     writeHeaderFunc?: WriteHeaderFunc; // write header must be specified if headerSize !=0
 }
 
+export enum Mode {
+    None = 1,
+    Sign = 2,
+    SignAndEncrypt = 3
+}
+
+/**
+ * Cuts a message into chunks, then pads, signs and encrypts each of them, emitting them as "chunk" events.
+ *
+ * Deprecated: node-opcua-secure-channel no longer uses it. Its SecureChunkWriter writes the same bytes,
+ * for every message type, with one call and no event (ADR 0001). To be removed in the next major version.
+ */
 export class ChunkManager extends EventEmitter {
+    #signBufferFunc?: SignBufferFunc;
+    #encryptBufferFunc?: EncryptBufferFunc;
+    #signBufferAsyncFunc?: SignBufferAsyncFunc;
+    #encryptBufferAsyncFunc?: EncryptBufferAsyncFunc;
+    /** serialized task chain for the async mode, so chunk events keep their order. */
+    #asyncTail: Promise<void> = Promise.resolve();
+    #asyncError: Error | null = null;
+    #writeSequenceHeaderFunc?: WriteSequenceHeaderFunc;
+    #writeHeaderFunc?: WriteHeaderFunc;
 
-    public signBufferFunc?: SignBufferFunc;
-    public encryptBufferFunc?: EncryptBufferFunc;
-    public writeSequenceHeaderFunc?: WriteSequenceHeaderFunc;
-    public writeHeaderFunc?: WriteHeaderFunc;
-
-    private readonly chunkSize: number;
-    private readonly headerSize: number;
-    private readonly signatureLength: number;
-    private readonly sequenceHeaderSize: number;
-    private readonly cipherBlockSize: number;
-    private readonly plainBlockSize: number;
+    public readonly chunkSize: number;
+    public readonly headerSize: number;
+    public readonly maxBodySize: number;
+    public readonly signatureLength: number;
+    public readonly sequenceHeaderSize: number;
+    public readonly cipherBlockSize: number;
+    public readonly plainBlockSize: number;
 
     // --------------
-    private readonly maxBodySize: number;
-    private readonly maxBlock?: number;
-    private readonly dataOffset: number;
-    private chunk: Buffer | null;
-    private cursor: number;
-    private pendingChunk: Buffer | null;
-    private dataEnd: number;
+    readonly #maxBlock?: number;
 
-    constructor(options: IChunkManagerOptions) {
+    readonly #dataOffset: number;
+    public readonly securityMode: Mode;
+
+    #chunk: Buffer | null;
+    #cursor: number;
+    #pendingChunk: Buffer | null;
+    #dataEnd: number;
+
+    constructor(securityMode: Mode, options: IChunkManagerOptions) {
         super();
+
+        this.securityMode = securityMode;
 
         // { chunkSize : 32, headerSize : 10 ,signatureLength: 32 }
         this.chunkSize = options.chunkSize;
 
         this.headerSize = options.headerSize || 0;
         if (this.headerSize) {
-            this.writeHeaderFunc = options.writeHeaderFunc;
-            assert(_.isFunction(this.writeHeaderFunc));
+            this.#writeHeaderFunc = options.writeHeaderFunc;
+            assert(typeof this.#writeHeaderFunc === "function");
         }
 
         this.sequenceHeaderSize = options.sequenceHeaderSize === undefined ? 8 : options.sequenceHeaderSize;
         if (this.sequenceHeaderSize > 0) {
-            this.writeSequenceHeaderFunc = options.writeSequenceHeaderFunc;
-            assert(_.isFunction(this.writeSequenceHeaderFunc));
+            this.#writeSequenceHeaderFunc = options.writeSequenceHeaderFunc;
+            assert(typeof this.#writeSequenceHeaderFunc === "function");
         }
 
         this.signatureLength = options.signatureLength || 0;
-        this.signBufferFunc = options.signBufferFunc;
+        this.#signBufferFunc = options.signBufferFunc;
+        this.#signBufferAsyncFunc = options.signBufferAsyncFunc;
+        this.#encryptBufferAsyncFunc = options.encryptBufferAsyncFunc;
+        assert(
+            !(this.#signBufferFunc && this.#signBufferAsyncFunc),
+            "signBufferFunc and signBufferAsyncFunc are mutually exclusive"
+        );
+        assert(
+            !(options.encryptBufferFunc && options.encryptBufferAsyncFunc),
+            "encryptBufferFunc and encryptBufferAsyncFunc are mutually exclusive"
+        );
 
         this.plainBlockSize = options.plainBlockSize || 0; // 256-14;
         this.cipherBlockSize = options.cipherBlockSize || 0; // 256;
-        this.dataEnd = 0;
+        this.#dataEnd = 0;
 
         if (this.cipherBlockSize === 0) {
+            assert(securityMode === Mode.None || securityMode === Mode.Sign);
+            // we don't encrypt,we just sign
             assert(this.plainBlockSize === 0);
             // unencrypted block
-            this.maxBodySize = (this.chunkSize - this.headerSize - this.signatureLength - this.sequenceHeaderSize);
-            this.encryptBufferFunc = undefined;
-
+            this.maxBodySize = this.chunkSize - this.headerSize - this.signatureLength - this.sequenceHeaderSize;
+            this.#encryptBufferFunc = undefined;
         } else {
+            assert(securityMode === Mode.SignAndEncrypt || securityMode === Mode.Sign);
             assert(this.plainBlockSize !== 0);
             // During encryption a block with a size equal to  PlainTextBlockSize  is processed to produce a block
             // with size equal to  CipherTextBlockSize. These values depend on the encryption algorithm and may
             // be the same.
 
-            this.encryptBufferFunc = options.encryptBufferFunc;
-            assert(_.isFunction(this.encryptBufferFunc), "an encryptBufferFunc is required");
+            this.#encryptBufferFunc = options.encryptBufferFunc;
+            assert(
+                typeof this.#encryptBufferFunc === "function" || typeof this.#encryptBufferAsyncFunc === "function",
+                "an encryptBufferFunc (or encryptBufferAsyncFunc) is required"
+            );
 
             // this is the formula proposed  by OPCUA
-            this.maxBodySize = this.plainBlockSize * Math.floor(
-                (this.chunkSize - this.headerSize - this.signatureLength - 1)
-                / this.cipherBlockSize) - this.sequenceHeaderSize;
+            this.maxBodySize =
+                this.plainBlockSize *
+                    Math.floor((this.chunkSize - this.headerSize - this.signatureLength - 1) / this.cipherBlockSize) -
+                this.sequenceHeaderSize;
 
             // this is the formula proposed  by ERN
-            this.maxBlock = Math.floor((this.chunkSize - this.headerSize) / this.cipherBlockSize);
-            this.maxBodySize = this.plainBlockSize * this.maxBlock - this.sequenceHeaderSize - this.signatureLength - 1;
+            this.#maxBlock = Math.floor((this.chunkSize - this.headerSize) / this.cipherBlockSize);
+            this.maxBodySize = this.plainBlockSize * this.#maxBlock - this.sequenceHeaderSize - this.signatureLength - 1;
 
             if (this.plainBlockSize > 256) {
                 this.maxBodySize -= 1;
@@ -149,203 +198,306 @@ export class ChunkManager extends EventEmitter {
         assert(this.maxBodySize > 0); // no space left to write data
 
         // where the data starts in the block
-        this.dataOffset = this.headerSize + this.sequenceHeaderSize;
+        this.#dataOffset = this.headerSize + this.sequenceHeaderSize;
 
-        this.chunk = null;
-        this.cursor = 0;
-        this.pendingChunk = null;
+        this.#chunk = null;
+        this.#cursor = 0;
+        this.#pendingChunk = null;
+    }
 
+    public evaluateTotalLengthAndChunks(bodySize: number): { totalLength: number; chunkCount: number } {
+        const chunkCount = Math.ceil(bodySize / this.maxBodySize);
+        const totalLength = this.chunkSize * chunkCount;
+        return { totalLength, chunkCount };
     }
 
     public write(buffer: Buffer, length?: number) {
-
         length = length || buffer.length;
-        assert(buffer instanceof Buffer || (buffer === null));
         assert(length > 0);
 
         let l = length;
         let inputCursor = 0;
 
         while (l > 0) {
-            assert(length - inputCursor !== 0);
-
-            if (this.cursor === 0) {
-                this._push_pending_chunk(false);
+            if (this.#cursor === 0) {
+                this.#_push_pending_chunk(false);
             }
 
             // space left in current chunk
-            const spaceLeft = this.maxBodySize - this.cursor;
+            const spaceLeft = this.maxBodySize - this.#cursor;
 
             const nbToWrite = Math.min(length - inputCursor, spaceLeft);
 
-            this.chunk = this.chunk || createFastUninitializedBuffer(this.chunkSize);
+            this.#ensureChunkCapacity(this.#cursor + nbToWrite);
+            const chunk = this.#chunk as Buffer;
 
             if (buffer) {
-                buffer.copy(this.chunk!, this.cursor + this.dataOffset, inputCursor, inputCursor + nbToWrite);
+                buffer.copy(chunk, this.#cursor + this.#dataOffset, inputCursor, inputCursor + nbToWrite);
             }
 
             inputCursor += nbToWrite;
-            this.cursor += nbToWrite;
+            this.#cursor += nbToWrite;
 
-            if (this.cursor >= this.maxBodySize) {
-                this._post_process_current_chunk();
+            if (this.#cursor >= this.maxBodySize) {
+                this.#_post_process_current_chunk();
             }
             l -= nbToWrite;
         }
     }
 
-    public end() {
-        if (this.cursor > 0) {
-            this._post_process_current_chunk();
+    /**
+     * make sure the current chunk can hold `bodyBytes` of body.
+     *
+     * The finished chunk is header + sequence header + body + signature, plus, with encryption, the
+     * padding: a small message (a Read response is a few hundred bytes) must not allocate a whole
+     * `chunkSize` buffer, which is 64 KB with the usual transport settings, and the size the peer
+     * asked for: up to megabytes. Symmetric encryption (every MSG chunk) does not grow the data, so
+     * the room for the padding, under one block plus its one or two length bytes, is enough.
+     * Asymmetric encryption (OpenSecureChannel) does grow it: that rare chunk keeps the full size.
+     */
+    #ensureChunkCapacity(bodyBytes: number) {
+        if (this.plainBlockSize > 0 && this.cipherBlockSize !== this.plainBlockSize) {
+            this.#chunk = this.#chunk || Buffer.allocUnsafe(this.chunkSize);
+            return;
         }
-        this._push_pending_chunk(true);
+        const paddingRoom = this.plainBlockSize > 0 ? this.plainBlockSize + 2 : 0;
+        // bodyBytes <= maxBodySize, which leaves room for the padding and the signature in chunkSize
+        const needed = Math.min(this.chunkSize, this.#dataOffset + bodyBytes + paddingRoom + this.signatureLength);
+        if (!this.#chunk) {
+            this.#chunk = Buffer.allocUnsafe(needed);
+        } else if (this.#chunk.length < needed) {
+            const grown = Buffer.allocUnsafe(Math.min(this.chunkSize, Math.max(needed, this.#chunk.length * 2)));
+            this.#chunk.copy(grown, 0, 0, this.#dataOffset + this.#cursor);
+            this.#chunk = grown;
+        }
+    }
+
+    public end() {
+        if (this.#cursor > 0) {
+            this.#_post_process_current_chunk();
+        }
+        this.#_push_pending_chunk(true);
+    }
+
+    /**
+     * `end()` for the asynchronous mode: resolves once every chunk has been
+     * signed/encrypted and emitted, rejecting with the first task error.
+     * (Plain `end()` in async mode enqueues the remaining work and returns
+     * immediately — chunks are emitted as their tasks settle.)
+     */
+    public async endAsync(): Promise<void> {
+        this.end();
+        await this.#asyncTail;
+        if (this.#asyncError) {
+            throw this.#asyncError;
+        }
+    }
+
+    /** true when any asynchronous sign/encrypt function is configured. */
+    get isAsync(): boolean {
+        return !!(this.#signBufferAsyncFunc || this.#encryptBufferAsyncFunc);
     }
 
     /**
      * compute the signature of the chunk and append it at the end
      * of the data block.
      *
-     * @method _write_signature
+
      * @private
      */
-    private _write_signature(chunk: Buffer) {
-
-        if (this.signBufferFunc) {
-            assert(_.isFunction(this.signBufferFunc));
+    #_write_signature(chunk: Buffer, dataEnd: number) {
+        if (this.securityMode === Mode.None) {
+            assert(this.signatureLength === 0, "expecting NO SIGN");
+            return;
+        }
+        if (this.#signBufferFunc) {
+            assert(typeof this.#signBufferFunc === "function");
             assert(this.signatureLength !== 0);
 
-            const signatureStart = this.dataEnd;
-            const sectionToSign = chunk.slice(0, signatureStart);
+            const signatureStart = dataEnd;
+            const sectionToSign = chunk.subarray(0, signatureStart);
 
-            const signature = this.signBufferFunc(sectionToSign);
-            assert(signature.length === this.signatureLength);
-
+            const signature = this.#signBufferFunc.call(this, sectionToSign);
+            assert(signature.length === this.signatureLength, "expecting signature length to match");
             signature.copy(chunk, signatureStart);
-
         } else {
             assert(this.signatureLength === 0, "expecting NO SIGN");
         }
     }
 
-    private _encrypt(chunk: Buffer) {
-
-        if (this.plainBlockSize > 0) {
-
-            assert(this.dataEnd !== undefined);
+    #_encrypt(chunk: Buffer, dataEnd: number) {
+        if (this.securityMode === Mode.None) {
+            // nothing todo
+            return;
+        }
+        if (this.plainBlockSize > 0 && this.#encryptBufferFunc) {
+            assert(dataEnd !== undefined);
             const startEncryptionPos = this.headerSize;
-            const endEncryptionPos = this.dataEnd + this.signatureLength;
+            const endEncryptionPos = dataEnd + this.signatureLength;
 
-            const areaToEncrypt = chunk.slice(startEncryptionPos, endEncryptionPos);
+            const areaToEncrypt = chunk.subarray(startEncryptionPos, endEncryptionPos);
 
             assert(areaToEncrypt.length % this.plainBlockSize === 0); // padding should have been applied
             const nbBlock = areaToEncrypt.length / this.plainBlockSize;
 
-            const encryptedBuffer = this.encryptBufferFunc!(areaToEncrypt);
+            const encryptedBuffer = this.#encryptBufferFunc.call(this, areaToEncrypt);
             assert(encryptedBuffer.length % this.cipherBlockSize === 0);
             assert(encryptedBuffer.length === nbBlock * this.cipherBlockSize);
 
             encryptedBuffer.copy(chunk, this.headerSize, 0);
-
         }
     }
 
-    private _push_pending_chunk(isLast: boolean) {
+    #_push_pending_chunk(isLast: boolean) {
+        if (this.#pendingChunk) {
+            const pendingChunk = this.#pendingChunk;
+            this.#pendingChunk = null;
+            const expectedLength = pendingChunk.length;
 
-        if (this.pendingChunk) {
-
-            const expectedLength = this.pendingChunk.length;
-
+            // Headers are written NOW, synchronously, in both modes: sequence
+            // numbers must be allocated in chunk order, and the abort flag is
+            // read at this instant — only the crypto may be deferred.
             if (this.headerSize > 0) {
+                if (!this.#writeHeaderFunc) {
+                    throw new Error("ChunkManager: writeHeaderFunc is required when headerSize > 0");
+                }
                 // Release 1.02  39  OPC Unified Architecture, Part 6:
                 // The sequence header ensures that the first  encrypted block of every  Message  sent over
                 // a channel will start with different data.
-                this.writeHeaderFunc!(this.pendingChunk.slice(0, this.headerSize), isLast, expectedLength);
+                this.#writeHeaderFunc.call(this, pendingChunk.subarray(0, this.headerSize), isLast, expectedLength);
             }
             if (this.sequenceHeaderSize > 0) {
-                this.writeSequenceHeaderFunc!(
-                    this.pendingChunk.slice(this.headerSize, this.headerSize + this.sequenceHeaderSize));
+                if (!this.#writeSequenceHeaderFunc) {
+                    throw new Error("ChunkManager: writeSequenceHeaderFunc is required when sequenceHeaderSize > 0");
+                }
+                this.#writeSequenceHeaderFunc.call(
+                    this,
+                    pendingChunk.subarray(this.headerSize, this.headerSize + this.sequenceHeaderSize)
+                );
             }
 
-            this._write_signature(this.pendingChunk);
+            if (this.isAsync) {
+                // #dataEnd is per-chunk state that the next #_post_process
+                // overwrites — capture it for the deferred task
+                const dataEnd = this.#dataEnd;
+                this.#asyncTail = this.#asyncTail.then(() => this.#_sign_encrypt_emit_async(pendingChunk, isLast, dataEnd));
+                return;
+            }
 
-            this._encrypt(this.pendingChunk);
+            this.#_write_signature(pendingChunk, this.#dataEnd);
+
+            this.#_encrypt(pendingChunk, this.#dataEnd);
 
             /**
              * @event chunk
              * @param chunk {Buffer}
              * @param isLast {Boolean} , true if final chunk
              */
-            this.emit("chunk", this.pendingChunk, isLast);
-            this.pendingChunk = null;
+            this.emit("chunk", pendingChunk, isLast);
         }
     }
 
-    private _write_padding_bytes(nbPaddingByteTotal: number) {
+    /** the deferred half of {@link #_push_pending_chunk} for the asynchronous mode. */
+    async #_sign_encrypt_emit_async(pendingChunk: Buffer, isLast: boolean, dataEnd: number): Promise<void> {
+        if (this.#asyncError) {
+            // a previous chunk failed: emit nothing further
+            return;
+        }
+        try {
+            if (this.securityMode !== Mode.None) {
+                if (this.#signBufferAsyncFunc) {
+                    const sectionToSign = pendingChunk.subarray(0, dataEnd);
+                    const signature = await this.#signBufferAsyncFunc.call(this, sectionToSign);
+                    assert(signature.length === this.signatureLength, "expecting signature length to match");
+                    signature.copy(pendingChunk, dataEnd);
+                } else {
+                    this.#_write_signature(pendingChunk, dataEnd);
+                }
+                if (this.plainBlockSize > 0) {
+                    if (this.#encryptBufferAsyncFunc) {
+                        const areaToEncrypt = pendingChunk.subarray(this.headerSize, dataEnd + this.signatureLength);
+                        const encryptedBuffer = await this.#encryptBufferAsyncFunc.call(this, areaToEncrypt);
+                        assert(encryptedBuffer.length % this.cipherBlockSize === 0);
+                        encryptedBuffer.copy(pendingChunk, this.headerSize, 0);
+                    } else {
+                        this.#_encrypt(pendingChunk, dataEnd);
+                    }
+                }
+            }
+            this.emit("chunk", pendingChunk, isLast);
+        } catch (err) {
+            this.#asyncError = this.#asyncError || (err as Error);
+        }
+    }
+
+    #_write_padding_bytes(nbPaddingByteTotal: number) {
+        if (!this.#chunk) {
+            throw new Error("ChunkManager: #_write_padding_bytes called with no current chunk");
+        }
+        const chunk = this.#chunk;
 
         const nbPaddingByte = nbPaddingByteTotal % 256;
         const extraNbPaddingByte = Math.floor(nbPaddingByteTotal / 256);
 
-        assert(extraNbPaddingByte === 0 || this.plainBlockSize > 256,
-            "extraNbPaddingByte only requested when key size > 2048");
+        assert(extraNbPaddingByte === 0 || this.plainBlockSize > 256, "extraNbPaddingByte only requested when key size > 2048");
 
         // write the padding byte
-        this.chunk!.writeUInt8(nbPaddingByte, this.cursor + this.dataOffset);
-        this.cursor += 1;
+        chunk.writeUInt8(nbPaddingByte, this.#cursor + this.#dataOffset);
+        this.#cursor += 1;
 
-        for (let i = 0; i < nbPaddingByteTotal; i++) {
-            this.chunk!.writeUInt8(nbPaddingByte, this.cursor + this.dataOffset + i);
+        if (nbPaddingByteTotal > 0) {
+            chunk.fill(nbPaddingByte, this.#cursor + this.#dataOffset, this.#cursor + this.#dataOffset + nbPaddingByteTotal);
+            this.#cursor += nbPaddingByteTotal;
         }
-        this.cursor += nbPaddingByteTotal;
 
         if (this.plainBlockSize > 256) {
-            this.chunk!.writeUInt8(extraNbPaddingByte, this.cursor + this.dataOffset);
-            this.cursor += 1;
+            chunk.writeUInt8(extraNbPaddingByte, this.#cursor + this.#dataOffset);
+            this.#cursor += 1;
         }
-
     }
 
-    private _post_process_current_chunk() {
-
+    #_post_process_current_chunk() {
         let extraEncryptionBytes = 0;
         // add padding bytes if needed
         if (this.plainBlockSize > 0) {
-
             // write padding ( if encryption )
 
             // let's calculate curLength = the length of the block to encrypt without padding yet
             // +---------------+---------------+-------------+---------+--------------+------------+
             // |SequenceHeader | data          | paddingByte | padding | extraPadding | signature  |
             // +---------------+---------------+-------------+---------+--------------+------------+
-            let curLength = this.sequenceHeaderSize + this.cursor + this.signatureLength;
+            let curLength = this.sequenceHeaderSize + this.#cursor + this.signatureLength;
             if (this.plainBlockSize > 256) {
                 curLength += 2; // account for extraPadding Byte Number;
             } else {
                 curLength += 1;
             }
             // let's calculate the required number of padding bytes
-            const n = (curLength % this.plainBlockSize);
+            const n = curLength % this.plainBlockSize;
             const nbPaddingByteTotal = (this.plainBlockSize - n) % this.plainBlockSize;
 
-            this._write_padding_bytes(nbPaddingByteTotal);
-            const adjustedLength = this.sequenceHeaderSize + this.cursor + this.signatureLength;
+            this.#_write_padding_bytes(nbPaddingByteTotal);
+            const adjustedLength = this.sequenceHeaderSize + this.#cursor + this.signatureLength;
 
             assert(adjustedLength % this.plainBlockSize === 0);
             const nbBlock = adjustedLength / this.plainBlockSize;
             extraEncryptionBytes = nbBlock * (this.cipherBlockSize - this.plainBlockSize);
         }
 
-        this.dataEnd = this.dataOffset + this.cursor;
+        this.#dataEnd = this.#dataOffset + this.#cursor;
 
         // calculate the expected length of the chunk, once encrypted if encryption apply
-        const expectedLength = this.dataEnd + this.signatureLength + extraEncryptionBytes;
+        const expectedLength = this.#dataEnd + this.signatureLength + extraEncryptionBytes;
 
-        this.pendingChunk = this.chunk!.slice(0, expectedLength);
+        if (!this.#chunk) {
+            throw new Error("ChunkManager: #_post_process_current_chunk called with no current chunk");
+        }
+        this.#pendingChunk = this.#chunk.subarray(0, expectedLength);
         // note :
         //  - this.pending_chunk has the correct size but is not signed nor encrypted yet
         //    as we don't know what to write in the header yet
         //  - as a result,
-        this.chunk = null;
-        this.cursor = 0;
+        this.#chunk = null;
+        this.#cursor = 0;
     }
-
 }

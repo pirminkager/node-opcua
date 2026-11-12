@@ -2,11 +2,11 @@
  * @module node-opcua-basic-types
  */
 
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream" ;
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
 
-import { getRandomInt } from "./utils";
+import { getRandomInt } from "./utils.js";
 
-export function isValidString(value: any): boolean {
+export function isValidString(value: unknown): boolean {
     return typeof value === "string";
 }
 
@@ -14,16 +14,17 @@ export function randomString(): string {
     const nbCar = getRandomInt(1, 20);
     const cars = [];
     for (let i = 0; i < nbCar; i++) {
+        // exclusive on purpose here: 26 letters, 'A' + 0 .. 'A' + 25
         cars.push(String.fromCharCode(65 + getRandomInt(0, 26)));
     }
     return cars.join("");
 }
 
-export function decodeString(stream: BinaryStream): string | null {
+export function decodeString(stream: BinaryStream, _value?: string | null): string | null {
     return stream.readString();
 }
 
-export function encodeString(value: null|string, stream: OutputBinaryStream): void {
+export function encodeString(value: null | string, stream: OutputBinaryStream): void {
     stream.writeString(value);
 }
 

@@ -1,0 +1,245 @@
+import { convertDataTypeDefinitionToStructureTypeSchema, ExtraDataTypeManager } from "node-opcua-client-dynamic-extension-object";
+import { AttributeIds } from "node-opcua-data-model";
+import { DataTypeFactory, getStandardDataTypeFactory } from "node-opcua-factory";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { coerceNodeId } from "node-opcua-nodeid";
+import { nodesets } from "node-opcua-nodesets";
+import { StatusCodes } from "node-opcua-status-code";
+import type { StructureDefinition } from "node-opcua-types";
+import should from "should";
+import { DataTypeIds } from "../../node-opcua-constants/dist/index.js";
+import { AddressSpace, PseudoSession } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
+import { getAddressSpaceFixture } from "../test_helpers/get_address_space_fixture.js";
+
+describe("convertDataTypeDefinitionToStructureTypeSchema", () => {
+    let addressSpace: AddressSpace;
+    let dataTypeManager: ExtraDataTypeManager;
+    before(async () => {
+        addressSpace = AddressSpace.create();
+
+        addressSpace.registerNamespace("PRIVATE");
+        await generateAddressSpace(addressSpace, [nodesets.standard]);
+        dataTypeManager = new ExtraDataTypeManager();
+        const dataTypeFactory1 = new DataTypeFactory([getStandardDataTypeFactory()]);
+        dataTypeManager.registerDataTypeFactory(1, dataTypeFactory1);
+    });
+    after(async () => {
+        addressSpace.dispose();
+    });
+
+    it("should convert a simple structure data type", async () => {
+        const ns = addressSpace.getOwnNamespace();
+
+        const myStructure = ns.createDataType({
+            browseName: "MyStructure",
+            isAbstract: false,
+            subtypeOf: "Structure",
+            partialDefinition: [
+                {
+                    dataType: coerceNodeId(DataTypeIds.Double),
+                    description: "the first value",
+                    name: "Value1",
+                    valueRank: -1
+                },
+                {
+                    dataType: coerceNodeId(DataTypeIds.String),
+                    description: "the second value",
+                    name: "Value2",
+                    valueRank: -1
+                }
+            ]
+        });
+
+        const dataTypeDefinitionDataValue = myStructure.readAttribute(null, AttributeIds.DataTypeDefinition);
+        should.exist(dataTypeDefinitionDataValue);
+        dataTypeDefinitionDataValue.statusCode.should.eql(StatusCodes.Good);
+
+        const definition = dataTypeDefinitionDataValue.value.value as StructureDefinition;
+        should.exist(definition);
+
+        const psseudoSession = new PseudoSession(addressSpace);
+        const schema = await convertDataTypeDefinitionToStructureTypeSchema(
+            psseudoSession,
+            myStructure.nodeId,
+            "MyStructure",
+            definition,
+            null,
+            dataTypeManager,
+            false,
+            {}
+        );
+
+        should.exist(schema);
+        schema.name.should.eql("MyStructure");
+        schema.fields.length.should.eql(2);
+        schema.fields[0].name.should.eql("value1");
+        schema.fields[0].fieldType.should.eql("Double");
+        schema.fields[1].name.should.eql("value2");
+        schema.fields[1].fieldType.should.eql("String");
+    });
+
+    it("should convert a data type with an enumeration", async () => {
+        const ns = addressSpace.getOwnNamespace();
+
+        const myEnum = ns.addEnumerationType({
+            browseName: "MyEnum",
+            enumeration: ["Red", "Green", "Blue"]
+        });
+
+        const myStructureWithEnum = ns.createDataType({
+            browseName: "MyStructureWithEnum",
+            isAbstract: false,
+            subtypeOf: "Structure",
+            partialDefinition: [
+                {
+                    dataType: myEnum.nodeId,
+                    description: "the enum value",
+                    name: "EnumValue",
+                    valueRank: -1
+                }
+            ]
+        });
+
+        const dataTypeDefinitionDataValue = myStructureWithEnum.readAttribute(null, AttributeIds.DataTypeDefinition);
+        should.exist(dataTypeDefinitionDataValue);
+        dataTypeDefinitionDataValue.statusCode.should.eql(StatusCodes.Good);
+
+        const definition = dataTypeDefinitionDataValue.value.value as StructureDefinition;
+        should.exist(definition);
+
+        const psseudoSession = new PseudoSession(addressSpace);
+
+        const schema = await convertDataTypeDefinitionToStructureTypeSchema(
+            psseudoSession,
+            myStructureWithEnum.nodeId,
+            "MyStructureWithEnum",
+            definition,
+            null,
+            dataTypeManager,
+            false,
+            {}
+        );
+
+        should.exist(schema);
+        schema.name.should.eql("MyStructureWithEnum");
+        schema.fields.length.should.eql(1);
+        schema.fields[0].name.should.eql("enumValue");
+        schema.fields[0].fieldType.should.eql("MyEnum");
+    });
+
+    it("should convert a data type with two enumeration fields", async () => {
+        const ns = addressSpace.getOwnNamespace();
+
+        const myEnum = ns.addEnumerationType({
+            browseName: "MyEnum2",
+            enumeration: ["Red", "Green", "Blue"]
+        });
+
+        const myStructureWithEnum1 = ns.createDataType({
+            browseName: "MyStructureWith2Enum1",
+            isAbstract: false,
+            subtypeOf: "Structure",
+            partialDefinition: [
+                {
+                    dataType: myEnum.nodeId,
+                    description: "the enum value",
+                    name: "EnumValue1",
+                    valueRank: -1
+                },
+                {
+                    dataType: myEnum.nodeId,
+                    description: "the enum value",
+                    name: "EnumValue2",
+                    valueRank: -1
+                }
+            ]
+        });
+        const _myStructureWithEnum2 = ns.createDataType({
+            browseName: "MyStructureWith2Enum2",
+            isAbstract: false,
+            subtypeOf: "Structure",
+            partialDefinition: [
+                {
+                    dataType: myEnum.nodeId,
+                    description: "the enum value",
+                    name: "EnumValue1",
+                    valueRank: -1
+                },
+                {
+                    dataType: myEnum.nodeId,
+                    description: "the enum value",
+                    name: "EnumValue2",
+                    valueRank: -1
+                }
+            ]
+        });
+        const dataTypeDefinitionDataValue = myStructureWithEnum1.readAttribute(null, AttributeIds.DataTypeDefinition);
+        should.exist(dataTypeDefinitionDataValue);
+        dataTypeDefinitionDataValue.statusCode.should.eql(StatusCodes.Good);
+
+        const definition = dataTypeDefinitionDataValue.value.value as StructureDefinition;
+        should.exist(definition);
+
+        const pseudoSession = new PseudoSession(addressSpace);
+
+        const schema = await convertDataTypeDefinitionToStructureTypeSchema(
+            pseudoSession,
+            myStructureWithEnum1.nodeId,
+            "MyStructureWith2Enum1",
+            definition,
+            null,
+            dataTypeManager,
+            false,
+            {}
+        );
+
+        should.exist(schema);
+        schema.name.should.eql("MyStructureWith2Enum1");
+        schema.fields.length.should.eql(2);
+        schema.fields[0].name.should.eql("enumValue1");
+        schema.fields[0].fieldType.should.eql("MyEnum2");
+        schema.fields[1].name.should.eql("enumValue2");
+        schema.fields[1].fieldType.should.eql("MyEnum2");
+
+        const schema2 = await convertDataTypeDefinitionToStructureTypeSchema(
+            pseudoSession,
+            myStructureWithEnum1.nodeId,
+            "MyStructureWith2Enum2",
+            definition,
+            null,
+            dataTypeManager,
+            false,
+            {}
+        );
+
+        should.exist(schema2);
+        schema2.name.should.eql("MyStructureWith2Enum2");
+        schema2.fields.length.should.eql(2);
+        schema2.fields[0].name.should.eql("enumValue1");
+        schema2.fields[0].fieldType.should.eql("MyEnum2");
+        schema2.fields[1].name.should.eql("enumValue2");
+        schema2.fields[1].fieldType.should.eql("MyEnum2");
+    });
+});
+
+describe("convertDataTypeDefinitionToStructureTypeSchema", () => {
+    let addressSpace: AddressSpace;
+    before(async () => {
+        addressSpace = AddressSpace.create();
+    });
+    after(async () => {
+        addressSpace.dispose();
+    });
+    it("ZZZ should load a enum referenced twice", async () => {
+        addressSpace.registerNamespace("PRIVATE");
+
+        const xml_file2 = getAddressSpaceFixture("datatype_enum2.xml");
+        const xml_files = [nodesets.standard, xml_file2];
+
+        await generateAddressSpace(addressSpace, xml_files);
+
+        const d = addressSpace.findDataType("2:RunInfoDataType");
+        should.exist(d);
+    });
+});

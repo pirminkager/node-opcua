@@ -1,363 +1,270 @@
 /**
  * @module node-opcua-client-proxy
  */
-// tslint:disable:no-shadowed-variable
-import * as async from "async";
+import type { EventEmitter } from "node:events";
 import { assert } from "node-opcua-assert";
-import * as _ from "underscore";
 
-import {
-    PseudoSession
-} from "node-opcua-address-space";
-import {
-    AttributeIds, ClientMonitoredItemBase,
-    ClientSession,
-    ClientSubscription, coerceAccessLevelFlag,
-    coerceNodeId, NodeClass,
-    NodeId,
-    TimestampsToReturn
-} from "node-opcua-client";
-import { DataValue } from "node-opcua-data-value";
-import { NodeIdLike } from "node-opcua-nodeid";
-import { CreateSubscriptionRequestOptions } from "node-opcua-service-subscription";
+import { type AccessLevelFlag, AttributeIds, coerceAccessLevelFlag, NodeClass } from "node-opcua-data-model";
+import { type DataValue, TimestampsToReturn } from "node-opcua-data-value";
+import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
+import { coerceNodeId, NodeId, type NodeIdLike } from "node-opcua-nodeid";
+import type { IBasicSessionAsync, IBasicSessionGetArgumentDefinitionAsync } from "node-opcua-pseudo-session";
+import type { ReadValueIdOptions } from "node-opcua-service-read";
+import type { CreateSubscriptionRequestOptions, MonitoringParametersOptions } from "node-opcua-service-subscription";
 import { StatusCodes } from "node-opcua-status-code";
-import { ErrorCallback } from "node-opcua-status-code";
+import type { Variant } from "node-opcua-variant";
 
-import { readUAStructure } from "./object_explorer";
-import { makeRefId } from "./proxy";
-import { ProxyBaseNode } from "./proxy_base_node";
-import { ProxyObject } from "./proxy_object";
-import { ProxyStateMachineType } from "./state_machine_proxy";
+import { readUAStructure } from "./object_explorer.js";
+import { makeRefId } from "./proxy.js";
+import { ProxyObject } from "./proxy_object.js";
+import type { ProxyNode } from "./proxy_transition.js";
+import { ProxyStateMachineType } from "./state_machine_proxy.js";
 
-function getObject(
+interface ProxyObjectWithDynamicFields extends ProxyObject {
+    dataValue?: DataValue;
+    userAccessLevel?: AccessLevelFlag;
+    accessLevel?: AccessLevelFlag;
+    [dynamicChildName: string]: unknown;
+}
+
+const debugLog = make_debugLog("proxy_manager");
+const doDebug = checkDebugFlag("proxy_manager");
+
+export interface IProxy1 {
+    nodeId: NodeId;
+    executableFlag?: boolean;
+    __monitoredItem_execution_flag?: EventEmitter;
+    __monitoredItem?: EventEmitter;
+}
+export interface IProxy extends EventEmitter, IProxy1 {
+    dataValue?: DataValue;
+}
+
+async function internalGetObject(
     proxyManager: UAProxyManager,
     nodeId: NodeIdLike | NodeId,
-    options: any,
-    callback: any
-) {
-
+    _options: { depth?: number }
+): Promise<ProxyNode> {
     const session = proxyManager.session;
 
     nodeId = coerceNodeId(nodeId) as NodeId;
 
     if (nodeId.isEmpty()) {
-        setImmediate(() => {
-            callback(new Error(" Invalid empty node in getObject"));
-        });
-        return;
+        throw new Error(" Invalid empty node in getObject");
     }
 
     const nodesToRead = [
         {
             attributeId: AttributeIds.BrowseName,
-            nodeId,
+            nodeId
         },
         {
             attributeId: AttributeIds.Description,
-            nodeId,
+            nodeId
         },
         {
             attributeId: AttributeIds.NodeClass,
-            nodeId,
+            nodeId
         }
     ];
 
-    function read_accessLevels(
-        clientObject: any,
-        callback: ErrorCallback
-    ) {
+    async function read_accessLevels(clientObject: ProxyObjectWithDynamicFields) {
         const nodesToRead = [
             {
                 attributeId: AttributeIds.Value,
-                nodeId,
+                nodeId
             },
             {
                 attributeId: AttributeIds.UserAccessLevel,
-                nodeId,
+                nodeId
             },
             {
                 attributeId: AttributeIds.AccessLevel,
-                nodeId,
+                nodeId
             }
         ];
 
-        session.read(nodesToRead, 1, (err: Error | null, dataValues?: DataValue[]) => {
+        const dataValues = await session.read(nodesToRead);
 
-            if (err) {
-                return callback(err);
-            }
-
-            dataValues = dataValues || [];
-
-            if (dataValues[0].statusCode === StatusCodes.Good) {
-                clientObject.dataValue = dataValues[0].value;
-            }
-            if (dataValues[1].statusCode === StatusCodes.Good) {
-                clientObject.userAccessLevel = coerceAccessLevelFlag(dataValues[1].value.value);
-            }
-            if (dataValues[2].statusCode === StatusCodes.Good) {
-                clientObject.accessLevel = coerceAccessLevelFlag(dataValues[2].value.value);
-            }
-            callback(err!);
-        });
+        if (dataValues[0].statusCode.isGood()) {
+            // store the full DataValue (statusCode + timestamps + value), consistent with
+            // what _monitor_value's "changed" handler assigns here on later updates —
+            // assigning just the Variant (dataValues[0].value) would be a narrower shape.
+            clientObject.dataValue = dataValues[0];
+        }
+        if (dataValues[1].statusCode.isGood()) {
+            clientObject.userAccessLevel = coerceAccessLevelFlag(dataValues[1].value.value);
+        }
+        if (dataValues[2].statusCode.isGood()) {
+            clientObject.accessLevel = coerceAccessLevelFlag(dataValues[2].value.value);
+        }
     }
 
-    let clientObject: any;
+    let clientObject: ProxyObjectWithDynamicFields;
 
-    async.series([
+    const dataValues = await session.read(nodesToRead);
 
-        (callback: ErrorCallback) => {
-            // readAttributes like browseName and references
-            session.read(nodesToRead, 1, (err: Error | null, dataValues?: DataValue[]) => {
+    if (dataValues[0].statusCode.equals(StatusCodes.BadNodeIdUnknown)) {
+        throw new Error(`Invalid Node ${nodeId.toString()}`);
+    }
 
-                if (!err) {
+    clientObject = new ProxyObject(proxyManager, nodeId as NodeId) as ProxyObjectWithDynamicFields;
 
-                    dataValues = dataValues!;
+    clientObject.browseName = dataValues[0].value.value;
+    clientObject.description = dataValues[1].value ? dataValues[1].value.value : "";
+    clientObject.nodeClass = dataValues[2].value.value;
 
-                    if (dataValues[0].statusCode === StatusCodes.BadNodeIdUnknown) {
-                        // xx console.log(" INVALID NODE ", nodeId.toString());
-                        return callback(new Error("Invalid Node " + nodeId.toString()));
-                    }
+    if (clientObject.nodeClass === NodeClass.Variable) {
+        await read_accessLevels(clientObject);
+    }
+    // install monitored item
+    if (clientObject.nodeClass === NodeClass.Variable) {
+        await proxyManager._monitor_value(clientObject);
+    }
 
-                    clientObject = new ProxyObject(proxyManager, nodeId as NodeId);
+    return await readUAStructure(proxyManager, clientObject);
+}
 
-                    /// x console.log("xxxx ,s",results.map(function(a){ return a.toString();}));
+export interface IClientSubscription {
+    monitor(
+        itemToMonitor: ReadValueIdOptions,
+        monitoringParameters: MonitoringParametersOptions,
+        timestampToReturn: TimestampsToReturn
+    ): Promise<IClientMonitoredItemBase>;
 
-                    clientObject.browseName = dataValues[0].value.value;
-                    clientObject.description = (dataValues[1].value ? dataValues[1].value.value : "");
-                    clientObject.nodeClass = dataValues[2].value.value;
-                    // xx console.log("xxx nodeClass = ",clientObject.nodeClass.toString());
+    terminate(): Promise<void>;
+    on(eventName: "terminated", eventHandler: () => void): void;
+}
 
-                    if (clientObject.nodeClass === NodeClass.Variable) {
-                        return read_accessLevels(clientObject, callback);
-                    }
-                }
-                callback(err!);
-            });
-        },
-
-        (callback: ErrorCallback) => {
-
-            // install monitored item
-            if (clientObject.nodeClass === NodeClass.Variable) {
-                // xx console.log("xxxx -> ???", clientObject.nodeId.toString(), clientObject.nodeClass.toString());
-                return proxyManager._monitor_value(clientObject, callback);
-            }
-            callback();
-        },
-
-        (callback: ErrorCallback) => {
-            readUAStructure(proxyManager, clientObject, callback);
-        }
-
-        //
-    ], (err) => {
-
-        // istanbul ignore next
-        if (err) {
-            return callback(err);
-        }
-        callback(null, clientObject);
-    });
+export interface IClientMonitoredItemBase {
+    on(eventName: "changed", eventHandler: (data: DataValue | Variant[]) => void): void;
+}
+export interface IBasicSessionWithSubscriptionAsync extends IBasicSessionAsync, IBasicSessionGetArgumentDefinitionAsync {
+    createSubscription2(options: CreateSubscriptionRequestOptions): Promise<IClientSubscription>;
 }
 
 export class UAProxyManager {
+    public readonly session: IBasicSessionWithSubscriptionAsync;
+    public subscription?: IClientSubscription;
+    #_map: Record<string, ProxyNode>;
 
-    public readonly session: ClientSession;
-    public subscription?: ClientSubscription;
-    private _map: any;
-
-    constructor(session: ClientSession) {
-
+    constructor(session: IBasicSessionWithSubscriptionAsync) {
         this.session = session;
-        this._map = {};
-        // create a subscription
+        this.#_map = {};
     }
 
-    public async start(): Promise<void>;
-    public start(callback: (err?: Error) => void): void;
-    public start(...args: any[]): any {
-        const callback = args[0] as (err?: Error) => void;
-
+    public async start(): Promise<void> {
         const createSubscriptionRequest: CreateSubscriptionRequestOptions = {
             maxNotificationsPerPublish: 1000,
             priority: 10,
             publishingEnabled: true,
             requestedLifetimeCount: 6000,
             requestedMaxKeepAliveCount: 100,
-            requestedPublishingInterval: 100,
+            requestedPublishingInterval: 100
         };
 
-        this.session.createSubscription2(
-            createSubscriptionRequest,
-            (err: Error | null, subscription?: ClientSubscription) => {
-                if (err) {
-                    return callback(err);
-                }
-                this.subscription = subscription!;
-                this.subscription.on("terminated", () => {
-                    this.subscription = undefined;
-                });
-                callback();
-            });
+        const subscription = await this.session.createSubscription2(createSubscriptionRequest);
+        this.subscription = subscription;
+        this.subscription?.on("terminated", () => {
+            this.subscription = undefined;
+        });
     }
 
-    public async stop(): Promise<void>;
-    public stop(callback: (err?: Error) => void): void;
-
-    public stop(...args: any[]): any {
-        const callback = args[0] as (err?: Error) => void;
-
+    public async stop(): Promise<void> {
         if (this.subscription) {
-            this.subscription.terminate(() => {
-                this.subscription = undefined;
-                callback();
-            });
-
+            await this.subscription.terminate();
+            this.subscription = undefined;
         } else {
-            callback(new Error("UAProxyManager already stopped ?"));
+            // throw new Error("UAProxyManager already stopped ?");
         }
     }
 
     // todo: rename getObject as getNode
-    public async getObject(nodeId: NodeIdLike): Promise<any>;
+    public async getObject(nodeId: NodeIdLike): Promise<ProxyNode> {
+        const options: { depth: number } = { depth: 1 };
 
-    public getObject(
-        nodeId: NodeIdLike,
-        callback: (err: Error | null, object?: any) => void
-    ): void;
-    public getObject(...args: any[]): any {
-
-        const nodeId = args[0] as NodeIdLike;
-        const callback = args[1] as (err: Error | null, object?: any) => void;
-
-        let options: any = {};
-
-        setImmediate(() => {
-            options = options || {};
-            options.depth = options.depth || 1;
-
-            const key = nodeId.toString();
-            // the object already exist in the map ?
-            if (this._map.hasOwnProperty(key)) {
-                return callback(null, this._map[key]);
-            }
-
-            getObject(this, nodeId, options, (err: Error | null, obj?: ProxyBaseNode) => {
-
-                if (!err) {
-                    this._map[key] = obj;
-                }
-                callback(err, obj);
-            });
-        });
-    }
-
-    public _monitor_value(
-        proxyObject: any,
-        callback: ErrorCallback
-    ) {
-
-        if (!this.subscription) {
-            // some server do not provide subscription support, do not treat this as an error.
-            return callback(); // new Error("No subscription"));
+        const key = nodeId.toString();
+        // the object already exist in the map ?
+        if (Object.hasOwn(this.#_map, key)) {
+            return this.#_map[key];
         }
 
-        const itemToMonitor = { // ReadValueId
+        const obj = await internalGetObject(this, nodeId, options);
+        this.#_map[key] = obj;
+        return obj;
+    }
+
+    public async _monitor_value(proxyObject: IProxy): Promise<void> {
+        if (!this.subscription) {
+            // debugLog("cannot monitor _monitor_value: no subscription");
+            // some server do not provide subscription support, do not treat this as an error.
+            return; // new Error("No subscription"));
+        }
+
+        const itemToMonitor: ReadValueIdOptions = {
+            // ReadValueId
             attributeId: AttributeIds.Value,
-            nodeId: proxyObject.nodeId,
+            nodeId: proxyObject.nodeId
         };
-        const monitoringParameters = { // MonitoringParameters
+        const monitoringParameters: MonitoringParametersOptions = {
+            // MonitoringParameters
             discardOldest: true,
             queueSize: 10,
-            samplingInterval: 0, /* event-based */
+            samplingInterval: 0 /* event-based */
         };
         const requestedParameters = TimestampsToReturn.Both;
 
-        this.subscription.monitor(
-            itemToMonitor, monitoringParameters, requestedParameters,
+        const monitoredItem = await this.subscription.monitor(itemToMonitor, monitoringParameters, requestedParameters);
 
-            (err: Error | null, monitoredItem?: ClientMonitoredItemBase) => {
-
-                Object.defineProperty(proxyObject, "__monitoredItem", { value: monitoredItem, enumerable: false });
-
-                proxyObject.__monitoredItem.on("changed", (dataValue: DataValue) => {
-                    proxyObject.dataValue = dataValue;
-                    proxyObject.emit("value_changed", dataValue);
-                });
-                callback(err!);
-            });
-
+        Object.defineProperty(proxyObject, "__monitoredItem", { value: monitoredItem, enumerable: false });
+        proxyObject.__monitoredItem?.on("changed", (dataValue: DataValue) => {
+            proxyObject.dataValue = dataValue;
+            proxyObject.emit("value_changed", dataValue);
+        });
+        proxyObject.__monitoredItem?.on("err", (err: Error) => {
+            // c8 ignore next
+            doDebug && debugLog("Proxy: cannot monitor variable ", itemToMonitor.nodeId?.toString(), err.message);
+        });
     }
 
-    public _monitor_execution_flag(
-        proxyObject: any,
-        callback: (err?: Error) => void
-    ) {
-
+    public async _monitor_execution_flag(proxyObject: IProxy1): Promise<void> {
         // note : proxyObject must wrap a method
-        assert(_.isFunction(callback));
         assert(proxyObject.nodeId instanceof NodeId);
 
         if (!this.subscription) {
             // some server do not provide subscription support, do not treat this as an error.
-            return callback(); // new Error("No subscription"));
+            return; // new Error("No subscription"));
         }
 
-        const itemToMonitor = { // ReadValueId
+        const itemToMonitor = {
+            // ReadValueId
             attributeId: AttributeIds.Executable,
-            nodeId: proxyObject.nodeId,
+            nodeId: proxyObject.nodeId
         };
 
-        const monitoringParameters = { // MonitoringParameters
+        const monitoringParameters = {
+            // MonitoringParameters
             discardOldest: true,
             queueSize: 10,
-            samplingInterval: 0, /* event-based */
+            samplingInterval: 0 /* event-based */
         };
         const requestedParameters = TimestampsToReturn.Neither;
 
-        this.subscription.monitor(
-            itemToMonitor, monitoringParameters, requestedParameters,
-            (err: Error | null, monitoredItem?: ClientMonitoredItemBase) => {
+        const monitoredItem = await this.subscription.monitor(itemToMonitor, monitoringParameters, requestedParameters);
+        Object.defineProperty(proxyObject, "__monitoredItem_execution_flag", {
+            value: monitoredItem,
 
-                Object.defineProperty(
-                    proxyObject,
-                    "__monitoredItem_execution_flag",
-                    { value: monitoredItem, enumerable: false });
-
-                proxyObject.__monitoredItem_execution_flag.on("changed", (dataValue: DataValue) => {
-                    proxyObject.executableFlag = dataValue.value.value;
-                });
-
-                callback(err!);
-            });
+            enumerable: false
+        });
+        proxyObject.__monitoredItem_execution_flag?.on("changed", (dataValue: DataValue) => {
+            proxyObject.executableFlag = dataValue.value.value;
+        });
     }
-
-    public getStateMachineType(
-        nodeId: NodeIdLike,
-        callback: (err: Error | null, stateMachineType?: ProxyStateMachineType) => void
-    ) {
-
+    public async getStateMachineType(nodeId: NodeIdLike): Promise<ProxyStateMachineType> {
         if (typeof nodeId === "string") {
-            const org_nodeId = nodeId;
             nodeId = makeRefId(nodeId);
         }
-
-        this.getObject(nodeId, (err: Error | null, obj: any) => {
-
-            // read fromState and toState Reference on
-            let stateMachineType;
-            if (!err) {
-                stateMachineType = new ProxyStateMachineType(obj);
-            }
-            callback(err, stateMachineType);
-        });
-
+        const obj = await this.getObject(nodeId);
+        return new ProxyStateMachineType(obj);
     }
 }
-
-// tslint:disable-next-line:no-var-requires
-const thenify = require("thenify");
-UAProxyManager.prototype.start = thenify.withCallback(UAProxyManager.prototype.start);
-UAProxyManager.prototype.stop = thenify.withCallback(UAProxyManager.prototype.stop);
-UAProxyManager.prototype.getObject = thenify.withCallback(UAProxyManager.prototype.getObject);

@@ -1,0 +1,90 @@
+{
+    "name": "node-opcua-json",
+    "type": "module",
+    "version": "2.187.26",
+    "description": "pure nodejs OPCUA SDK - the OPC UA JSON encoding of OPC 10000-6 clause 5.4",
+    "scripts": {
+        "build": "tsc -b",
+        "lint": "biome check --no-errors-on-unmatched .",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "engines": {
+        "node": ">=22.13.0"
+    },
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./104": {
+            "types": "./dist/104/index.d.ts",
+            "default": "./dist/104/index.js"
+        },
+        "./105": {
+            "types": "./dist/105/index.d.ts",
+            "default": "./dist/105/index.js"
+        },
+        "./dist/*": {
+            "types": "./dist/*.d.ts",
+            "default": "./dist/*.js"
+        },
+        "./dist/*.js": {
+            "types": "./dist/*.d.ts",
+            "default": "./dist/*.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "typesVersions": {
+        "*": {
+            "104": [
+                "dist/104/index.d.ts"
+            ],
+            "105": [
+                "dist/105/index.d.ts"
+            ]
+        }
+    },
+    "dependencies": {
+        "node-opcua-basic-types": "2.187.0",
+        "node-opcua-data-model": "2.187.0",
+        "node-opcua-data-value": "2.187.19",
+        "node-opcua-date-time": "2.187.0",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-extension-object": "2.187.0",
+        "node-opcua-factory": "2.187.0",
+        "node-opcua-nodeid": "2.187.0",
+        "node-opcua-numeric-range": "2.187.0",
+        "node-opcua-status-code": "2.187.0",
+        "node-opcua-types": "2.187.19",
+        "node-opcua-variant": "2.187.19"
+    },
+    "devDependencies": {
+        "node-opcua-address-space": "2.187.26",
+        "node-opcua-constants": "2.185.0",
+        "node-opcua-nodesets": "2.187.4"
+    },
+    "author": "Etienne Rossignon",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/node-opcua/node-opcua.git"
+    },
+    "keywords": [
+        "OPCUA",
+        "opcua",
+        "m2m",
+        "iot",
+        "opc ua",
+        "internet of things",
+        "json"
+    ],
+    "homepage": "http://node-opcua.github.io/",
+    "files": [
+        "dist",
+        "source"
+    ]
+}

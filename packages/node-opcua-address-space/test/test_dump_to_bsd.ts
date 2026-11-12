@@ -1,22 +1,15 @@
-import {
-    AddressSpace,
-    getMiniAddressSpace,
-    dumpToBSD,
-    generateAddressSpace,
-} from "..";
 import { nodesets } from "node-opcua-nodesets";
-import { StructureDefinitionOptions, StructureDefinition, EnumDefinition, StructureType } from "node-opcua-types";
 import { DataType } from "node-opcua-variant";
-import { NodeId } from "node-opcua-nodeid";
+import should from "should";
+
+import { AddressSpace, dumpToBSD } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
 
 describe("converting DataType to BSD schema files", () => {
-
     let addressSpace: AddressSpace;
     beforeEach(async () => {
         addressSpace = AddressSpace.create();
-        const nodesetFilename = [
-            nodesets.standard
-        ];
+        const nodesetFilename = [nodesets.standard];
         await generateAddressSpace(addressSpace, nodesetFilename);
         addressSpace.registerNamespace("PRIVATE");
     });
@@ -26,52 +19,49 @@ describe("converting DataType to BSD schema files", () => {
 
     it("BSD1- should convert a DataType to a schema file", () => {
         const namespace = addressSpace.getOwnNamespace();
-        const dataType = namespace.createDataType({
-            browseName: "MyDataType",
-            isAbstract: true,
-            subtypeOf: "Structure",
-        });
-        const xml = dumpToBSD(namespace);
-        // tslint:disable-next-line: no-console
-        // console.log(xml);
-        xml.should.eql(`<?xml version="1.0"?>
-<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:n1="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
-    <opc:StructuredType Name="MyDataType" BaseType="ua:ExtensionObject"/>
-</opc:TypeDictionary>`);
-    });
-    it("BSD2- structure 1", async () => {
-
-        const namespace = addressSpace.getOwnNamespace();
-        const dataType = namespace.createDataType({
+        const _dataType = namespace.createDataType({
             browseName: "MyDataType",
             isAbstract: true,
             subtypeOf: "Structure"
         });
-
-        (dataType as any).$definition = new StructureDefinition({
-            baseDataType: "",
-            fields: [
-                {
-                    dataType: DataType.String,
-                    description: "the name",
-                    isOptional: false,
-                    name: "Name",
-                    valueRank: -1
-                },
-                {
-                    arrayDimensions: [1],
-                    dataType: DataType.Float,
-                    description: "the list of values",
-                    name: "Values",
-                    valueRank: 1,
-                }
-            ]
-        });
         const xml = dumpToBSD(namespace);
-        // tslint:disable-next-line: no-console
         // console.log(xml);
-        xml.should.eql(`<?xml version="1.0"?>
-<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:n1="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+        xml.should.eql(`<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:tns="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+    <opc:Import Namespace="http://opcfoundation.org/UA/"/>
+    <opc:StructuredType Name="MyDataType" BaseType="ua:ExtensionObject"/>
+</opc:TypeDictionary>`);
+    });
+    it("BSD2- structure 1", async () => {
+        const partialDefinition = [
+            {
+                dataType: DataType.String,
+                description: "the name",
+                isOptional: false,
+                name: "Name",
+                valueRank: -1
+            },
+            {
+                arrayDimensions: [1],
+                dataType: DataType.Float,
+                description: "the list of values",
+                name: "Values",
+                valueRank: 1
+            }
+        ];
+        const namespace = addressSpace.getOwnNamespace();
+        const _dataType = namespace.createDataType({
+            browseName: "MyDataType",
+            isAbstract: true,
+            subtypeOf: "Structure",
+            partialDefinition
+        });
+
+        //  const definition = namespace.getStructureDefinition();
+
+        const xml = dumpToBSD(namespace);
+        // console.log(xml);
+        xml.should.eql(`<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:tns="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+    <opc:Import Namespace="http://opcfoundation.org/UA/"/>
     <opc:StructuredType Name="MyDataType" BaseType="ua:ExtensionObject">
         <opc:Field Name="Name" TypeName="opc:String"/>
         <opc:Field Name="NoOfValues" TypeName="opc:Int32"/>
@@ -80,7 +70,6 @@ describe("converting DataType to BSD schema files", () => {
 </opc:TypeDictionary>`);
     });
     it("BSD3 - Enumeration ", async () => {
-
         const namespace = addressSpace.getOwnNamespace();
 
         namespace.addEnumerationType({
@@ -89,10 +78,9 @@ describe("converting DataType to BSD schema files", () => {
         });
 
         const xml = dumpToBSD(namespace);
-        // tslint:disable-next-line: no-console
         // console.log(xml);
-        xml.should.eql(`<?xml version="1.0"?>
-<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:n1="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+        xml.should.eql(`<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:tns="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+    <opc:Import Namespace="http://opcfoundation.org/UA/"/>
     <opc:EnumeratedType Name="MyEnumType2" LengthInBits="32">
         <opc:EnumeratedValue Name="RUNNING" Value="0"/>
         <opc:EnumeratedValue Name="BLOCKED" Value="1"/>
@@ -100,69 +88,71 @@ describe("converting DataType to BSD schema files", () => {
         <opc:EnumeratedValue Name="UNDER MAINTENANCE" Value="3"/>
     </opc:EnumeratedType>
 </opc:TypeDictionary>`);
-
     });
-    it("BSD4- structure 2", async () => {
-
+    it("BSD4 - structure 2", async () => {
         const namespace = addressSpace.getOwnNamespace();
+
+        const partialDefinition = [
+            {
+                dataType: DataType.String,
+                description: "the name",
+                isOptional: false,
+                name: "Name",
+                valueRank: -1
+            },
+            {
+                arrayDimensions: [1],
+                dataType: DataType.NodeId,
+                description: "the list of NodeId",
+                name: "Values",
+                valueRank: 1
+            }
+        ];
+
         const dataType = namespace.createDataType({
             browseName: "MyDataType",
             isAbstract: true,
-            subtypeOf: "Structure"
+            subtypeOf: "Structure",
+            partialDefinition
         });
-        const dataTypeEx = namespace.createDataType({
+        const _dataTypeEx = namespace.createDataType({
             browseName: "MyDataTypeEx",
             isAbstract: true,
-            subtypeOf: dataType.nodeId
-        });
-
-        (dataType as any).$definition = new StructureDefinition({
-            baseDataType: "",
-            fields: [
-                {
-                    dataType: DataType.String,
-                    description: "the name",
-                    isOptional: false,
-                    name: "Name",
-                    valueRank: -1
-                },
-                {
-                    arrayDimensions: [1],
-                    dataType: DataType.NodeId,
-                    description: "the list of NodeId",
-                    name: "Values",
-                    valueRank: 1,
-                }
-            ]
-        });
-        (dataTypeEx as any).$definition = new StructureDefinition({
-            baseDataType: dataType.nodeId,
-            fields: [
+            subtypeOf: dataType.nodeId,
+            partialDefinition: [
                 {
                     dataType: DataType.LocalizedText,
                     description: "extra prop",
                     isOptional: false,
                     name: "Extra",
                     valueRank: -1
-                },
-
-            ],
-            structureType: StructureType.Structure,
+                }
+            ]
         });
+
         const xml = dumpToBSD(namespace);
-        // tslint:disable-next-line: no-console
         // console.log(xml);
-        xml.should.eql(`<?xml version="1.0"?>
-<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:n1="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+        xml.should.eql(`<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:tns="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+    <opc:Import Namespace="http://opcfoundation.org/UA/"/>
     <opc:StructuredType Name="MyDataType" BaseType="ua:ExtensionObject">
         <opc:Field Name="Name" TypeName="opc:String"/>
         <opc:Field Name="NoOfValues" TypeName="opc:Int32"/>
         <opc:Field Name="Values" TypeName="ua:NodeId" LengthField="NoOfValues"/>
     </opc:StructuredType>
-    <opc:StructuredType Name="MyDataTypeEx" BaseType="n1:MyDataType">
+    <opc:StructuredType Name="MyDataTypeEx" BaseType="tns:MyDataType">
         <opc:Field Name="Extra" TypeName="ua:LocalizedText"/>
     </opc:StructuredType>
 </opc:TypeDictionary>`);
+    });
+    it("BSD7 - a basic type's subtype, which has no definition, is left out instead of throwing", () => {
+        // OPC 30010 AutoID's CodeTypeDataType is a String subtype: the whole dictionary threw
+        const namespace = addressSpace.getOwnNamespace();
+        namespace.createDataType({ browseName: "CodeTypeDataType", isAbstract: false, subtypeOf: "String" });
+        namespace.addEnumerationType({ browseName: "MyEnumType3", enumeration: ["ON", "OFF"] });
+
+        const xml = dumpToBSD(namespace);
+        should(xml).not.match(/CodeTypeDataType/);
+        should(xml).match(/<opc:EnumeratedType Name="MyEnumType3" LengthInBits="32">/);
     });
     it("BSD5 - Opaque", async () => {
         /* to do :
@@ -171,7 +161,6 @@ describe("converting DataType to BSD schema files", () => {
         */
     });
     it("BSD6 - WithOptionalValue", async () => {
-
         /*
          <opc:StructuredType Name="DataValue">
             <opc:Documentation>A value with an associated timestamp, and quality.</opc:Documentation>
@@ -191,14 +180,11 @@ describe("converting DataType to BSD schema files", () => {
           </opc:StructuredType>
         */
         const namespace = addressSpace.getOwnNamespace();
-        const dataType = namespace.createDataType({
+        const _dataType = namespace.createDataType({
             browseName: "MyDataWithSwitch",
             isAbstract: true,
-            subtypeOf: "Structure"
-        });
-        (dataType as any).$definition = new StructureDefinition({
-            baseDataType: "",
-            fields: [
+            subtypeOf: "Structure",
+            partialDefinition: [
                 {
                     dataType: DataType.String,
                     description: "OptionalName",
@@ -212,15 +198,15 @@ describe("converting DataType to BSD schema files", () => {
                     description: "Optional list of NodeId",
                     isOptional: true,
                     name: "Values",
-                    valueRank: 1,
+                    valueRank: 1
                 }
             ]
         });
+
         const xml = dumpToBSD(namespace);
-        // tslint:disable-next-line: no-console
         // console.log(xml);
-        xml.should.eql(`<?xml version="1.0"?>
-<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:n1="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+        xml.should.eql(`<opc:TypeDictionary xmlns:opc="http://opcfoundation.org/BinarySchema/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ua="http://opcfoundation.org/UA/" xmlns:tns="PRIVATE" DefaultByteOrder="LittleEndian" TargetNamespace="PRIVATE">
+    <opc:Import Namespace="http://opcfoundation.org/UA/"/>
     <opc:StructuredType Name="MyDataWithSwitch" BaseType="ua:ExtensionObject">
         <opc:Field Name="OptionalNameSpecified" TypeName="opc:Bit"/>
         <opc:Field Name="ValuesSpecified" TypeName="opc:Bit"/>
@@ -231,5 +217,4 @@ describe("converting DataType to BSD schema files", () => {
     </opc:StructuredType>
 </opc:TypeDictionary>`);
     });
-
 });

@@ -1,0 +1,85 @@
+import type { UAMethod, UAProperty } from "node-opcua-address-space-base";
+import type { Int32, SByte, UInt32 } from "node-opcua-basic-types";
+import type { UAFunctionalGroup } from "node-opcua-nodeset-di/dist/ua_functional_group.js";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { UAMultiStateDiscrete } from "node-opcua-nodeset-ua/dist/ua_multi_state_discrete.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { DTAntennaNameIdPair } from "./dt_antenna_name_id_pair.js";
+import type { UAAutoIdDevice, UAAutoIdDevice_Base, UAAutoIdDevice_diagnostics, UAAutoIdDevice_runtimeParameters } from "./ua_auto_id_device.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UARfidReaderDevice_diagnostics extends UAAutoIdDevice_diagnostics { // Object
+      /**
+       * lastAccess
+       * Values of the last AutoID Identifier access.
+       */
+      lastAccess?: UAFunctionalGroup;
+}
+export interface UARfidReaderDevice_runtimeParameters extends UAAutoIdDevice_runtimeParameters { // Object
+      /**
+       * codeTypesRWData
+       * Supported CodeTypes and selected CodeType for the
+       * diagnostics value RWData.
+       */
+      codeTypesRWData?: UAMultiStateDiscrete<UInt32[], DataType.UInt32>;
+      /**
+       * enableAntennas
+       * Antennas that shall be used by the device for its
+       * operation.
+       */
+      enableAntennas?: UABaseDataVariable<UInt32, DataType.UInt32>;
+      /**
+       * minRssi
+       * Lowest acceptable RSSI value.
+       */
+      minRssi?: UABaseDataVariable<Int32, DataType.Int32>;
+      /**
+       * rfPower
+       * Radio transmission power of the antenna.
+       */
+      rfPower?: UABaseDataVariable<SByte, DataType.SByte>;
+      /**
+       * tagTypes
+       * Expected tags in a multi-type environment.
+       */
+      tagTypes?: UAMultiStateDiscrete<UInt32[], DataType.UInt32>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/AutoID/                         |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |RfidReaderDeviceType i=1003                                 |
+ * |isAbstract      |false                                                       |
+ */
+export interface UARfidReaderDevice_Base extends UAAutoIdDevice_Base {
+    antennaNames?: UAProperty<DTAntennaNameIdPair[], DataType.ExtensionObject>;
+    /**
+     * diagnostics
+     * Diagnostic data from AutoID Devices.
+     */
+    diagnostics?: UARfidReaderDevice_diagnostics;
+    killTag?: UAMethod;
+    /**
+     * lastScanAntenna
+     * ID of the antenna with which the last AutoID
+     * Identifier was scanned.
+     */
+    lastScanAntenna?: UABaseDataVariable<Int32, DataType.Int32>;
+    /**
+     * lastScanRSSI
+     * RSSI Value with which the last AutoID Identifier
+     * was scanned.
+     */
+    lastScanRSSI?: UABaseDataVariable<Int32, DataType.Int32>;
+    lockTag?: UAMethod;
+    readTag?: UAMethod;
+    runtimeParameters?: UARfidReaderDevice_runtimeParameters;
+    scan?: UAMethod;
+    setTagPassword?: UAMethod;
+    writeTag?: UAMethod;
+    writeTagID?: UAMethod;
+}
+export interface UARfidReaderDevice extends Omit<UAAutoIdDevice, "diagnostics"|"runtimeParameters"|"scan">, UARfidReaderDevice_Base {}

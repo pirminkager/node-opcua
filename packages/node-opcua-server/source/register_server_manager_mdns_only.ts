@@ -3,64 +3,74 @@
  */
 // RegisterServerManagerMDNSONLY
 
-import { EventEmitter } from "events";
+import { EventEmitter } from "node:events";
 import { assert } from "node-opcua-assert";
-import {
-    BonjourHolder
-} from "node-opcua-service-discovery";
-import { OPCUABaseServer } from "./base_server";
-import { IRegisterServerManager } from "./I_register_server_manager";
+import { BonjourHolder } from "node-opcua-service-discovery";
+import { OPCUABaseServer } from "./base_server.js";
+import { type IRegisterServerManager, RegisterServerManagerStatus } from "./i_register_server_manager.js";
 
 /**
  * a RegisterServerManager that declare the server the OPCUA Bonjour service
  * available on the current computer
  */
-export class RegisterServerManagerMDNSONLY
-  extends EventEmitter
-    implements IRegisterServerManager {
-
-    public discoveryServerEndpointUrl: string = "";
+export class RegisterServerManagerMDNSONLY extends EventEmitter implements IRegisterServerManager {
+    public discoveryServerEndpointUrl = "";
 
     private server?: OPCUABaseServer;
     private bonjour: BonjourHolder;
+    private _state: RegisterServerManagerStatus = RegisterServerManagerStatus.NOT_APPLICABLE;
 
-    constructor(options: any) {
+    constructor(options: { server: OPCUABaseServer }) {
         super();
         this.server = options.server;
         assert(this.server);
         assert(this.server instanceof OPCUABaseServer);
         this.bonjour = new BonjourHolder();
+        this._state = RegisterServerManagerStatus.INITIALIZING;
     }
 
-    public stop(callback: () => void) {
+    public async stop(): Promise<void> {
         if (this.bonjour) {
-            this.bonjour._stop_announcedOnMulticastSubnet();
-        }
-        setImmediate(() => {
+            this._state = RegisterServerManagerStatus.UNREGISTERING;
+            await this.bonjour.stopAnnouncedOnMulticastSubnet();
             this.emit("serverUnregistered");
-            setImmediate(callback);
-        });
+            this._state = RegisterServerManagerStatus.INACTIVE;
+        }
     }
 
-    public start(callback: () => void) {
+    public async start(): Promise<void> {
+        /* c8 ignore next */
         if (!this.server) {
             throw new Error("internal error");
         }
         assert(this.server instanceof OPCUABaseServer);
 
-        this.bonjour._announcedOnMulticastSubnet({
-            capabilities: this.server.capabilitiesForMDNS,
-            name: this.server.serverInfo.applicationUri!,
+        const host = "TODO-find how to extract hostname";
+        const capabilities = this.server.capabilitiesForMDNS;
+        if (!this.server.serverInfo.applicationUri) {
+            throw new Error("internal error: expecting a valid applicationUri");
+        }
+        const name = this.server.serverInfo.applicationUri;
+        const port = this.server.endpoints[0].port;
+
+        this._state = RegisterServerManagerStatus.REGISTERING;
+        await this.bonjour.announcedOnMulticastSubnet({
+            capabilities: capabilities,
+            name: name,
             path: "/", // <- to do
-            port: this.server.endpoints[0].port,
+            host,
+            port: port
         });
-        setImmediate(() => {
-            this.emit("serverRegistered");
-            setImmediate(callback);
-        });
+        this._state = RegisterServerManagerStatus.WAITING;
+        this.emit("serverRegistered");
     }
 
-    public dispose() {
+    public dispose(): void {
+        assert(!this.bonjour.isStarted());
+        assert(this.server);
         this.server = undefined;
+    }
+    public getState(): RegisterServerManagerStatus {
+        return this._state;
     }
 }

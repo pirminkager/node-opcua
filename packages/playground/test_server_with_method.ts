@@ -1,20 +1,21 @@
 // tslint:disable:no-console
+import { types } from "node:util";
 import {
-    AddressSpace,
+    type AddressSpace,
+    type CallMethodResultOptions,
     DataType,
-    MethodFunctorCallback,
-    NodeIdLike,
+    type ISessionContext,
+    type NodeIdLike,
     nodesets,
     OPCUAServer,
     SessionContext,
     StatusCodes,
-    UAMethod,
-    UAObject,
+    type UAMethod,
+    type UAObject,
     Variant
 } from "node-opcua";
 
 function installObjectWithMethod(addressSpace: AddressSpace): UAObject {
-
     const namespace = addressSpace.getOwnNamespace();
 
     const myObject: UAObject = namespace.addObject({
@@ -23,7 +24,6 @@ function installObjectWithMethod(addressSpace: AddressSpace): UAObject {
     });
 
     const methodI = namespace.addMethod(myObject, {
-
         browseName: "DoStuff",
         nodeId: "s=DoStuff",
 
@@ -31,36 +31,33 @@ function installObjectWithMethod(addressSpace: AddressSpace): UAObject {
             {
                 dataType: DataType.String,
                 description: { text: "description of first input argument" },
-                name: "Param1",
+                name: "Param1"
             },
             {
                 dataType: DataType.String,
                 description: { text: "description of second input argument" },
-                name: "Param2",
+                name: "Param2"
             },
             {
                 dataType: DataType.String,
                 description: { text: "description of third input argument" },
-                name: "Param3",
+                name: "Param3"
             }
-
         ],
         outputArguments: [
             {
                 dataType: DataType.String,
                 description: { text: "description of result output" },
-                name: "Result",
-
+                name: "Result"
             }
         ]
     });
 
-    methodI.bindMethod(function(
-      this: UAMethod,
-      inputArguments: Variant[],
-      context: SessionContext,
-      callback: MethodFunctorCallback) {
-
+    methodI.bindMethod(async function (
+        this: UAMethod,
+        _inputArguments: Variant[],
+        _context: ISessionContext
+    ): Promise<CallMethodResultOptions> {
         const callMethodResult = {
             outputArguments: [
                 new Variant({
@@ -70,7 +67,7 @@ function installObjectWithMethod(addressSpace: AddressSpace): UAObject {
             ],
             statusCode: StatusCodes.Good
         };
-        callback(null, callMethodResult);
+        return callMethodResult;
     });
 
     return myObject;
@@ -90,30 +87,27 @@ async function callMethodFromServer(addressSpace: AddressSpace, nodeId: NodeIdLi
         const param2 = { dataType: DataType.UInt32, value: 1000 };
         const param3 = { dataType: DataType.String, value: "bar" };
 
-        const context = SessionContext.defaultContext as SessionContext;
+        const context = SessionContext.defaultContext;
 
-        const callMethodResponse = await method.execute(
-          [param1, param2, param3],
-          context);
+        const callMethodResponse = await method.execute(commands, [param1, param2, param3], context);
 
-        console.log(callMethodResponse.outputArguments![0]!.toString());
+        console.log(callMethodResponse.outputArguments?.[0]?.toString());
     }
 }
 
 async function main() {
-
     try {
-
         const server = new OPCUAServer({
-            nodeset_filename: [
-                nodesets.standard_nodeset_file
-            ]
+            nodeset_filename: [nodesets.standard]
         });
 
         await server.initialize();
 
         // post-initialize
-        const addressSpace = server.engine.addressSpace!;
+        const addressSpace = server.engine.addressSpace;
+        if (!addressSpace) {
+            throw new Error("addressSpace should be initialized");
+        }
 
         const object = installObjectWithMethod(addressSpace);
 
@@ -121,10 +115,12 @@ async function main() {
         await callMethodFromServer(addressSpace, object.nodeId);
 
         await server.start();
-        console.log(" Server started ", server.endpoints[0].endpointDescriptions()[0].endpointUrl);
+        console.log(" Server started ", server.getEndpointUrl());
     } catch (err) {
-        console.log(" Error: ", err.message);
-        console.log(err.stack);
+        if (types.isNativeError(err)) {
+            console.log(" Error: ", err.message);
+            console.log(err.stack);
+        }
     }
 }
 

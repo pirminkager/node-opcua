@@ -1,0 +1,498 @@
+name: Node.js CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel in-progress runs of this workflow when a new commit lands on the
+# same ref. Saves CI minutes and gets fresh feedback faster.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege defaults; the coverage job's coverallsapp action elevates
+# what it needs via its own action permissions.
+permissions:
+  contents: read
+
+env:
+  COVERALLS_REPO_TOKEN: "${{ secrets.COVERALLS_REPO_TOKEN }}"
+  COVERALLS_GIT_BRANCH: "${{ github.ref }}"
+
+jobs:
+  # Verifies that the committed generated nodeset files are in sync with the
+  # XML sources and the current convert tool. Also runs the workspace
+  # version-consistency check — both are pure read/verify jobs.
+  generated-drift-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: 'pnpm'
+      # --frozen-lockfile: trust pnpm-lock.yaml's workspace link resolution
+      # (--no-frozen-lockfile in non-recursive mode falls through to the
+      # registry for workspace deps like @sterfive/fix-tsconfigs).
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm run consistency
+      - run: pnpm run generate
+      - name: Check for drift in generated files
+        run: |
+          if ! git diff --quiet; then
+            echo "::error::Generated files are out of sync with their sources or with the convert tool."
+            echo "Re-run 'pnpm run generate' locally and commit the result."
+            echo ""
+            echo "--- changed files ---"
+            git diff --stat | head -40
+            exit 1
+          fi
+          echo "Generated files are in sync."
+
+  # Enforces the repo-wide Biome gate (lint + format + import order) across
+  # packages/, packages_extra/, and tools/. Pure static check, no build
+  # needed — kept fast and separate from the build/test matrix jobs.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm run lint
+      # Every package's mocha config must stay on the one shape that survives pnpm's
+      # layout: spread packages/.mocharc.js, override only what differs, never write a
+      # relative path into `require`. Cheap to check here, and the alternative is
+      # finding out from a package that will not start - which is how the last one went.
+      - run: pnpm run check:mocharc
+      # Module-scope await anywhere in the graph makes `require("node-opcua")` throw
+      # ERR_REQUIRE_ASYNC_MODULE, which is how every CommonJS consumer loads us. The test
+      # suite would not notice: it loads packages with `import`, where top-level await is
+      # legal. Only a consumer's application finds out. Checked here so it cannot happen.
+      # Which directories each gate looks at, derived from what each package publishes
+      # rather than a hardcoded source/src. That assumption had already cost coverage
+      # twice: source_nodejs was never scanned, and renaming a package's trees to api/impl
+      # dropped 151 files out of every gate at once, all of which kept reporting clean.
+      - name: Unit tests for shipped-directory discovery
+        run: node tools/shared/test/test_shipped_dirs.js
+      - run: pnpm run check:tla
+      - name: Unit tests for the top-level-await detector
+        run: node tools/check-no-tla/test/test_detector.js
+      # The logger factories take a module-name literal, never __filename. Those globals
+      # do not exist in ESM or in a browser bundle, and the value was only ever reduced
+      # to a basename anyway - so the literal is what the DEBUG env var already matches
+      # on. Gated because 207 call sites drifted into the old shape once already.
+      - run: pnpm run check:debugname
+      - name: Unit tests for the debug-name rule
+        run: node tools/check-debug-name/test/test_rule.js
+      # ESM has no extension search and no directory resolution, so every relative
+      # specifier must name the emitted file. CommonJS tolerates both forms, which is why
+      # ~4900 extensionless ones accumulated and why they could all be written before any
+      # package flips. Gated so they cannot come back.
+      - run: pnpm run check:importext
+      - name: Unit tests for the import-extension rule
+        run: node tools/check-import-extension/test/test_rule.js
+      # Circular imports that would throw under ESM. It classifies rather than counts: a
+      # cycle only fails here when a member uses a cyclic binding while its own body runs
+      # (a class heritage clause, a module-scope initializer). Of the 14 cycles this repo
+      # had, 11 were harmless and flagging those would have made the gate noise.
+      - run: pnpm run check:cycles
+      # A class published as `X as unknown as new () => X` asserts something the compiler
+      # cannot check, so the class and the interface it claims drift. Address-space had 15,
+      # and behind them a Transition typed as a bare BaseNode rather than the UAObject it
+      # is, an alarm requiring a property its own interface made optional, and a method
+      # returning a wider type than promised. One documented exemption remains.
+      - run: pnpm run check:ctorcast
+      - name: Unit tests for the construction-cast rule
+        run: node tools/check-construction-cast/test/test_rule.js
+      # The root has required node >=22.13 since 18/20 were dropped from CI, but the root is
+      # private and never published: the umbrella still said >=18 and 110 packages said
+      # nothing, so a consumer on an unsupported Node was never warned. It matters more at
+      # 3.0, where require() of an ES module needs 22.12 and below that fails hard.
+      - run: pnpm run check:engines
+      - name: Unit tests for the engines rule
+        run: node tools/check-engines/test/test_rule.js
+      # Neither __dirname nor __filename exists in an ES module or a browser bundle. FEAT-1
+      # gave each module a single anchor line to change at the flip and asserted the tree was
+      # clean; nothing gated it, and four raw uses had reappeared by the time the migration
+      # resumed, two in packages written after FEAT-1 closed.
+      - run: pnpm run check:dirname
+      - name: Unit tests for the dirname rule
+        run: node tools/check-dirname/test/test_rule.js
+      - run: pnpm run check:identity
+      # A package's types must describe the module its main loads. When the two named
+      # different modules, node-opcua-address-space came to declare twelve names its main
+      # did not export: they compiled and were undefined at run time, for every consumer of
+      # the published API. Absolute; the internal-tag half of the rule is a baseline.
+      - run: pnpm run check:entrypoints
+      - name: Catalog images match their NodeSet2 files
+        run: pnpm run check:nodeset-images
+      - name: Unit tests for the entry-points rule
+        run: node tools/check-entry-points/test/test_rule.js
+      # `a?.b.should.eql(x)` short-circuits the whole chain, so a null skips the assertion
+      # and the test passes having checked nothing. 1441 were reaching their subject through
+      # `?.` or `!`; they now pass it to should(), which asserts on undefined instead of
+      # skipping or throwing a bare TypeError.
+      - run: pnpm run check:shortcircuit
+      - name: Unit tests for the short-circuit rule
+        run: node tools/check-short-circuit-assertion/test/test_rule.js
+      - name: Unit tests for the cycle rule
+        run: node tools/check-import-cycles/test/test_rule.js
+      # Raw private-key access is being migrated to the opaque key-operations
+      # path (HSM/KMS capable); the baseline ratchet only ever tightens, so a
+      # new .getPrivateKey( call site fails here instead of slipping in.
+      - run: pnpm run check:privatekey
+      # obj[key] = value does not write a data property when key is "__proto__" - it
+      # invokes [[SetPrototypeOf]]. GHSA-vjmq-2f58-rg3x was exactly this: a StructureField
+      # name taken from wire/nodeset data used as a dynamic key with no check. Syntactic,
+      # so it flags every unguarded computed-key write and leans on a baseline (any
+      # already-reviewed finding) to keep the gate to just what's new.
+      - run: pnpm run check:protopollution
+      - name: Unit tests for the proto-pollution rule
+        run: node tools/check-proto-pollution/test/test_rule.js
+
+  # A gate rather than a lint step, because what it guards is not style. Two test files
+  # holding one fixed port collide as soon as the runner schedules them together, and the
+  # result is an EADDRINUSE at whichever test happened to be running - a flaky job that
+  # costs hours to trace back. This took master red once already.
+  #
+  # --summary exits non-zero on doubt as well as on failure: a port it cannot resolve, one
+  # pinned inside the ephemeral range, a literal invisible from the top of its file, an
+  # unmarked listen(0). Each is a way for two tests to share a port while the report says
+  # otherwise, so none of them may accumulate.
+  #
+  # A deliberate ephemeral port stays legal - mark it, with a reason:
+  #     // check-test-ports: dynamic-ok - asks the OS for a free port, then closes it
+  nodeset_roundtrip:
+    # The conformance checks of documentation/rfc/nodeset-ndjson.md, section 9: every
+    # published nodeset through records -> NodeSet2 XML -> records, an element census of
+    # each source document against the regenerated one, and the two ways back to XML
+    # compared. They run over the whole catalogue and take minutes, which is why they are
+    # not in `pnpm test`: the standard suite has to stay short enough that nobody thinks
+    # twice about running it. They still gate, because what they protect - that the
+    # format carries the document - is not visible in any smaller test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm run build:all
+      - name: NodeSet-NDJSON round trip over the published catalogue
+        run: pnpm --filter node-opcua-address-space run test:long
+
+  check_test_ports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # No pnpm setup and no cache: the scanner has no dependencies, so this job never
+      # installs. Leaving `cache: 'pnpm'` here failed the job outright - setup-node's
+      # post step looks for a pnpm store that was never created and reports a Path
+      # Validation Error.
+      #
+      # Node 26 rather than the matrix versions: this runs plain ESM against the
+      # filesystem, so the newest runtime is the useful one - it is where a syntax or
+      # API change would show up first, and it costs nothing to find out here.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26.x
+      # Called directly rather than through `pnpm run check:ports:summary`, which is
+      # the same command: the scanner has no dependencies, so the gate needs no install
+      # and cannot fail for setup reasons. The npm scripts exist for people.
+      - run: node tools/check-test-ports.mjs --summary
+      - name: Unit tests for the scanner
+        run: node tools/check-test-ports/test/test_scanner.js
+
+  build_on_windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # The Node 24 entry is a sentinel, not a gate. There is currently no Node 24
+    # release Windows can pass on, so this entry is expected to be red; it must not
+    # block a merge or a release. 22.x and 26.x gate.
+    #
+    # 26.x gates from the day it was added: it was green on Windows on its first run
+    # (34840989003) while 24.x failed in the same run, which is the evidence that the
+    # two libuv fixes below are in 26.x and still not in any 24.x release.
+    #
+    # Two libuv bugs are in play, and as of 2026-08-25 neither is in any released
+    # 24.x - both are fixed on main only:
+    #
+    #   - uv_async_send after uv_close (nodejs/node#56645): "Assertion failed:
+    #     !(handle->flags & UV_HANDLE_CLOSING), win/async.c:76", aborting as exit
+    #     3221226505 / 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN). Windows only,
+    #     absent on 22.x, present from 23 onwards, and racy - it fires at an
+    #     unrelated test each time, and the same commit can crash once and pass on
+    #     re-run. node-opcua opens and closes sockets constantly, which is exactly
+    #     what provokes it. Fixed by nodejs/node#61999, merged 2026-07-24.
+    #
+    #   - fs-event regression introduced in 24.16.0 (nodejs/node#63638,
+    #     libuv/libuv#5010). Fixed by nodejs/node#65118, merged 2026-08-14.
+    #
+    # 24.19.0 - the newest 24.x, released 2026-08-03 - therefore carries both. An
+    # earlier attempt to pin it here was strictly worse than the 24.15.0 it
+    # replaced, which predates the fs-event regression and so carries only one of
+    # the two.
+    #
+    # Floating 24.x rather than pinning, deliberately. No pin can be green, so the
+    # pin's usual payoff - an attributable failure - buys less than picking up the
+    # fix unattended: the first 24.x release carrying both PRs turns this entry
+    # green with nobody having to watch for it. When a failure does need
+    # attributing, the resolved version is in the setup-node step of the run.
+    #
+    # Drop continue-on-error once it stays green, and re-check both issues first.
+    continue-on-error: ${{ startsWith(matrix.node-version, '24') }}
+    strategy:
+      # Don't cancel the whole matrix when one Node version fails.
+      fail-fast: false
+      matrix:
+        # Node 18/20 dropped: pnpm 11 requires a recent Node (>=22.13 in our setup).
+        node-version: [22.x, 24.x, 26.x]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      # --ignore-scripts: skip transitive postinstalls (esbuild) so pnpm 11
+      # doesn't fail with ERR_PNPM_IGNORED_BUILDS. The explicit `pnpm run
+      # build` step that follows does the compile that's actually needed.
+      - run: pnpm recursive install --no-frozen-lockfile --ignore-scripts
+      # build:all = generate:types + tsc. Needed because _generated_opcua_types.ts
+      # is gitignored; the lean `build` (tsc only) doesn't produce it. Nodeset
+      # generation is deliberately NOT part of it: that output is committed.
+      - run: pnpm run build:all
+      - run: pnpm run pretest
+      # pwsh, not bash: this step exists to surface the *raw* exit code, and
+      # Git Bash's $? is a POSIX wait status — only 8 bits. That truncation is
+      # exactly what produced the misleading "exit 127" we chased for weeks:
+      # any NTSTATUS ending in 0x7F (native crash) is indistinguishable from a
+      # genuine exit(127) once bash has masked it. $LASTEXITCODE keeps all 32.
+      - name: Run tests
+        shell: pwsh
+        # This job exists to exercise the Windows-specific paths - sockets, crypto,
+        # fs - and to watch for the 0xC0000409 fast-fail. Leak detection is left on
+        # here for the same reason as the build job: its afterEach is what releases
+        # the timers and handles that would otherwise keep a worker alive past its
+        # last test. --expose-gc on the node line below is what it needs to measure.
+        run: |
+          $reportDir = Join-Path $env:RUNNER_TEMP 'node-reports'
+          New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
+          Set-Location packages
+          $stderrLog = Join-Path $reportDir 'node-stderr.log'
+          # --report-on-fatalerror / --report-uncaught-exception ask V8 and libuv to
+          # write a diagnostic JSON when they abort. Keep them - but they have now
+          # produced nothing on three separate 0xC0000409 crashes ("No files were
+          # found with the provided path" each time), because a Windows fast-fail
+          # terminates the process before node reaches its report writer.
+          #
+          # So capture stderr as well, and capture it to a *file*. V8 prints its
+          # "FATAL ERROR: ..." line and a native stack trace to stderr immediately
+          # before aborting, and node writes synchronously to a file handle where it
+          # writes asynchronously to a pipe - which is precisely why those last lines
+          # vanish today.
+          #
+          # cmd, not pwsh, for the redirect: PowerShell's own `2>` hands node a pipe,
+          # re-encodes to UTF-16, wraps the output in a NativeCommandError, and - the
+          # part that matters here - loses the real exit code (a measured abort came
+          # back as 134 instead of the NTSTATUS). cmd's `2>` passes a genuine file
+          # handle and propagates the full 32-bit code unchanged.
+          cmd /c "node --expose-gc --max-old-space-size=4096 --report-on-fatalerror --report-uncaught-exception --report-directory=""$reportDir"" parallel_test.js 2> ""$stderrLog"""
+          $code = $LASTEXITCODE
+          if ((Test-Path $stderrLog) -and (Get-Item $stderrLog).Length -gt 0) {
+            Write-Host "----- node stderr (tail) -----"
+            Get-Content $stderrLog -Tail 60
+            Write-Host "------------------------------"
+          }
+          $hex = '0x{0:X8}' -f $code
+          Write-Host "::notice::parallel_test.js exited with code $code ($hex)"
+          switch ($code) {
+            0 { }
+            1 { Write-Host "::error::test runner reported a test failure (exit 1)" }
+            2 { Write-Host "::error::unhandled rejection / uncaught exception during run (exit 2) — look for the [FATAL] line above" }
+            default {
+              Write-Host "::error::abnormal exit $code ($hex): node died before the runner's clean exit path. A 0xC00000xx value is an NTSTATUS => native crash (access violation, stack overflow, abort); check the node-report artifact and note that missing stdout does NOT rule out a JS-level fault."
+            }
+          }
+          exit $code
+
+      # if: failure() only — a passing run writes no report and the upload
+      # would just warn about an empty directory. Carries node-stderr.log as well
+      # as any report JSON; on a fast-fail the stderr log is the only survivor.
+      - name: Upload node diagnostic reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: node-report-windows-${{ matrix.node-version }}
+          path: ${{ runner.temp }}/node-reports
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node 18/20 dropped: pnpm 11 requires a recent Node (>=22.13 in our setup).
+        # All three entries gate here, unlike build_on_windows where anything past
+        # 22.x is a non-blocking sentinel: every abnormal-exit crash on record came
+        # from that job, and the libuv bug behind it (nodejs/node#56645) is
+        # Windows-only. Linux has never reproduced it.
+        node-version: [22.x, 24.x, 26.x]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      - run: pnpm recursive install --no-frozen-lockfile --ignore-scripts
+      # build:all = generate:types + tsc. Needed because _generated_opcua_types.ts
+      # is gitignored; the lean `build` (tsc only) doesn't produce it. Nodeset
+      # generation is deliberately NOT part of it: that output is committed.
+      - run: pnpm run build:all
+      # Load the built tree the way the two kinds of consumer do, before spending 30
+      # minutes on the suite. The suite itself proves nothing here: it loads packages by
+      # relative path with a TypeScript loader, never through the published entry point,
+      # so it cannot see a broken `main`, a wrong exports condition, a named export
+      # cjs-module-lexer failed to find, or the ERR_REQUIRE_ASYNC_MODULE that a
+      # top-level await would introduce. These two files are the only thing in CI that
+      # exercises `require("node-opcua")` and `import ... from "node-opcua"`.
+      - run: pnpm run check:consumers
+      - run: pnpm run pretest
+      # Test files run untranspiled (mocha + a TypeScript loader), so `tsc -b`
+      # never sees them and a type-invalid test only surfaces at runtime, deep
+      # into the 30-minute suite below. Gate them here instead, while the build
+      # is fresh. Packages that were already red are grandfathered in
+      # tools/test-types-baseline.json; the baseline only ever tightens.
+      - run: pnpm run check:testtypes
+      # Leak detection stays ON everywhere, and MEM_LEAK_DETECTION_DISABLED is
+      # deliberately not set on any job. The detector is not only a measurement: its
+      # afterEach clears the timers and closes the handles a block left behind, and
+      # that is what lets a mocha worker exit. Disabled, it never installs, so mocha
+      # 12 (which does not pass --exit) waits out the longest armed timer and the run
+      # grows a tail after its last test has already reported - measured on this
+      # matrix at 26m before the cleanup fix, still 5m after it. The entry that kept
+      # detection on has a tail under one second and is the fastest job of the five.
+      #
+      # --expose-gc via NODE_OPTIONS rather than in the test:parallel script, so a
+      # plain `pnpm run test:parallel` stays a plain test run for developers. The
+      # detector is its only consumer, and without it takeMemorySnapshot compares
+      # heaps that were never collected - detection on with GC off is the one
+      # combination that costs wall clock and measures nothing. Worker threads
+      # inherit NODE_OPTIONS, which is how it reaches the per-file isolates.
+      - run: pnpm run test:parallel
+        env:
+          NODE_OPTIONS: --expose-gc
+
+  # The suite has three entry points. Two are already exercised: run_all_mocha_tests.js
+  # by coverage, parallel_test.js by build and build_on_windows. This is the third -
+  # `pnpm m run test` walks every package and runs that package's own mocha against its
+  # own .mocharc.
+  #
+  # It needs its own job because it is the only one that reads those config files at
+  # all: the two programmatic runners construct their Mocha instance in code and never
+  # look at a .mocharc. That is how per-package runs came to be broken for a long while
+  # with every CI job green - the root config named ts-node, which is not installed
+  # anywhere in the workspace, and nothing that ran in CI ever tried to load it.
+  #
+  # One flavour is enough. What this proves is config resolution under pnpm's strict
+  # node_modules layout, which is neither platform- nor Node-version-specific.
+  build_per_package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        node-version: [22.x]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      - run: pnpm recursive install --no-frozen-lockfile --ignore-scripts
+      - run: pnpm run build:all
+      # Ask npm what it would actually publish, and check that every path a manifest
+      # names in main/types/exports is in that tarball. The consumer fixtures cannot see
+      # this: they resolve through a pnpm workspace symlink, which exposes the whole
+      # working tree whether or not a file would ship. Runs here rather than in lint
+      # because it needs dist to exist, and this job has already built it.
+      - run: pnpm run check:pack
+      - name: Unit tests for the packaging rule
+        run: node tools/check-pack/test/test_rule.js
+      # publint reads the packed manifest, attw resolves the package the way a consumer's
+      # TypeScript does. check:pack proves a promised file is shipped; these two ask whether
+      # the promise itself is usable. Ratcheted against tools/package-shape-baseline.json, so
+      # known gaps stay green and the list can only shrink. Here rather than in lint because
+      # both tools pack every package.
+      - run: pnpm run check:shape
+      - name: Unit tests for the package-shape rule
+        run: node tools/check-package-shape/test/test_rule.js
+      - run: pnpm run pretest
+      # Dry run first. It loads every package's .mocharc and every test file but runs no
+      # test body, so a config that cannot resolve fails here in seconds instead of
+      # after the real run has been grinding through packages. It is a fail-fast, not a
+      # substitute - the real run follows.
+      - run: pnpm run test:per-package:dry-run
+        env:
+          NODE_OPTIONS: --expose-gc
+      # --expose-gc for the same reason as the build job: the leak detector's afterEach
+      # is what releases the timers and handles that would otherwise keep mocha alive
+      # past its last test, and it needs a real collector to measure with.
+      - run: pnpm run test:per-package
+        env:
+          NODE_OPTIONS: --expose-gc
+
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        node-version: [22.x]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      # c8 is a devDependency (see .c8rc.json); the Coveralls upload is the action below, so
+      # neither the coveralls nor the codecov npm package is needed here.
+      - run: pnpm recursive install --no-frozen-lockfile --ignore-scripts
+      # build:all = generate:types + tsc. Needed because _generated_opcua_types.ts
+      # is gitignored; the lean `build` (tsc only) doesn't produce it. Nodeset
+      # generation is deliberately NOT part of it: that output is committed.
+      - run: pnpm run build:all
+      - run: pnpm run pretest
+      # NO_BAIL so the job reports the whole suite. Stopping at the first failure gives
+      # neither the full set of failures nor a coverage figure worth uploading, and this job
+      # exists to produce that figure - the build jobs are what fail fast on a breakage.
+      - run: make test-cov
+        env:
+          NO_BAIL: "1"
+      - name: Coveralls
+        uses: coverallsapp/github-action@v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}

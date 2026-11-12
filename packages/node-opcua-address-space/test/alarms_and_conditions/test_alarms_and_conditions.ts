@@ -1,35 +1,40 @@
+import fs from "node:fs";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { nodesets } from "node-opcua-nodesets";
+import "should";
 
-import * as fs from "fs";
-import * as nodesets from "node-opcua-nodesets";
-import * as should from "should";
-import { AddressSpace, generateAddressSpace, SessionContext } from "../..";
+import { AddressSpace, type UAObject, type UAVariable } from "../../dist/api/index.js";
+import { generateAddressSpace } from "../../distNodeJS/index.js";
 
-import { utest_acknowledgeable_condition } from "./utest_acknowledgeable_condition";
-import { utest_alarm_condition } from "./utest_alarm_condition";
-import { utest_condition } from "./utest_condition";
-import { utest_exclusive_deviation_alarm } from "./utest_exclusive_deviation_alarm";
-import { utest_issue_316 } from "./utest_issue_316";
-import { utest_limit_alarm } from "./utest_limit_alarm";
-import { utest_non_exclusive_deviation_alarm } from "./utest_non_exclusive_deviation_alarm";
-import { utest_off_normal_alarm } from "./utest_off_normal_alarm";
+import { utest_acknowledgeable_condition } from "./utest_acknowledgeable_condition.js";
+import { utest_alarm_condition } from "./utest_alarm_condition.js";
+import { utest_condition } from "./utest_condition.js";
+import { utest_exclusive_deviation_alarm } from "./utest_exclusive_deviation_alarm.js";
+import { utest_issue_316 } from "./utest_issue_316.js";
+import { utest_limit_alarm } from "./utest_limit_alarm.js";
+import { utest_non_exclusive_deviation_alarm } from "./utest_non_exclusive_deviation_alarm.js";
+import { utest_off_normal_alarm } from "./utest_off_normal_alarm.js";
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
-describe("AddressSpace : Conditions ", function (this: any) {
-
-    const test = this;
+export type MochaSuiteEx = Mocha.Suite & {
+    addressSpace: AddressSpace;
+    source: UAObject;
+    green: UAObject;
+    variableWithAlarm: UAVariable;
+    setpointNodeNode: UAVariable;
+};
+describe("AddressSpace : Conditions 1", function (this: Mocha.Suite) {
+    const test = this as MochaSuiteEx;
 
     let addressSpace: AddressSpace;
 
-    this.timeout(Math.max(this._timeout, 10000));
+    this.timeout(Math.max(this.timeout(), 50000));
 
-    let source;
+    let source: UAObject;
     before(async () => {
-
         addressSpace = AddressSpace.create();
-        addressSpace.registerNamespace("PRIVATE_NAMESPACE");
-
-        const xml_file = nodesets.standard_nodeset_file;
+        const ownNamespace = addressSpace.registerNamespace("PRIVATE_NAMESPACE");
+        ownNamespace.index.should.eql(1);
+        const xml_file = nodesets.standard;
 
         fs.existsSync(xml_file).should.be.eql(true);
 
@@ -43,7 +48,7 @@ describe("AddressSpace : Conditions ", function (this: any) {
             browseName: "Green",
             eventNotifier: 0x1,
             notifierOf: addressSpace.rootFolder.objects.server,
-            organizedBy: addressSpace.rootFolder.objects,
+            organizedBy: addressSpace.rootFolder.objects
         });
 
         source = namespace.addObject({

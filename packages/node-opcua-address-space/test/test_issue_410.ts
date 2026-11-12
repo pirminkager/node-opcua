@@ -1,36 +1,26 @@
-import * as should from "should";
-
-import { Double } from "node-opcua-basic-types";
+import type { Double } from "node-opcua-basic-types";
 import { DataTypeIds } from "node-opcua-constants";
 import { standardUnits } from "node-opcua-data-access";
-import { DataValue, DataValueT } from "node-opcua-data-value";
-import { NodeId } from "node-opcua-nodeid";
-import { resolveNodeId } from "node-opcua-nodeid";
-import * as nodesets from "node-opcua-nodesets";
+import { DataValue, type DataValueT } from "node-opcua-data-value";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { NodeId, resolveNodeId } from "node-opcua-nodeid";
+import { nodesets } from "node-opcua-nodesets";
 import { StatusCodes } from "node-opcua-status-code";
-import { Variant } from "node-opcua-variant";
-import { DataType } from "node-opcua-variant";
+import { DataType, Variant } from "node-opcua-variant";
+import should from "should";
+import { AddressSpace, SessionContext, type UAAnalogItem } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
 
-import {
-    AddressSpace,
-    generateAddressSpace,
-    SessionContext,
-    UAAnalogItem,
-} from "..";
-
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("AnalogDataItem ValuePrecision issue #410", () => {
-
-    const nodesetFilename = nodesets.standard_nodeset_file;
+    const nodesetFilename = nodesets.standard;
 
     let addressSpace: AddressSpace;
-    let analogItem: UAAnalogItem;
+    let analogItem: UAAnalogItem<number, DataType.Double>;
 
     before(async () => {
         addressSpace = AddressSpace.create();
 
-        const  namespace = addressSpace.registerNamespace("Private");
+        const namespace = addressSpace.registerNamespace("Private");
         namespace.index.should.eql(1);
 
         await generateAddressSpace(addressSpace, nodesetFilename);
@@ -41,11 +31,11 @@ describe("AnalogDataItem ValuePrecision issue #410", () => {
             dataType: "Double",
             definition: "(tempA -25) + tempB",
             engineeringUnits: standardUnits.degree_celsius,
-            engineeringUnitsRange: {low: -2000, high: 2000},
-            instrumentRange: {low: -100, high: 200},
+            engineeringUnitsRange: { low: -2000, high: 2000 },
+            instrumentRange: { low: -100, high: 200 },
             organizedBy: objectsFolder,
-            value: new Variant({dataType: DataType.Double, value: 10.0}),
-            valuePrecision: 0.5,
+            value: new Variant({ dataType: DataType.Double, value: 10.0 }),
+            valuePrecision: 0.5
         });
     });
     after(async () => {
@@ -53,17 +43,17 @@ describe("AnalogDataItem ValuePrecision issue #410", () => {
     });
 
     it("ValuePrecision should have a DataType Double", () => {
-        analogItem.valuePrecision!.dataType.should.be.instanceOf(NodeId);
-        analogItem.valuePrecision!.dataType.should.eql(resolveNodeId(DataTypeIds.Double));
+        should(analogItem.valuePrecision?.dataType).be.instanceOf(NodeId);
+        should(analogItem.valuePrecision?.dataType).eql(resolveNodeId(DataTypeIds.Double));
     });
     it("ValuePrecision should be writable ", async () => {
         analogItem = analogItem!;
 
         const dataValue = new DataValue({
-            value: new Variant({dataType: DataType.Double, value: 0.25})
+            value: new Variant({ dataType: DataType.Double, value: 0.25 })
         }) as DataValueT<Double, DataType.Double>;
         const context = SessionContext.defaultContext;
-        const statusCode = await analogItem.valuePrecision!.writeValue(context, dataValue);
-        statusCode.should.eql(StatusCodes.Good);
+        const statusCode = await analogItem.valuePrecision?.writeValue(context, dataValue);
+        should(statusCode).eql(StatusCodes.Good);
     });
 });

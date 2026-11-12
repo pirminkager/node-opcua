@@ -1,9 +1,13 @@
 /**
  * @module node-opcua-server
  */
-// tslint:disable:max-classes-per-file
-import { Certificate } from "node-opcua-crypto";
-import { SignedSoftwareCertificate } from "node-opcua-types";
+import type { Double, UInt32 } from "node-opcua-basic-types";
+import { BinaryStream } from "node-opcua-binary-stream";
+import type { QualifiedName } from "node-opcua-data-model";
+import { make_warningLog } from "node-opcua-debug";
+import type { SignedSoftwareCertificate } from "node-opcua-types";
+
+const warningLog = make_warningLog("server_capabilities");
 
 /**
  */
@@ -22,8 +26,7 @@ export interface OperationLimitsOptions {
     maxNodesPerTranslateBrowsePathsToNodeIds?: number;
 }
 
-export class OperationLimits {
-
+export class ServerOperationLimits {
     public maxNodesPerRead: number;
     public maxNodesPerBrowse: number;
     public maxNodesPerWrite: number;
@@ -37,90 +40,199 @@ export class OperationLimits {
     public maxNodesPerHistoryUpdateEvents: number;
     public maxNodesPerTranslateBrowsePathsToNodeIds: number;
 
+    // a limit left undefined takes the default; an explicit 0 means "no limit, not exposed"
     constructor(options: OperationLimitsOptions) {
-
-        /**
-         * @property maxNodesPerRead
-         * @default 0
-         */
-        this.maxNodesPerRead = options.maxNodesPerRead || 0;
-        /**
-         * @property maxNodesPerWrite
-         * @default 0
-         */
-        this.maxNodesPerWrite = options.maxNodesPerWrite || 0;
-        /**
-         * @property maxNodesPerMethodCall
-         * @default 0
-         */
-        this.maxNodesPerMethodCall = options.maxNodesPerMethodCall || 0;
-        /**
-         * @property maxNodesPerBrowse
-         * @default 0
-         */
-        this.maxNodesPerBrowse = options.maxNodesPerBrowse || 0;
-        /**
-         * @property maxNodesPerRegisterNodes
-         * @default 0
-         */
-        this.maxNodesPerRegisterNodes = options.maxNodesPerRegisterNodes || 0;
-        /**
-         * @property maxNodesPerNodeManagement
-         * @default 0
-         */
-        this.maxNodesPerNodeManagement = options.maxNodesPerNodeManagement || 0;
-        /**
-         * @property maxMonitoredItemsPerCall
-         * @default 0
-         */
-        this.maxMonitoredItemsPerCall = options.maxMonitoredItemsPerCall || 0;
-        /**
-         * @property maxNodesPerHistoryReadData
-         */
-        this.maxNodesPerHistoryReadData = options.maxNodesPerHistoryReadData || 0;
-        /**
-         * @property maxNodesPerHistoryReadEvents
-         * @default 0
-         */
-        this.maxNodesPerHistoryReadEvents = options.maxNodesPerHistoryReadEvents || 0;
-        /**
-         * @property maxNodesPerHistoryUpdateData
-         * @default 0
-         */
-        this.maxNodesPerHistoryUpdateData = options.maxNodesPerHistoryUpdateData || 0;
-        /**
-         * @property maxNodesPerHistoryUpdateEvents
-         * @default 0
-         */
-        this.maxNodesPerHistoryUpdateEvents = options.maxNodesPerHistoryUpdateEvents || 0;
-        /**
-         * @property maxNodesPerTranslateBrowsePathsToNodeIds
-         * @default 0
-         */
-        this.maxNodesPerTranslateBrowsePathsToNodeIds = options.maxNodesPerTranslateBrowsePathsToNodeIds || 0;
-
+        const d = defaultServerCapabilities.operationLimits as Required<OperationLimitsOptions>;
+        this.maxNodesPerRead = options.maxNodesPerRead ?? d.maxNodesPerRead;
+        this.maxNodesPerWrite = options.maxNodesPerWrite ?? d.maxNodesPerWrite;
+        this.maxNodesPerMethodCall = options.maxNodesPerMethodCall ?? d.maxNodesPerMethodCall;
+        this.maxNodesPerBrowse = options.maxNodesPerBrowse ?? d.maxNodesPerBrowse;
+        this.maxNodesPerRegisterNodes = options.maxNodesPerRegisterNodes ?? d.maxNodesPerRegisterNodes;
+        this.maxNodesPerNodeManagement = options.maxNodesPerNodeManagement ?? d.maxNodesPerNodeManagement;
+        this.maxMonitoredItemsPerCall = options.maxMonitoredItemsPerCall ?? d.maxMonitoredItemsPerCall;
+        this.maxNodesPerHistoryReadData = options.maxNodesPerHistoryReadData ?? d.maxNodesPerHistoryReadData;
+        this.maxNodesPerHistoryReadEvents = options.maxNodesPerHistoryReadEvents ?? d.maxNodesPerHistoryReadEvents;
+        this.maxNodesPerHistoryUpdateData = options.maxNodesPerHistoryUpdateData ?? d.maxNodesPerHistoryUpdateData;
+        this.maxNodesPerHistoryUpdateEvents = options.maxNodesPerHistoryUpdateEvents ?? d.maxNodesPerHistoryUpdateEvents;
+        this.maxNodesPerTranslateBrowsePathsToNodeIds =
+            options.maxNodesPerTranslateBrowsePathsToNodeIds ?? d.maxNodesPerTranslateBrowsePathsToNodeIds;
     }
 }
 
-export interface ServerCapabilitiesOptions {
-    maxBrowseContinuationPoints?: number;
-    maxHistoryContinuationPoints?: number;
-    maxStringLength?: number;
-    maxArrayLength?: number;
-    maxByteStringLength?: number;
-    maxQueryContinuationPoints?: number;
-    minSupportedSampleRate?: number;
-    operationLimits?: OperationLimitsOptions;
+export interface IServerCapabilities {
+    maxBrowseContinuationPoints: number;
+    maxHistoryContinuationPoints: number;
+    maxStringLength: number;
+    maxArrayLength: number;
+    maxByteStringLength: number;
+    maxQueryContinuationPoints: number;
+    /**
+     * MinSupportedSampleRate, in milliseconds: the fastest sampling interval the server
+     * supports, and the floor of the revisedSamplingInterval it answers to a requested 0.
+     * Defaults to MonitoredItem.minimumSamplingInterval (50 ms). A Variable whose
+     * MinimumSamplingInterval is 0 is still delivered on change, the revised interval being
+     * the window over which changes are coalesced. Set it to 0 to claim exception-based
+     * acquisition: such items are then answered with a revisedSamplingInterval of 0 and every
+     * change is reported (the CTT flags this for manual verification).
+     */
+    minSupportedSampleRate: Double;
+    operationLimits: OperationLimitsOptions;
 
-    serverProfileArray?: string[];
-    localeIdArray?: string[];
-    softwareCertificates?: SignedSoftwareCertificate[];
+    serverProfileArray: string[];
+    localeIdArray: string[];
+    softwareCertificates: SignedSoftwareCertificate[];
+
+    // new in 1.05
+    /**
+     * MaxSessions is an integer specifying the maximum number of concurrent
+     * Sessions the Server can support. The value specifies the
+     * maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support
+     * the maximum.
+     */
+    maxSessions: UInt32;
+
+    /**
+     * MaxSubscriptions is an integer specifying the maximum number of
+     * Subscriptions the Server can support. The value specifies the
+     * maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support
+     * the maximum.
+     */
+    maxSubscriptions: UInt32;
+
+    /**
+     * MaxMonitoredItems is an integer specifying the maximum number of
+     * MonitoredItems the Server can support. The value specifies the
+     * maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support
+     * the maximum.
+     */
+    maxMonitoredItems: UInt32;
+
+    /**
+     * MaxSubscriptionsPerSession is an integer specifying the maximum number of
+     * Subscriptions per Session the Server can support. The value specifies the
+     * maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support
+     * the maximum.
+     */
+    maxSubscriptionsPerSession: UInt32;
+
+    /**
+     * MaxMonitoredItemsPerSubscription is an integer specifying the maximum number of
+     * MonitoredItems per Subscription the Server can support. The value specifies the
+     * maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support
+     * the maximum
+     */
+    maxMonitoredItemsPerSubscription: UInt32;
+
+    /**
+     * MaxSelectClauseParameters is an integer specifying the maximum number of
+     * EventField SelectClause Parameters the Server can support for an EventFilter.
+     * The value specifies the maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support
+     * the maximum.
+     *
+     * An EventFilter with more select clauses than this is refused with BadEventFilterInvalid.
+     * Default 1000: a client that selects every field of every standard condition type
+     * (what the OPC Foundation CTT's alarm collector does) sends 149 of them.
+     */
+    maxSelectClauseParameters: UInt32;
+
+    /**
+     * MaxWhereClauseParameters is an integer specifying the maximum number of
+     * EventField WhereClause Parameters the Server can support for an EventFilter.
+     * The value specifies the maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support the maximum
+     *
+     * Counted as the operands of every element of the whereClause; more than this is refused
+     * with BadEventFilterInvalid. Default 1000: an alarm collector's "InList(ConditionId, ...)"
+     * grows by one operand per condition it tracks.
+     */
+    maxWhereClauseParameters: UInt32;
+
+    /**
+     * (draft)
+     * MaxMonitoredItemsQueueSize is an integer specifying the maximum size of MonitoredItem
+     * queues. The value specifies the maximum the Server can support under normal circumstances,
+     * therefore there is no guarantee the Server can always support the maximum.
+     *
+     */
+    maxMonitoredItemsQueueSize: UInt32;
+
+    /**
+     *
+     * ConformanceUnits is a QualifiedName array specifying the set of conformance units
+     * the Server supports (Part 5, Server/ServerCapabilities/ConformanceUnits, i=24101,
+     * new in OPC UA 1.05). Part 7 1.05 wants this list limited to the ConformanceUnits
+     * the Server supports in its current configuration, e.g.
+     * `[new QualifiedName({ name: "Base Info Core Structure 2" })]`.
+     *
+     * The variable reads the list live: assigning or pushing to
+     * `server.engine.serverCapabilities.conformanceUnits` after the server has started
+     * is reflected in the next Read. It is read-only for clients. Default: empty, which is
+     * served as a typed empty QualifiedName array (not a Null variant).
+     *
+     */
+    conformanceUnits: QualifiedName[];
 }
+export type ServerCapabilitiesOptions = Partial<IServerCapabilities>;
+
+export const defaultServerCapabilities: IServerCapabilities = {
+    maxBrowseContinuationPoints: 0,
+    maxHistoryContinuationPoints: 0,
+    maxStringLength: 16 * 1024 * 1024,
+    maxArrayLength: 1024 * 1024,
+    maxByteStringLength: 16 * 1024 * 1024,
+    maxQueryContinuationPoints: 0,
+
+    minSupportedSampleRate: 100,
+
+    // Part 5 OperationLimitsType: a limit that is exposed shall be non-zero, and the
+    // server answers BadTooManyOperations past it. Every limit the server enforces gets
+    // a real default, generous enough for a client that monitors or reads a few
+    // thousand nodes in one call (the CTT does, so does the crawler); the three limits
+    // it does not enforce (history update, node management: services it does not
+    // implement) stay at 0, which means "not exposed".
+    operationLimits: {
+        maxNodesPerBrowse: 10000,
+        maxNodesPerHistoryReadData: 1000,
+        maxNodesPerHistoryReadEvents: 1000,
+        maxNodesPerHistoryUpdateData: 0,
+        maxNodesPerHistoryUpdateEvents: 0,
+        maxNodesPerMethodCall: 1000,
+        maxNodesPerNodeManagement: 0,
+        maxNodesPerRead: 10000,
+        maxNodesPerRegisterNodes: 10000,
+        maxNodesPerWrite: 10000,
+        maxNodesPerTranslateBrowsePathsToNodeIds: 10000,
+        maxMonitoredItemsPerCall: 10000
+    },
+
+    serverProfileArray: [],
+    localeIdArray: [],
+    softwareCertificates: [],
+
+    maxSessions: 10,
+    maxSubscriptions: 100,
+    maxMonitoredItems: 1000000, // 1 million
+    maxSubscriptionsPerSession: 10,
+    maxMonitoredItemsPerSubscription: 100000, // one hundred thousand
+    // 100 was below what any server exposing the standard alarm types receives from a client
+    // that selects every event field (the CTT's alarm collector: 149 select clauses over the
+    // 33 standard condition types), and its where clause grows with the conditions tracked.
+    maxSelectClauseParameters: 1000,
+    maxWhereClauseParameters: 1000,
+    maxMonitoredItemsQueueSize: 60000,
+
+    conformanceUnits: []
+};
 
 /**
  */
-export class ServerCapabilities {
-
+export class ServerCapabilities implements IServerCapabilities {
     public maxBrowseContinuationPoints: number;
     public maxHistoryContinuationPoints: number;
     public maxStringLength: number;
@@ -128,50 +240,81 @@ export class ServerCapabilities {
     public maxByteStringLength: number;
     public maxQueryContinuationPoints: number;
     public minSupportedSampleRate: number;
-    public operationLimits: OperationLimits;
+    public operationLimits: ServerOperationLimits;
 
     public serverProfileArray: string[];
     public localeIdArray: string[];
     public softwareCertificates: SignedSoftwareCertificate[];
 
-    constructor(options: ServerCapabilitiesOptions) {
+    // new in 1.05
+    public maxSessions: UInt32;
+    public maxSubscriptions: UInt32;
+    public maxMonitoredItems: UInt32;
+    public maxSubscriptionsPerSession: UInt32;
+    public maxMonitoredItemsPerSubscription: UInt32;
+    public maxSelectClauseParameters: UInt32;
+    public maxWhereClauseParameters: UInt32;
+    public maxMonitoredItemsQueueSize: UInt32;
+    public conformanceUnits: QualifiedName[];
 
+    constructor(options: ServerCapabilitiesOptions) {
         options = options || {};
         options.operationLimits = options.operationLimits || {};
 
         this.serverProfileArray = options.serverProfileArray || [];
         this.localeIdArray = options.localeIdArray || [];
         this.softwareCertificates = options.softwareCertificates || [];
-        /**
-         * @property maxArrayLength
-         */
-        this.maxArrayLength = options.maxArrayLength || 0;
-        /**
-         * @property maxStringLength
-         */
-        this.maxStringLength = options.maxStringLength || 0;
-        /**
-         * @property maxByteStringLength
-         */
-        this.maxByteStringLength = options.maxByteStringLength || 0;
-        /**
-         * @property maxBrowseContinuationPoints
-         */
-        this.maxBrowseContinuationPoints = options.maxBrowseContinuationPoints || 0;
-        /**
-         * @property maxQueryContinuationPoints
-         */
-        this.maxQueryContinuationPoints = options.maxQueryContinuationPoints || 0;
-        /**
-         * @property maxHistoryContinuationPoints
-         */
-        this.maxHistoryContinuationPoints = options.maxHistoryContinuationPoints || 0;
 
-        /**
-         * @property operationLimits
-         */
-        this.operationLimits = new OperationLimits(options.operationLimits);
+        this.maxArrayLength = options.maxArrayLength || defaultServerCapabilities.maxArrayLength;
 
-        this.minSupportedSampleRate = 100; // to do adjust me
+        // The generic array decoder refuses any array longer than BinaryStream.maxArrayLength.
+        // Raise that ceiling to cover what this server advertises, so it never rejects an array a
+        // client was told it may send. Only ever raised, never lowered, so configuring one server
+        // cannot shrink a limit another already relies on.
+        if (BinaryStream.maxArrayLength < this.maxArrayLength) {
+            BinaryStream.maxArrayLength = this.maxArrayLength;
+        }
+
+        this.maxStringLength = options.maxStringLength || defaultServerCapabilities.maxStringLength;
+        this.maxByteStringLength = options.maxByteStringLength || defaultServerCapabilities.maxByteStringLength;
+
+        if (BinaryStream.maxStringLength < this.maxStringLength) {
+            warningLog(
+                `ServerCapabilities.maxStringLength ${this.maxStringLength} is greater that the allowed limite BinaryStream.maxStringLength = ${BinaryStream.maxStringLength}\nPlease adjust the value.`
+            );
+        }
+
+        if (BinaryStream.maxByteStringLength < this.maxByteStringLength) {
+            warningLog(
+                `ServerCapabilities.maxByteStringLength ${this.maxByteStringLength} is greater that the allowed limite BinaryStream.maxByteStringLength = ${BinaryStream.maxByteStringLength}\nPlease adjust the value.`
+            );
+        }
+
+        this.maxBrowseContinuationPoints =
+            options.maxBrowseContinuationPoints || defaultServerCapabilities.maxBrowseContinuationPoints;
+        this.maxQueryContinuationPoints =
+            options.maxQueryContinuationPoints || defaultServerCapabilities.maxQueryContinuationPoints;
+        this.maxHistoryContinuationPoints =
+            options.maxHistoryContinuationPoints || defaultServerCapabilities.maxHistoryContinuationPoints;
+
+        this.operationLimits = new ServerOperationLimits(options.operationLimits);
+
+        this.minSupportedSampleRate = options.minSupportedSampleRate ?? defaultServerCapabilities.minSupportedSampleRate;
+
+        // new in 1.05
+        this.maxSessions = options.maxSessions || defaultServerCapabilities.maxSessions;
+
+        this.maxSubscriptionsPerSession =
+            options.maxSubscriptionsPerSession || defaultServerCapabilities.maxSubscriptionsPerSession;
+        this.maxSubscriptions = options.maxSubscriptions || defaultServerCapabilities.maxSubscriptions;
+        this.maxMonitoredItems = options.maxMonitoredItems || defaultServerCapabilities.maxMonitoredItems;
+        this.maxMonitoredItemsPerSubscription =
+            options.maxMonitoredItemsPerSubscription || defaultServerCapabilities.maxMonitoredItemsPerSubscription;
+        this.maxSelectClauseParameters = options.maxSelectClauseParameters || defaultServerCapabilities.maxSelectClauseParameters;
+        this.maxWhereClauseParameters = options.maxWhereClauseParameters || defaultServerCapabilities.maxWhereClauseParameters;
+        this.maxMonitoredItemsQueueSize =
+            options.maxMonitoredItemsQueueSize || defaultServerCapabilities.maxMonitoredItemsQueueSize;
+        // a copy: the default is a shared array and the list is meant to be edited after start
+        this.conformanceUnits = [...(options.conformanceUnits || defaultServerCapabilities.conformanceUnits)];
     }
 }

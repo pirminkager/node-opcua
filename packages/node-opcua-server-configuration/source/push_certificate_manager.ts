@@ -1,9 +1,10 @@
 /**
  * @module node-opcua-server-configuration
  */
-import { ByteString, UAString } from "node-opcua-basic-types";
-import { NodeId } from "node-opcua-nodeid";
-import { StatusCode } from "node-opcua-status-code";
+import type { ISessionContext } from "node-opcua-address-space-base";
+import type { ByteString, UAString } from "node-opcua-basic-types";
+import type { NodeId } from "node-opcua-nodeid";
+import type { StatusCode } from "node-opcua-status-code";
 
 export interface CreateSigningRequestResult {
     statusCode: StatusCode;
@@ -17,15 +18,14 @@ export interface GetRejectedListResult {
 
 export interface UpdateCertificateResult {
     statusCode: StatusCode;
-    applyChangesRequired?: boolean;
+    applyChangesRequired: boolean;
 }
 
 export interface PushCertificateManager {
-
     /**
-     * The SupportedPrivateKeyFormats specifies the PrivateKey formats supported by the Server.
+     * The SupportedPrivateKeyFormats specifies the private key formats supported by the Server.
      * Possible values include “PEM” (see RFC 5958) or “PFX” (see PKCS #12). The array is empty
-     * if the Server does not allow external Clients to update the PrivateKey
+     * if the Server does not allow external Clients to update the private key
      */
     getSupportedPrivateKeyFormats(): Promise<string[]>;
 
@@ -59,18 +59,18 @@ export interface PushCertificateManager {
      * Result Code                  Description
      * BadInvalidArgument           The certificateTypeId or certificateGroupId is not valid.
      * BadCertificateInvalid        The Certificate is invalid or the format is not supported.
-     * BadNotSupported              The PrivateKey is invalid or the format is not supported.
+     * BadNotSupported              The private key is invalid or the format is not supported.
      * BadUserAccessDenied          The current user does not have the rights required.
      * BadSecurityChecksFailed      Some failure occurred verifying the integrity of the Certificate.
      *
      */
     updateCertificate(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      certificate: ByteString,
-      issuerCertificates: ByteString[],
-      privateKeyFormat: UAString,
-      privateKey: ByteString
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        certificate: ByteString,
+        issuerCertificates: ByteString[],
+        privateKeyFormat?: UAString,
+        privateKey?: ByteString
     ): Promise<UpdateCertificateResult>;
 
     /**
@@ -102,7 +102,7 @@ export interface PushCertificateManager {
      * Result Code               Description
      * Bad_UserAccessDenied      The current user does not have the rights required.
      */
-    applyChanges(): Promise<StatusCode>;
+    applyChanges(context?: ISessionContext): Promise<StatusCode>;
 
     /**
      * The CreateSigningRequest Method asks the Server to create a PKCS #10 encoded Certificate
@@ -136,15 +136,17 @@ export interface PushCertificateManager {
      * Bad_UserAccessDenied          The current user does not have the rights required.
      */
     createSigningRequest(
-      certificateGroupId: NodeId | string,
-      certificateTypeId: NodeId | string,
-      subjectName: string,
-      regeneratePrivateKey?: boolean,
-      nonce?: ByteString
+        certificateGroupId: NodeId | string,
+        certificateTypeId: NodeId | string,
+        subjectName: string | null,
+        regeneratePrivateKey?: boolean,
+        nonce?: ByteString
     ): Promise<CreateSigningRequestResult>;
 
     /**
      * GetRejectedList Method returns the list of Certificates that have been rejected by the Server.
+     * It is a shortcut for the GetRejectedList Method on the DefaultApplicationGroup CertificateGroup
+     * (OPC 10000-12 §7.10.12): Certificates rejected by the other CertificateGroups are not returned.
      * No rules are defined for how the Server updates this list or how long a Certificate is kept in
      * the list. It is recommended that every valid but untrusted Certificate be added to the rejected
      * list as long as storage is available. Servers should omit older entries from the list returned if
@@ -159,6 +161,5 @@ export interface PushCertificateManager {
      *  Bad_UserAccessDenied  The current user does not have the rights required
      */
 
-    getRejectedList(): Promise</*certificates*/GetRejectedListResult>;
-
+    getRejectedList(): Promise</*certificates*/ GetRejectedListResult>;
 }

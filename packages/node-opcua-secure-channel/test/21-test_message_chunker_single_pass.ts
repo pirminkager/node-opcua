@@ -1,0 +1,284 @@
+import { DataValue } from "node-opcua-data-value";
+import { MessageSecurityMode, SymmetricAlgorithmSecurityHeader } from "node-opcua-service-secure-channel";
+import { StatusCodes } from "node-opcua-status-code";
+import { ReadResponse, ResponseHeader } from "node-opcua-types";
+import { DataType, Variant } from "node-opcua-variant";
+import should from "should";
+import { MessageChunker } from "../source/index.js";
+// ChunkMessageParameters is not re-exported by the source barrel; import it from its defining module
+import type { ChunkMessageParameters } from "../source/message_chunker.js";
+
+//
+// chunkSecureMessage used to size the message with a BinaryStreamSizeCalculator and then
+// encode it a second time into an exactly-sized buffer. It now encodes once into a
+// growable stream and takes the length from the cursor.
+//
+// Two things that used to be free now have to be asserted:
+//   - the growable buffer is usually larger than the message, so the chunker must be
+//     handed stream.length and not stream.buffer.length, or it ships uninitialised bytes
+//   - the oversize check now happens after the body is materialised, so growth has to be
+//     capped or an oversize message could make the server allocate without bound
+//
+// Note that two encodes of the same message through the same chunker are NOT
+// byte-identical: the SequenceHeader carries an incrementing sequence number. Lengths are
+// comparable, and one test below pins exactly which byte is allowed to move.
+//
+
+/** the chunker rounds up to whole chunks, so any message costs at least one chunk */
+const ONE_CHUNK = 8192;
+
+function makeOptions(chunkSize: number): ChunkMessageParameters {
+    return {
+        channelId: 1,
+        securityHeader: new SymmetricAlgorithmSecurityHeader({ tokenId: 1 }),
+        securityOptions: {
+            requestId: 7,
+            cipherBlockSize: 0,
+            plainBlockSize: 0,
+            sequenceHeaderSize: 0,
+            signatureLength: 0,
+            channelId: 1,
+            chunkSize
+        }
+    };
+}
+
+function makeReadResponse(count: number): ReadResponse {
+    const results = [];
+    for (let i = 0; i < count; i++) {
+        results.push(
+            new DataValue({
+                value: new Variant({ dataType: DataType.Double, value: i * 1.5 }),
+                statusCode: StatusCodes.Good
+            })
+        );
+    }
+    return new ReadResponse({
+        responseHeader: new ResponseHeader({ timestamp: new Date(Date.UTC(2026, 0, 1)), requestHandle: 42 }),
+        results
+    });
+}
+
+function chunkAll(chunker: MessageChunker, message: ReadResponse, chunkSize = 0) {
+    const chunks: Buffer[] = [];
+    const statusCode = chunker.chunkSecureMessage("MSG", makeOptions(chunkSize), message, (chunk) => {
+        if (chunk) {
+            chunks.push(Buffer.from(chunk));
+        }
+    });
+    return { statusCode, bytes: Buffer.concat(chunks), count: chunks.length };
+}
+
+function freshChunker(maxMessageSize?: number) {
+    return new MessageChunker({ securityMode: MessageSecurityMode.None, maxMessageSize });
+}
+
+describe("MessageChunker single-pass encoding", () => {
+    it("should emit the message, not the capacity of the growable buffer", () => {
+        // the growable stream starts at MessageChunker.minimumMessageSizeHint (4 KiB); a
+        // tiny message must not drag that whole buffer onto the wire
+        const { statusCode, bytes } = chunkAll(freshChunker(), makeReadResponse(1));
+
+        statusCode.should.eql(StatusCodes.Good);
+        bytes.length.should.be.lessThan(
+            MessageChunker.minimumMessageSizeHint,
+            "emitted far more than the message: the buffer tail is being shipped"
+        );
+    });
+
+    it("should emit the same length for the same message twice on one chunker", () => {
+        const chunker = freshChunker();
+
+        const first = chunkAll(chunker, makeReadResponse(5));
+        const second = chunkAll(chunker, makeReadResponse(5));
+
+        second.bytes.length.should.eql(first.bytes.length);
+    });
+
+    it("should differ only in the sequence number between two identical messages", () => {
+        // pins what is *allowed* to change between consecutive messages, so a future
+        // regression that perturbs anything else in the frame is caught here
+        const chunker = freshChunker();
+
+        const first = chunkAll(chunker, makeReadResponse(0)).bytes;
+        const second = chunkAll(chunker, makeReadResponse(0)).bytes;
+
+        first.length.should.eql(second.length);
+        const differing: number[] = [];
+        for (let i = 0; i < first.length; i++) {
+            if (first[i] !== second[i]) {
+                differing.push(i);
+            }
+        }
+        // 0..11 message header, 12..15 symmetric SecurityHeader (tokenId),
+        // 16..19 SequenceHeader.sequenceNumber - only that field may move
+        differing.every((offset) => offset >= 16 && offset < 20).should.eql(true, `unexpected differing offsets ${differing}`);
+    });
+
+    it("should be unaffected by a previous larger message on the same chunker", () => {
+        // after a big message the growable buffer stays big; a small message must still
+        // report its own length rather than the retained capacity
+        const reused = freshChunker();
+        chunkAll(reused, makeReadResponse(500));
+
+        const afterBig = chunkAll(reused, makeReadResponse(2));
+        const onFresh = chunkAll(freshChunker(), makeReadResponse(2));
+
+        afterBig.bytes.length.should.eql(onFresh.bytes.length);
+    });
+
+    it("should grow across messages of increasing size without corrupting any of them", () => {
+        const reused = freshChunker();
+
+        for (const count of [1, 4, 40, 400, 2]) {
+            const grown = chunkAll(reused, makeReadResponse(count));
+            const pristine = chunkAll(freshChunker(), makeReadResponse(count));
+            grown.bytes.length.should.eql(pristine.bytes.length, `message with ${count} values differed after reuse`);
+        }
+    });
+
+    it("should reject a message that exceeds the negotiated maximum size", () => {
+        const chunker = freshChunker(2 * ONE_CHUNK);
+
+        const { statusCode, count } = chunkAll(chunker, makeReadResponse(5000));
+
+        statusCode.should.eql(StatusCodes.BadTcpMessageTooLarge);
+        count.should.eql(0, "nothing should be emitted for a rejected message");
+    });
+
+    it("should keep working after a message was rejected for being too large", () => {
+        // the rejection happens mid-encode now, so the chunker must not be left wedged
+        const chunker = freshChunker(2 * ONE_CHUNK);
+
+        chunkAll(chunker, makeReadResponse(5000)).statusCode.should.eql(StatusCodes.BadTcpMessageTooLarge);
+
+        const { statusCode, count } = chunkAll(chunker, makeReadResponse(2));
+        statusCode.should.eql(StatusCodes.Good);
+        count.should.be.greaterThan(0);
+    });
+
+    it("should still enforce the chunk count limit", () => {
+        const chunker = new MessageChunker({ securityMode: MessageSecurityMode.None, maxChunkCount: 1 });
+
+        const { statusCode } = chunkAll(chunker, makeReadResponse(5000), 1024);
+
+        statusCode.should.eql(StatusCodes.BadTcpMessageTooLarge);
+    });
+
+    it("should never report Good for a message beyond the ceiling", () => {
+        const chunker = freshChunker(256);
+
+        for (const count of [100, 5000]) {
+            const { statusCode } = chunkAll(chunker, makeReadResponse(count));
+            should(statusCode.name).not.eql("Good", `${count} values should not have been accepted`);
+        }
+    });
+
+    it("FEAT-68 should weigh the body against maxMessageSize, not the whole chunks", () => {
+        // OPC 10000-6 v1.05.07 §7.1.2.3: "The Message size is calculated using the unencrypted
+        // Message body". One value is a body of a few dozen bytes, in an 8192-byte chunk.
+        const { statusCode, bytes } = chunkAll(freshChunker(256), makeReadResponse(1));
+
+        should(statusCode).eql(StatusCodes.Good);
+        should(bytes.length).be.below(256);
+    });
+
+    it("FEAT-68 should report the largest body the chunk count lets through", () => {
+        // 128 unsecured chunks of 8192 carry 128 x (8192 - 24) bytes of body, less than
+        // the 128 x 8192 maxMessageSize a peer derives from the same numbers
+        const chunker = new MessageChunker({
+            securityMode: MessageSecurityMode.None,
+            maxMessageSize: 128 * 8192,
+            maxChunkCount: 128
+        });
+        should(chunker.maxBodySize("MSG", makeOptions(8192))).eql(128 * 8168);
+
+        should(freshChunker(256).maxBodySize("MSG", makeOptions(8192))).eql(256);
+        chunker.maxChunkCount = 0;
+        chunker.maxMessageSize = 0;
+        should(chunker.maxBodySize("MSG", makeOptions(8192))).eql(0);
+    });
+
+    // the buffer a message is encoded into is kept for the next message: the chunks handed
+    // out are copies, so the previous message must not move, and the next one must not
+    // allocate a new encode buffer
+    it("keeps the encode buffer from one message to the next", () => {
+        const chunker = freshChunker();
+        const kept: Buffer[] = [];
+        chunker.chunkSecureMessage("MSG", makeOptions(0), makeReadResponse(3), (chunk) => {
+            if (chunk) kept.push(chunk);
+        });
+        const snapshot = Buffer.concat(kept.map((chunk) => Buffer.from(chunk)));
+
+        const sizes: number[] = [];
+        const allocUnsafe = Buffer.allocUnsafe;
+        Buffer.allocUnsafe = (size: number) => {
+            sizes.push(size);
+            return allocUnsafe(size);
+        };
+        let second: { statusCode: { name: string }; bytes: Buffer };
+        try {
+            second = chunkAll(chunker, makeReadResponse(7));
+        } finally {
+            Buffer.allocUnsafe = allocUnsafe;
+        }
+
+        should(second.statusCode.name).eql("Good");
+        should(Buffer.concat(kept).equals(snapshot)).eql(true, "a chunk handed out earlier has been modified");
+        // the chunk of the second message is allocated, the encode buffer (4 KiB and more) is not
+        should(sizes.filter((size) => size >= MessageChunker.minimumMessageSizeHint)).eql([]);
+    });
+
+    it("does not keep an encode buffer larger than maxRetainedEncodeBufferSize", () => {
+        const chunker = freshChunker();
+        chunkAll(chunker, makeReadResponse(20000)); // about 200 KiB, well over 64 KiB
+        const sizes: number[] = [];
+        const allocUnsafe = Buffer.allocUnsafe;
+        Buffer.allocUnsafe = (size: number) => {
+            sizes.push(size);
+            return allocUnsafe(size);
+        };
+        try {
+            chunkAll(chunker, makeReadResponse(1));
+        } finally {
+            Buffer.allocUnsafe = allocUnsafe;
+        }
+        // a fresh encode buffer of the largest size worth keeping is taken instead
+        should(sizes.filter((size) => size >= MessageChunker.minimumMessageSizeHint)).eql([
+            MessageChunker.maxRetainedEncodeBufferSize
+        ]);
+    });
+});
+
+describe("MessageChunker: a MSG without security, written as one chunk without the chunk managers", () => {
+    async function chunksOf(fast: boolean, response: ReadResponse, chunkSize: number): Promise<Buffer[]> {
+        const chunker = new MessageChunker({ securityMode: MessageSecurityMode.None });
+        const chunks: Buffer[] = [];
+        const collect = (chunk: Buffer | null) => {
+            if (chunk) chunks.push(Buffer.from(chunk));
+        };
+        // the asynchronous form still goes through the chunk managers: the reference
+        const status = fast
+            ? chunker.chunkSecureMessage("MSG", makeOptions(chunkSize), response, collect)
+            : await chunker.chunkSecureMessageAsync("MSG", makeOptions(chunkSize), response, collect);
+        should(status).eql(StatusCodes.Good);
+        return chunks;
+    }
+
+    it("writes the same chunk, byte for byte, as the chunk managers", async () => {
+        const response = makeReadResponse(10);
+        const fast = await chunksOf(true, response, ONE_CHUNK);
+        const reference = await chunksOf(false, response, ONE_CHUNK);
+        should(fast.length).eql(1);
+        should(Buffer.compare(fast[0], reference[0])).eql(0);
+    });
+
+    it("hands a message larger than a chunk to the chunk managers, the same chunks", async () => {
+        const response = makeReadResponse(2000);
+        const fast = await chunksOf(true, response, ONE_CHUNK);
+        const reference = await chunksOf(false, response, ONE_CHUNK);
+        should(fast.length).be.greaterThan(1);
+        should(fast.length).eql(reference.length);
+        for (let k = 0; k < fast.length; k++) should(Buffer.compare(fast[k], reference[k])).eql(0);
+    });
+});

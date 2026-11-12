@@ -1,43 +1,54 @@
-// tslint:disable:no-var-requires
-const mocha = require("mocha");
-import * as fs from "fs";
-import * as path from "path";
-
-import {
-    get_empty_nodeset_filename,
-    OPCUAClient,
-    OPCUAServer,
-} from "node-opcua";
-import {
-    UserIdentityInfoX509, UserTokenType
-} from "node-opcua-client";
-
-const should = require("should");
-import * as  crypto_utils from "node-opcua-crypto";
-import { Certificate, PrivateKey, PrivateKeyPEM, readCertificate, readCertificateRevocationList } from "node-opcua-crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { get_empty_nodeset_filename, OPCUACertificateManager, OPCUAClient, OPCUAServer } from "node-opcua";
+import { type UserIdentityInfoX509, UserTokenType } from "node-opcua-client";
+import { coercePrivateKeyPem, readCertificateChain, readCertificateRevocationList, readPrivateKey } from "node-opcua-crypto";
+import should from "should";
 
 const empty_nodeset_filename = get_empty_nodeset_filename();
+fs.existsSync(certificateFolder).should.eql(true, `expecting certificate store at ${certificateFolder}`);
 
-const certificateFolder = path.join(__dirname, "../../../node-opcua-samples/certificates");
-
-const port = 5000;
+const port = 2231;
 
 let server: OPCUAServer;
 let endpointUrl: string;
 // openssl req -x509 -newkey rsa:4096 -sha256 -nodes -keyout example.pem \
 //        -outform der -out example.der -subj "/CN=example.com" -days 3650
 async function startServer(): Promise<OPCUAServer> {
+    const serverCertificateManager = new OPCUACertificateManager({
+        rootFolder: path.join(tmpFolder, `serverPKI${port}`),
+        automaticallyAcceptUnknownCertificate: false
+    });
+    await serverCertificateManager.initialize();
+
+    const userCertificateManager = new OPCUACertificateManager({
+        rootFolder: path.join(tmpFolder, `userPKI${port}`),
+        automaticallyAcceptUnknownCertificate: false
+    });
+    await userCertificateManager.initialize();
 
     server = new OPCUAServer({
-        maxAllowedSessionNumber: 10,
+        userCertificateManager,
+
+        serverCertificateManager,
+
+        serverCapabilities: {
+            maxSessions: 10
+        },
+
         nodeset_filename: empty_nodeset_filename,
-        port,
+        port
     });
     await server.start();
 
     const issuerCertificateFile = path.join(certificateFolder, "CA/public/cacert.pem");
 
-    const issuerCertificate = readCertificate(issuerCertificateFile);
+    const issuerCertificateChain = readCertificateChain(issuerCertificateFile);
+    should(issuerCertificateChain).be.instanceOf(Array);
+    should(issuerCertificateChain.length).be.eql(1);
+    const issuerCertificate = issuerCertificateChain[0];
+    should(issuerCertificate).not.be.null();
+
     await server.userCertificateManager.addIssuer(issuerCertificate);
     await server.serverCertificateManager.addIssuer(issuerCertificate);
 
@@ -46,7 +57,7 @@ async function startServer(): Promise<OPCUAServer> {
     await server.userCertificateManager.addRevocationList(crl);
     await server.serverCertificateManager.addRevocationList(crl);
 
-    endpointUrl = server.endpoints[0].endpointDescriptions()[0].endpointUrl!;
+    endpointUrl = server.getEndpointUrl();
     return server;
 }
 
@@ -56,24 +67,39 @@ async function endServer() {
     }
 }
 
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
-describe("Testing Session with user certificate", () => {
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { certificateFolder, tmpFolder } from "../../test_helpers/paths.js";
 
+describe("Testing Session with user certificate", () => {
     before(startServer);
     after(endServer);
 
     const clientPrivateKeyFilename = path.join(certificateFolder, "client_key_2048.pem");
-    const privateKey: PrivateKeyPEM = crypto_utils.readPrivateKeyPEM(clientPrivateKeyFilename);
+    const privateKey1 = readPrivateKey(clientPrivateKeyFilename);
+    const privateKeyPem = coercePrivateKeyPem(privateKey1);
 
     const wrongClientPrivateKeyFilename = path.join(certificateFolder, "server_key_2048.pem");
-    const wrongPrivateKey: PrivateKeyPEM = crypto_utils.readPrivateKeyPEM(wrongClientPrivateKeyFilename);
+
+    const wrongPrivateKey1 = readPrivateKey(wrongClientPrivateKeyFilename);
+    const wrongPrivateKey = coercePrivateKeyPem(wrongPrivateKey1);
 
     const clientCertificateFilename = path.join(certificateFolder, "client_cert_2048.pem");
-    const clientCertificate: Certificate = crypto_utils.readCertificate(clientCertificateFilename);
+    const clientCertificateChain = readCertificateChain(clientCertificateFilename);
+    should(clientCertificateChain).be.instanceOf(Array);
+    should(clientCertificateChain.length).be.eql(2);
+    const clientCertificate = clientCertificateChain[0]; // leaf certificate only
+
     const invalidClientCertificateFilename = path.join(certificateFolder, "client_cert_2048_outofdate.pem");
-    const invalidClientCertificate: Certificate = crypto_utils.readCertificate(invalidClientCertificateFilename);
+    const invalidClientCertificateChain = readCertificateChain(invalidClientCertificateFilename);
+    should(invalidClientCertificateChain).be.instanceOf(Array);
+    should(invalidClientCertificateChain.length).be.eql(2);
+    const invalidClientCertificate = invalidClientCertificateChain[0]; // leaf certificate only
+
     const notActiveClientCertificateFilename = path.join(certificateFolder, "client_cert_2048_not_active_yet.pem");
-    const notActiveClientCertificate: Certificate = crypto_utils.readCertificate(notActiveClientCertificateFilename);
+    const notActiveClientCertificateChain = readCertificateChain(notActiveClientCertificateFilename);
+    should(notActiveClientCertificateChain).be.instanceOf(Array);
+    should(notActiveClientCertificateChain.length).be.eql(2);
+    const notActiveClientCertificate = notActiveClientCertificateChain[0]; // leaf certificate only
 
     let client: OPCUAClient | null = null;
 
@@ -81,101 +107,113 @@ describe("Testing Session with user certificate", () => {
         client = OPCUAClient.create({});
         await client.connect(endpointUrl);
 
-        // make sure all certificates are "trusted"
+        // make sure all certificates are "trusted", regardless of their validity period
+        // and regardless of their issuer status
         await server.userCertificateManager.trustCertificate(clientCertificate);
         await server.userCertificateManager.trustCertificate(invalidClientCertificate);
         await server.userCertificateManager.trustCertificate(notActiveClientCertificate);
-
     });
 
     afterEach(async () => {
         await server.userCertificateManager.trustCertificate(clientCertificate);
         await server.userCertificateManager.trustCertificate(invalidClientCertificate);
         await server.userCertificateManager.trustCertificate(notActiveClientCertificate);
-        await client!.disconnect();
+        if (client) {
+            await client.disconnect();
+        }
         client = null;
     });
 
-    it("should create a session with a valid client certificates", async () => {
+    it("should create a session with a trusted client certificate", async () => {
+        if (!client) {
+            throw new Error("client is null");
+        }
+        await server.userCertificateManager.trustCertificate(clientCertificate);
 
         const userIdentity: UserIdentityInfoX509 = {
             certificateData: clientCertificate,
-            privateKey,
-            type: UserTokenType.Certificate,
+            privateKey: privateKeyPem,
+            type: UserTokenType.Certificate
         };
-        const session = await client!.createSession(userIdentity);
+        const session = await client.createSession(userIdentity);
         await session.close();
-
     });
 
     it("should fail to create a session with a valid client certificate which is untrusted", async () => {
-
+        if (!client) {
+            throw new Error("client is null");
+        }
         await server.userCertificateManager.rejectCertificate(clientCertificate);
 
         const userIdentity: UserIdentityInfoX509 = {
             certificateData: clientCertificate,
-            privateKey,
-            type: UserTokenType.Certificate,
+            privateKey: privateKeyPem,
+            type: UserTokenType.Certificate
         };
         let exceptionCaught: Error | null = null;
         try {
-            const session = await client!.createSession(userIdentity);
+            const session = await client.createSession(userIdentity);
             await session.close();
-
         } catch (err) {
-            exceptionCaught = err;
+            exceptionCaught = err as Error;
         }
         should(exceptionCaught).not.be.null();
+
+        await server.userCertificateManager.trustCertificate(clientCertificate);
     });
 
-
-    it("should fail to create a session with a invalid client certificate (outofdate)", async () => {
-
+    it("should fail to create a session with a invalid client certificate (out-of-date)", async () => {
+        if (!client) {
+            throw new Error("client is null");
+        }
         const userIdentity: UserIdentityInfoX509 = {
             certificateData: invalidClientCertificate,
-            privateKey,
-            type: UserTokenType.Certificate,
+            privateKey: privateKeyPem,
+            type: UserTokenType.Certificate
         };
         let exceptionCaught: Error | null = null;
         try {
-            const session = await client!.createSession(userIdentity);
+            const session = await client.createSession(userIdentity);
             await session.close();
         } catch (err) {
-            exceptionCaught = err;
+            exceptionCaught = err as Error;
         }
         should(exceptionCaught).not.be.null();
-
     });
 
     it("should fail to create a session with a invalid client certificate (not_active_yet)", async () => {
-
+        if (!client) {
+            throw new Error("client is null");
+        }
         const userIdentity: UserIdentityInfoX509 = {
             certificateData: notActiveClientCertificate,
-            privateKey,
-            type: UserTokenType.Certificate,
+            privateKey: privateKeyPem,
+            type: UserTokenType.Certificate
         };
         let exceptionCaught: Error | null = null;
         try {
-            const session = await client!.createSession(userIdentity);
+            const session = await client.createSession(userIdentity);
             await session.close();
         } catch (err) {
-            exceptionCaught = err;
+            exceptionCaught = err as Error;
         }
         should(exceptionCaught).not.be.null();
     });
     it("should fail to create a session with a  client certificate and wrong privateKey", async () => {
-
+        if (!client) {
+            throw new Error("client is null");
+        }
         const userIdentity: UserIdentityInfoX509 = {
             certificateData: clientCertificate,
             privateKey: wrongPrivateKey,
-            type: UserTokenType.Certificate,
+            type: UserTokenType.Certificate
         };
         let exceptionCaught: Error | null = null;
         try {
-            const session = await client!.createSession(userIdentity);
+            const session = await client.createSession(userIdentity);
             await session.close();
         } catch (err) {
-            exceptionCaught = err;
+            exceptionCaught = err as Error;
         }
         should(exceptionCaught).not.be.null();
     });

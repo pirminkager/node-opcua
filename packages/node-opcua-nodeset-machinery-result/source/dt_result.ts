@@ -1,0 +1,26 @@
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { DTStructure } from "node-opcua-nodeset-ua/dist/dt_structure.js";
+import type { VariantOptions } from "node-opcua-variant";
+
+import type { DTResultMeta } from "./dt_result_meta.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * Contains fields that were created during the
+ * execution of a recipe.
+ *
+ * |           |                                                            |
+ * |-----------|------------------------------------------------------------|
+ * | namespace |http://opcfoundation.org/UA/Machinery/Result/               |
+ * | nodeClass |DataType                                                    |
+ * | name      |ResultDataType                                              |
+ * | isAbstract|false                                                       |
+ */
+export interface DTResult extends DTStructure {
+  /** Contains meta data describing the resultContent.*/
+  resultMetaData?: DTResultMeta; // ExtensionObject ns=11;i=3007
+  /** Abstract data type to be subtyped from to hold result data created by the selected recipe.*/
+  resultContent: VariantOptions[]; // Variant ns=0;i=24
+}
+export interface UDTResult extends ExtensionObject, DTResult {};

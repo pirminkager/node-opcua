@@ -1,41 +1,37 @@
 // compile with  tsc --lib es2018 client_with_custom_datatype.ts
 // tslint:disable:no-console
-import * as chalk from "chalk";
-import * as os from "os";
+import os from "node:os";
+import { types } from "node:util";
 
 import {
     AttributeIds,
-    BrowseResult,
-    ConnectionStrategyOptions,
+    type ConnectionStrategyOptions,
     MessageSecurityMode,
     OPCUAClient,
-    OPCUAClientOptions,
-    SecurityPolicy,
-    UserTokenType
+    type OPCUAClientOptions,
+    SecurityPolicy
 } from "node-opcua-client";
 
 // this test requires UA C++ Demo Server
-const addNodeMethodNodeId = "ns=2;s=Demo.Massfolder_Static.AddNodes";
-const endpointUri = "opc.tcp://" + os.hostname() + ":48010";
+const endpointUri = `opc.tcp://${os.hostname()}:48010`;
 
-const doDebug = true;
+const _doDebug = false;
 
 async function main() {
-
     const connectionStrategy: ConnectionStrategyOptions = {
         initialDelay: 1000,
         maxDelay: 20000, // retry every 20 seconds
-        maxRetry: 2, // maxRetry: 0xFFFFF // we need a large number here
+        maxRetry: 2 // maxRetry: 0xFFFFF // we need a large number here
     };
 
     const options: OPCUAClientOptions = {
         applicationName: "ClientBrowseNextDemo",
         connectionStrategy,
-        endpoint_must_exist: false,
+        endpointMustExist: false,
         keepSessionAlive: false,
         requestedSessionTimeout: 60000, // 1 minute
         securityMode: MessageSecurityMode.None,
-        securityPolicy: SecurityPolicy.None,
+        securityPolicy: SecurityPolicy.None
     };
 
     const client = OPCUAClient.create(options);
@@ -67,11 +63,16 @@ async function main() {
 
     const session = await client.createSession();
 
+    session.on("session_restored", () => {
+        console.log(">> Session restored");
+    });
+    session.on("session_closed", () => {
+        console.log(">> session closed");
+    });
     // Note: this example demonstrate how polling can be used in OPCUA ,
     // Note that Pooling is **not** the recommended way to monitored
     // change of a UA Variable! Use Subscription instead ....
     const timerId = setInterval(async () => {
-
         if (client.isReconnecting) {
             console.log(" suspending OPCUA read while connection is lost");
             return;
@@ -85,18 +86,22 @@ async function main() {
             console.log(dataValue.statusCode.toString(), dataValue.value.toString());
             console.log(" now un-plug and re-plug the network cable to test node-opcua automatic reconnection");
         } catch (err) {
-            console.log(" Error while reading value", err.message);
+            if (types.isNativeError(err)) {
+                console.log(" Error while reading value", err.message);
+            }
         }
-
     }, 2000);
 
-    setTimeout(async () => {
-        clearInterval(timerId);
+    setTimeout(
+        async () => {
+            clearInterval(timerId);
 
-        await session.close();
-        await client.disconnect();
-        console.log("Done !");
-    }, 10 * 60 * 1000);
+            await session.close();
+            await client.disconnect();
+            console.log("Done !");
+        },
+        10 * 60 * 1000
+    );
 }
 
 main();

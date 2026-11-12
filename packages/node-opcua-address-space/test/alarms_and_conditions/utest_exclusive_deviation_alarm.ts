@@ -1,30 +1,21 @@
-import * as should from "should";
-
 import { StatusCodes } from "node-opcua-status-code";
-import { Variant } from "node-opcua-variant";
-import {
-    AddressSpace,
-    UAExclusiveDeviationAlarm,
-    UAObject,
-    UAVariable
-} from "../..";
+import { type DataType, Variant } from "node-opcua-variant";
+import should from "should";
+import type { AddressSpace, UAExclusiveDeviationAlarmEx, UAObject, UAVariable, UAVariableT } from "../../dist/api/index.js";
+import type { MochaSuiteEx } from "./test_alarms_and_conditions.js";
 
-export function utest_exclusive_deviation_alarm(test: any) {
-
+export function utest_exclusive_deviation_alarm(test: MochaSuiteEx): void {
     describe("Deviation Alarms : ExclusiveDeviation Alarms ", () => {
-
         let addressSpace: AddressSpace;
         let source: UAObject;
-        let engine: UAObject;
         let variableWithAlarm: UAVariable;
-        let setpointNodeNode: UAVariable;
+        let setpointNodeNode: UAVariableT<number, DataType.Double>;
 
         before(() => {
             addressSpace = test.addressSpace;
             source = test.source;
-            engine = test.engine;
             variableWithAlarm = test.variableWithAlarm;
-            setpointNodeNode = test.setpointNodeNode;
+            setpointNodeNode = test.setpointNodeNode as UAVariableT<number, DataType.Double>;
         });
 
         function setVariableValue(value: number): void {
@@ -35,10 +26,8 @@ export function utest_exclusive_deviation_alarm(test: any) {
         }
 
         describe("ExclusiveDeviationAlarm", () => {
-
-            let alarm: UAExclusiveDeviationAlarm;
+            let alarm: UAExclusiveDeviationAlarmEx;
             before(() => {
-
                 setpointNodeNode.setValueFromSource({ dataType: "Double", value: 0 });
                 variableWithAlarm.setValueFromSource({ dataType: "Double", value: 0 });
 
@@ -55,28 +44,27 @@ export function utest_exclusive_deviation_alarm(test: any) {
                 });
 
                 alarm.setEnabledState(true);
-
             });
             it("should provide correct properties", () => {
+                should(alarm.getInputNodeValue()).eql(0);
 
-                alarm.getInputNodeValue().should.eql(0);
-
-                alarm.getSetpointNodeNode().should.eql(setpointNodeNode);
-                setpointNodeNode.readValue().value.should.eql(new Variant({
-                    dataType: "Double",
-                    value: 0
-                }));
-                alarm.getSetpointValue().should.eql(0);
+                should(alarm.getSetpointNodeNode()).eql(setpointNodeNode);
+                should(setpointNodeNode.readValue().value).eql(
+                    new Variant({
+                        dataType: "Double",
+                        value: 0
+                    })
+                );
+                should(alarm.getSetpointValue()).eql(0);
 
                 setpointNodeNode.setValueFromSource({ dataType: "Double", value: 10 });
-                alarm.getSetpointValue().should.eql(10);
+                should(alarm.getSetpointValue()).eql(10);
 
                 setpointNodeNode.setValueFromSource({ dataType: "Double", value: 0 });
-                alarm.getSetpointValue().should.eql(0);
+                should(alarm.getSetpointValue()).eql(0);
             });
 
             it("ExclusiveDeviationAlarm - setpointNode Value is zero", () => {
-
                 setpointNodeNode.setValueFromSource({ dataType: "Double", value: 0 });
                 //
                 should(alarm.limitState.getCurrentState()).eql(null); // not alarmed !
@@ -84,30 +72,29 @@ export function utest_exclusive_deviation_alarm(test: any) {
                 alarm.activeState.getValue().should.eql(false);
 
                 setVariableValue(-11);
-                alarm.limitState.getCurrentState()!.should.eql("LowLow");
+                should(alarm.limitState.getCurrentState()).eql("LowLow");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
 
                 setVariableValue(-2);
-                alarm.limitState.getCurrentState()!.should.eql("Low");
+                should(alarm.limitState.getCurrentState()).eql("Low");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
 
                 setVariableValue(0.25);
-                should(alarm.limitState.getCurrentState()!).eql(null); // not alarmed !
+                should(alarm.limitState.getCurrentState()).eql(null); // not alarmed !
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.BadStateNotActive);
                 alarm.activeState.getValue().should.eql(false);
 
                 setVariableValue(2.0);
-                alarm.limitState.getCurrentState()!.should.eql("High");
+                should(alarm.limitState.getCurrentState()).eql("High");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
 
                 setVariableValue(12);
-                alarm.limitState.getCurrentState()!.should.eql("HighHigh");
+                should(alarm.limitState.getCurrentState()).eql("HighHigh");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
-
             });
             it("ExclusiveDeviationAlarm - setPointValue is not zero", () => {
                 // ----------------------------------------------------------------------- shifting by 100
@@ -119,12 +106,12 @@ export function utest_exclusive_deviation_alarm(test: any) {
                 alarm.activeState.getValue().should.eql(false);
 
                 setVariableValue(100 - 11);
-                alarm.limitState.getCurrentState()!.should.eql("LowLow");
+                should(alarm.limitState.getCurrentState()).eql("LowLow");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
 
                 setVariableValue(100 - 2);
-                alarm.limitState.getCurrentState()!.should.eql("Low");
+                should(alarm.limitState.getCurrentState()).eql("Low");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
 
@@ -134,15 +121,14 @@ export function utest_exclusive_deviation_alarm(test: any) {
                 alarm.activeState.getValue().should.eql(false);
 
                 setVariableValue(100 + 2.0);
-                alarm.limitState.getCurrentState()!.should.eql("High");
+                should(alarm.limitState.getCurrentState()).eql("High");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
 
                 setVariableValue(100 + 12);
-                alarm.limitState.getCurrentState()!.should.eql("HighHigh");
+                should(alarm.limitState.getCurrentState()).eql("HighHigh");
                 alarm.limitState.currentState.readValue().statusCode.should.eql(StatusCodes.Good);
                 alarm.activeState.getValue().should.eql(true);
-
             });
         });
     });

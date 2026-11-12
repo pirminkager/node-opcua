@@ -1,34 +1,37 @@
 {
     "name": "node-opcua-client-proxy",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -client-proxy",
+    "type": "module",
+    "version": "2.187.26",
+    "description": "pure nodejs OPCUA SDK - module client-proxy",
     "scripts": {
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
         "build": "tsc -b",
-        "lint": "tslint source/**/*.ts",
-        "test": "mocha test"
+        "lint": "biome check --no-errors-on-unmatched .",
+        "format": "biome check --write --no-errors-on-unmatched .",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
     },
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
+    "engines": {
+        "node": ">=22.13.0"
+    },
     "dependencies": {
-        "async": "^3.2.0",
-        "node-opcua-address-space": "^2.6.0-alpha.1",
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-client": "^2.6.0-alpha.1",
-        "node-opcua-constants": "^2.6.0-alpha.1",
-        "node-opcua-data-model": "^2.6.0-alpha.1",
-        "node-opcua-data-value": "^2.6.0-alpha.1",
-        "node-opcua-nodeid": "^2.6.0-alpha.1",
-        "node-opcua-pseudo-session": "^2.6.0-alpha.1",
-        "node-opcua-service-browse": "^2.6.0-alpha.1",
-        "node-opcua-service-call": "^2.6.0-alpha.1",
-        "node-opcua-service-read": "^2.6.0-alpha.1",
-        "node-opcua-service-subscription": "^2.6.0-alpha.1",
-        "node-opcua-service-write": "^2.6.0-alpha.1",
-        "node-opcua-status-code": "^2.6.0-alpha.1",
-        "node-opcua-utils": "^2.6.0-alpha.1",
-        "node-opcua-variant": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-constants": "2.185.0",
+        "node-opcua-data-model": "2.187.0",
+        "node-opcua-data-value": "2.187.19",
+        "node-opcua-debug": "2.186.7",
+        "node-opcua-nodeid": "2.187.0",
+        "node-opcua-pseudo-session": "2.187.26",
+        "node-opcua-service-browse": "2.187.19",
+        "node-opcua-service-call": "2.187.19",
+        "node-opcua-service-read": "2.187.19",
+        "node-opcua-service-subscription": "2.187.26",
+        "node-opcua-service-write": "2.187.19",
+        "node-opcua-status-code": "2.187.0",
+        "node-opcua-utils": "2.187.0",
+        "node-opcua-variant": "2.187.19"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -45,5 +48,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

@@ -1,45 +1,52 @@
-// tslint:disable:no-console
-import * as fs from "fs";
-import * as path from "path";
-import * as should from "should";
-import { promisify } from "util";
-
-import * as mocha from "mocha";
+import fs from "node:fs";
 import { BinaryStream } from "node-opcua-binary-stream";
 import { coerceLocalizedText, LocalizedText } from "node-opcua-data-model";
 import { hexDump } from "node-opcua-debug";
-import {
-    DataTypeFactory,
-    parameters
-} from "node-opcua-factory";
-import { DataType, Variant } from "node-opcua-variant";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import { DataTypeFactory, type IBaseUAObject, parameters } from "node-opcua-factory";
+import { encode_decode_round_trip_test, type IExtensionObject } from "node-opcua-packet-analyzer/testHelpers.js";
+import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
+import should from "should";
 
-import { encode_decode_round_trip_test } from "node-opcua-packet-analyzer/test_helpers";
+import { getOrCreateConstructor, parseBinaryXSD } from "../dist/source/index.js";
 
-import {
-    getOrCreateConstructor,
-    parseBinaryXSDAsync
-} from "..";
-
-import { MockProvider } from "./mock_id_provider";
-import { ExtensionObject } from "node-opcua-extension-object";
+import { MockProvider } from "./mock_id_provider.js";
+import { testFixture } from "./paths.js";
 
 const doDebug = false;
 
 const idProvider = new MockProvider();
+
+// The constructors used in these tests are built at runtime from the .xsd fixtures:
+// describe, for the type checker only, the fields that the tests access.
+interface WorkOrderLike extends IBaseUAObject {
+    assetID: string;
+}
+interface StructureWithOptionalFieldsLike extends IBaseUAObject {
+    optionalInt32?: number;
+    optionalStringArray?: string[];
+    toJSON(): Record<string, unknown>;
+}
+interface SystemStateDescriptionLike extends IBaseUAObject {
+    state: number;
+    toJSON(): Record<string, unknown>;
+}
+interface ConfigurationLike extends IBaseUAObject {
+    internalId: { description: LocalizedText };
+}
+
 // ts-lint:disable:no-string-literal
 describe("BSHA - Binary Schemas Helper 1", () => {
-
     let dataTypeFactory: DataTypeFactory;
     let old_schema_helpers_doDebug = false;
     before(async () => {
-        const sample_file = path.join(__dirname, "fixtures/sample_type.xsd");
+        const sample_file = testFixture("sample_type.xsd");
 
         old_schema_helpers_doDebug = parameters.debugSchemaHelper;
         parameters.debugSchemaHelper = true;
-        const sample = fs.readFileSync(sample_file, "ascii");
+        const sample = fs.readFileSync(sample_file, "utf-8");
         dataTypeFactory = new DataTypeFactory([]);
-        await parseBinaryXSDAsync(sample, idProvider, dataTypeFactory);
+        await parseBinaryXSD(sample, idProvider, dataTypeFactory);
     });
 
     after(() => {
@@ -47,13 +54,12 @@ describe("BSHA - Binary Schemas Helper 1", () => {
     });
 
     it("BSH1 - should parse some structure types", async () => {
-        dataTypeFactory.hasStructuredType("WorkOrderType").should.eql(true);
+        dataTypeFactory.hasStructureByTypeName("WorkOrderType").should.eql(true);
     });
     it("BSH2 - should parse some enumerated types", async () => {
         dataTypeFactory.hasEnumeration("Priority").should.eql(true);
     });
     it("BSH3 - should construct a dynamic object structure", () => {
-
         const WorkOrderType = getOrCreateConstructor("WorkOrderType", dataTypeFactory);
 
         const workOrderType = new WorkOrderType({
@@ -62,39 +68,40 @@ describe("BSHA - Binary Schemas Helper 1", () => {
             ID: "00000000-0000-0000-ABCD-000000000000",
 
             startTime: new Date(),
-            statusComments: [{
-                actor: "Foo",
-                comment: /* localized text*/ new LocalizedText({ text: "bar" }),
-                timestamp: new Date()
-            }]
-        });
+            statusComments: [
+                {
+                    actor: "Foo",
+                    comment: /* localized text*/ new LocalizedText({ text: "bar" }),
+                    timestamp: new Date()
+                }
+            ]
+        }) as WorkOrderLike;
 
         workOrderType.assetID.should.eql("AssetId1234");
         if (doDebug) {
             console.log(workOrderType.toString());
         }
-        encode_decode_round_trip_test(workOrderType, (stream: BinaryStream) => {
+        encode_decode_round_trip_test(workOrderType, (buffer: Buffer) => {
             if (doDebug) {
-                console.log(hexDump(stream.buffer));
+                console.log(hexDump(buffer));
             }
-            stream.length.should.equal(66);
+            buffer.length.should.equal(66);
         });
     });
 
     it("BSH4 - should handle StructureWithOptionalFields - 1", () => {
-
         const StructureWithOptionalFields = getOrCreateConstructor("StructureWithOptionalFields", dataTypeFactory);
 
         const structureWithOptionalFields1 = new StructureWithOptionalFields({
             mandatoryInt32: 42,
             mandatoryStringArray: ["a"]
-        });
+        }) as StructureWithOptionalFieldsLike;
 
         should(structureWithOptionalFields1.optionalInt32).eql(undefined);
         should(structureWithOptionalFields1.optionalStringArray).eql(undefined);
 
         if (doDebug) {
-            console.log((StructureWithOptionalFields as any).schema);
+            console.log(StructureWithOptionalFields.schema);
         }
         encode_decode_round_trip_test(structureWithOptionalFields1, (buffer: Buffer) => {
             if (doDebug) {
@@ -119,14 +126,13 @@ describe("BSHA - Binary Schemas Helper 1", () => {
         });
     });
     it("BSH5 - should handle StructureWithOptionalFields - 2", () => {
-
         const StructureWithOptionalFields = getOrCreateConstructor("StructureWithOptionalFields", dataTypeFactory);
         const structureWithOptionalFields2 = new StructureWithOptionalFields({
             mandatoryInt32: 42,
             mandatoryStringArray: ["h"],
             optionalInt32: 43,
             optionalStringArray: ["a", "b"]
-        });
+        }) as StructureWithOptionalFieldsLike;
 
         encode_decode_round_trip_test(structureWithOptionalFields2, (buffer: Buffer) => {
             if (doDebug) {
@@ -157,9 +163,10 @@ describe("BSHA - Binary Schemas Helper 1", () => {
         });
     });
     it("BSH6 - should handle StructureWithOptionalFields - 13 (all options fields missing)", () => {
-
         const StructWithOnlyOptionals = getOrCreateConstructor("StructWithOnlyOptionals", dataTypeFactory);
-        const unionTest1 = new StructWithOnlyOptionals({/* empty */ });
+        const unionTest1 = new StructWithOnlyOptionals({
+            /* empty */
+        });
 
         encode_decode_round_trip_test(unionTest1, (buffer: Buffer) => {
             buffer.length.should.eql(0);
@@ -169,7 +176,6 @@ describe("BSHA - Binary Schemas Helper 1", () => {
         });
     });
     it("BSH7 - should handle StructureWithOptionalFields - 13 (one field missing)", () => {
-
         const StructWithOnlyOptionals = getOrCreateConstructor("StructWithOnlyOptionals", dataTypeFactory);
         const unionTest1 = new StructWithOnlyOptionals({
             optionalStringArray: ["Hello", "World"]
@@ -183,7 +189,6 @@ describe("BSHA - Binary Schemas Helper 1", () => {
         });
     });
     it("BSH8 - should handle StructureWithOptionalFields - 13 (one field missing 2)", () => {
-
         const StructWithOnlyOptionals = getOrCreateConstructor("StructWithOnlyOptionals", dataTypeFactory);
         const unionTest1 = new StructWithOnlyOptionals({
             optionalInt32: 0
@@ -197,20 +202,56 @@ describe("BSHA - Binary Schemas Helper 1", () => {
         });
     });
 
+    it("issue#982 - toJSON should not fail if one field is null", () => {
+        const StructureWithOptionalFields = getOrCreateConstructor("StructureWithOptionalFields", dataTypeFactory);
+        const structureWithOptionalFields2 = new StructureWithOptionalFields({
+            mandatoryInt32: 42,
+            mandatoryStringArray: [null],
+            optionalInt32: 43,
+            optionalStringArray: [null, null]
+        }) as StructureWithOptionalFieldsLike;
+
+        structureWithOptionalFields2.toJSON().should.eql({
+            mandatoryInt32: 42,
+            mandatoryStringArray: [null],
+            optionalInt32: 43,
+            optionalStringArray: [null, null]
+        });
+
+        const v = new Variant({
+            dataType: DataType.ExtensionObject,
+
+            arrayType: VariantArrayType.Array,
+            value: [null, structureWithOptionalFields2]
+        });
+
+        (v.toJSON() as Record<string, unknown>).should.eql({
+            dataType: "ExtensionObject",
+            arrayType: "Array",
+            value: [
+                null,
+                {
+                    mandatoryInt32: 42,
+                    optionalInt32: 43,
+                    mandatoryStringArray: [null],
+                    optionalStringArray: [null, null]
+                }
+            ]
+        });
+    });
 });
 
 describe("BSHB - Binary Schemas Helper 2", () => {
-
     let dataTypeFactory: DataTypeFactory;
     let old_schema_helpers_doDebug = false;
     before(async () => {
-        const sample_file = path.join(__dirname, "fixtures/sample_type1.xsd");
+        const sample_file = testFixture("sample_type1.xsd");
 
         old_schema_helpers_doDebug = parameters.debugSchemaHelper;
         parameters.debugSchemaHelper = true;
-        const sample = fs.readFileSync(sample_file, "ascii");
+        const sample = fs.readFileSync(sample_file, "utf-8");
         dataTypeFactory = new DataTypeFactory([]);
-        await parseBinaryXSDAsync(sample, idProvider, dataTypeFactory);
+        await parseBinaryXSD(sample, idProvider, dataTypeFactory);
     });
 
     after(() => {
@@ -218,32 +259,33 @@ describe("BSHB - Binary Schemas Helper 2", () => {
     });
 
     it("BSHB1 - should parse some structure types", async () => {
-        dataTypeFactory.hasStructuredType("SystemStateDescriptionDataType").should.eql(true);
+        dataTypeFactory.hasStructureByTypeName("SystemStateDescriptionDataType").should.eql(true);
     });
 
     it("BSHB2 - should parse some enumerated types", async () => {
         dataTypeFactory.hasEnumeration("SystemStateDataType").should.eql(true);
     });
 
-    enum SystemStateEnum2 {
-        PRD_1 = 1,
-        SBY_2 = 2,
-        ENG_3 = 3,
-        SDT_4 = 4,
-        UDT_5 = 5,
-        NST_6 = 6,
-    }
+    // a const object rather than an enum: an enum is not erasable syntax, so it cannot be run
+    // by Node's own type stripping (NATIVE_TS=1 in packages/run_all_mocha_tests.js)
+    const SystemStateEnum2 = {
+        PRD_1: 1,
+        SBY_2: 2,
+        ENG_3: 3,
+        SDT_4: 4,
+        UDT_5: 5,
+        NST_6: 6
+    } as const;
 
     it("BSHB3 - should construct a dynamic object structure 1", () => {
-
         const SystemStateDescriptionDataType = getOrCreateConstructor("SystemStateDescriptionDataType", dataTypeFactory);
 
-        const SystemState = dataTypeFactory.getEnumeration("SystemStateDataType")!.enumValues as SystemStateEnum2;
+        const _SystemState = dataTypeFactory.getEnumeration("SystemStateDataType")!.enumValues;
 
         const systemStateDescription = new SystemStateDescriptionDataType({
             state: SystemStateEnum2.ENG_3,
             stateDescription: "Hello"
-        });
+        }) as SystemStateDescriptionLike;
         systemStateDescription.state.should.eql(SystemStateEnum2.ENG_3);
 
         encode_decode_round_trip_test(systemStateDescription, (buffer: Buffer) => {
@@ -263,7 +305,6 @@ describe("BSHB - Binary Schemas Helper 2", () => {
         });
     });
     it("BSHB4 - should construct a dynamic object structure 2", () => {
-
         const SystemStateDescriptionDataType = getOrCreateConstructor("SystemStateDescriptionDataType", dataTypeFactory);
         const systemStateDescription = new SystemStateDescriptionDataType({
             state: SystemStateEnum2.ENG_3
@@ -276,21 +317,19 @@ describe("BSHB - Binary Schemas Helper 2", () => {
             buffer.length.should.equal(8);
         });
     });
-
 });
 
 describe("BSHC - Binary Schemas Helper 3 (with bit fields)", () => {
-
     let dataTypeFactory: DataTypeFactory;
     let old_schema_helpers_doDebug = false;
     before(async () => {
-        const sample_file = path.join(__dirname, "fixtures/sample_type2.xsd");
+        const sample_file = testFixture("sample_type2.xsd");
 
         old_schema_helpers_doDebug = parameters.debugSchemaHelper;
         parameters.debugSchemaHelper = true;
-        const sample = fs.readFileSync(sample_file, "ascii");
+        const sample = fs.readFileSync(sample_file, "utf-8");
         dataTypeFactory = new DataTypeFactory([]);
-        await parseBinaryXSDAsync(sample, idProvider, dataTypeFactory);
+        await parseBinaryXSD(sample, idProvider, dataTypeFactory);
     });
 
     after(() => {
@@ -298,30 +337,31 @@ describe("BSHC - Binary Schemas Helper 3 (with bit fields)", () => {
     });
 
     it("BSHC1 - should parse ProcessingTimesDataType structure types", async () => {
-        dataTypeFactory.hasStructuredType("ProcessingTimesDataType").should.eql(true);
-        const ProcessingTimesDataType = dataTypeFactory.getStructuredTypeSchema("ProcessingTimesDataType");
-        ProcessingTimesDataType.name.should.eql("ProcessingTimesDataType");
+        dataTypeFactory.hasStructureByTypeName("ProcessingTimesDataType").should.eql(true);
+        const ProcessingTimesDataType = dataTypeFactory.getStructureInfoByTypeName("ProcessingTimesDataType");
+        ProcessingTimesDataType.schema.name.should.eql("ProcessingTimesDataType");
     });
 
     it("BSHC2 - should construct a dynamic object structure ProcessingTimesDataType - 1", () => {
-
         interface ProcessingTimes extends ExtensionObject {
             startTime: Date;
             endTime: Date;
             acquisitionDuration?: number;
             processingDuration?: number;
+            toJSON(): Record<string, unknown>;
         }
 
         const ProcessingTimesDataType = getOrCreateConstructor("ProcessingTimesDataType", dataTypeFactory);
 
-        const refDate = (new Date(Date.UTC(2020, 14, 2, 13, 0))).getTime();
+        const refDate = new Date(Date.UTC(2020, 14, 2, 13, 0)).getTime();
         const pojo = {
             endTime: new Date(refDate - 110),
             startTime: new Date(refDate - 150)
         };
-        const processingTimes: ProcessingTimes = new ProcessingTimesDataType(pojo);
+        // the constructor is produced at runtime from the schema: only IBaseUAObject is known statically
+        const processingTimes = new ProcessingTimesDataType(pojo) as unknown as ProcessingTimes;
 
-        encode_decode_round_trip_test(processingTimes, (buffer: Buffer) => {
+        encode_decode_round_trip_test(processingTimes as unknown as IExtensionObject, (buffer: Buffer) => {
             if (doDebug) {
                 console.log(hexDump(buffer));
             }
@@ -338,7 +378,6 @@ describe("BSHC - Binary Schemas Helper 3 (with bit fields)", () => {
     });
 
     it("BSHC3 - should construct a dynamic object structure ProcessingTimesDataType - 2", () => {
-
         const ProcessingTimesDataType = getOrCreateConstructor("ProcessingTimesDataType", dataTypeFactory);
 
         const processingTimes = new ProcessingTimesDataType({
@@ -358,7 +397,6 @@ describe("BSHC - Binary Schemas Helper 3 (with bit fields)", () => {
     });
 
     it("BSHC4 - should construct a ConfigurationDataType - 1", () => {
-
         const ConfigurationDataType = getOrCreateConstructor("ConfigurationDataType", dataTypeFactory);
 
         const configuration = new ConfigurationDataType({
@@ -377,7 +415,7 @@ describe("BSHC - Binary Schemas Helper 3 (with bit fields)", () => {
             lastModified: new Date(Date.now() - 1000),
 
             hasTransferableDataOnFile: undefined
-        });
+        }) as ConfigurationLike;
         configuration.internalId.description.should.eql(coerceLocalizedText("Some description"));
 
         const reloaded = encode_decode_round_trip_test(configuration, (buffer: Buffer) => {
@@ -385,47 +423,41 @@ describe("BSHC - Binary Schemas Helper 3 (with bit fields)", () => {
         });
         console.log(reloaded.toString());
         console.log(reloaded.toJSON());
-
     });
 
     it("BSHC5 - should construct a ResultDataType - 1", () => {
-
         const ResultDataType = getOrCreateConstructor("ResultDataType", dataTypeFactory);
 
         const result = new ResultDataType({
-            resultContent: [
-                new Variant({ dataType: DataType.Double, value: 1000 })
-            ]
+            resultContent: [new Variant({ dataType: DataType.Double, value: 1000 })]
         });
         const reloaded = encode_decode_round_trip_test(result, (buffer: Buffer) => {
             buffer.length.should.eql(35);
         });
         console.log(reloaded.toString());
         console.log(reloaded.toJSON());
-
     });
 });
 
 describe("BSHD - Binary Schemas Helper 4", () => {
-
     let dataTypeFactory: DataTypeFactory;
     let old_schema_helpers_doDebug = false;
     before(async () => {
-        const sample_file = path.join(__dirname, "fixtures/sample_type3.xsd");
+        const sample_file = testFixture("sample_type3.xsd");
 
         old_schema_helpers_doDebug = parameters.debugSchemaHelper;
         parameters.debugSchemaHelper = true;
-        const sample = fs.readFileSync(sample_file, "ascii");
+        const sample = fs.readFileSync(sample_file, "utf-8");
         dataTypeFactory = new DataTypeFactory([]);
-        await parseBinaryXSDAsync(sample, idProvider, dataTypeFactory);
+        await parseBinaryXSD(sample, idProvider, dataTypeFactory);
     });
 
     after(() => {
         parameters.debugSchemaHelper = old_schema_helpers_doDebug;
     });
 
-    it("BSHD1 - should parse NodeIdType structure types", async () => {
-        dataTypeFactory.hasStructuredType("NodeId").should.eql(true);
+    it("BSHD1 - should parse NodeId2 structure types", async () => {
+        dataTypeFactory.hasStructureByTypeName("NodeId2").should.eql(true);
     });
 
     it("BSHD2 - should construct a dynamic object structure ProcessingTimesDataType - 1", () => {
@@ -434,17 +466,16 @@ describe("BSHD - Binary Schemas Helper 4", () => {
 });
 
 describe("BSHE - Binary Schemas Helper 5 (Union)", () => {
-
     let dataTypeFactory: DataTypeFactory;
     let old_schema_helpers_doDebug = false;
     before(async () => {
-        const sample_file = path.join(__dirname, "fixtures/sample_type4.xsd");
+        const sample_file = testFixture("sample_type4.xsd");
 
         old_schema_helpers_doDebug = parameters.debugSchemaHelper;
         parameters.debugSchemaHelper = true;
-        const sample = fs.readFileSync(sample_file, "ascii");
+        const sample = fs.readFileSync(sample_file, "utf-8");
         dataTypeFactory = new DataTypeFactory([]);
-        await parseBinaryXSDAsync(sample, idProvider, dataTypeFactory);
+        await parseBinaryXSD(sample, idProvider, dataTypeFactory);
     });
 
     after(() => {
@@ -452,55 +483,59 @@ describe("BSHE - Binary Schemas Helper 5 (Union)", () => {
     });
 
     it("BSHE1 - should parse ScanData union", async () => {
-
         const ScanData = getOrCreateConstructor("ScanData", dataTypeFactory);
 
-        const scanData2a = new ScanData({ byteString: Buffer.allocUnsafe(10) });
+        const _scanData2a = new ScanData({ byteString: Buffer.allocUnsafe(10) });
         const scanData2b = new ScanData({ switchField: 1, byteString: Buffer.allocUnsafe(10) });
-        const reloaded2b = encode_decode_round_trip_test(scanData2b, (buffer: Buffer) => {
+        const _reloaded2b = encode_decode_round_trip_test(scanData2b, (buffer: Buffer) => {
             buffer.length.should.eql(4 + 4 + 10);
         });
 
         const scanData4a = new ScanData({ string: "Hello" });
+        const _reloaded4a = encode_decode_round_trip_test(scanData4a, (buffer: Buffer) => {
+            buffer.length.should.eql(4 + 4 + 5);
+        });
         const scanData4b = new ScanData({ switchField: 2, string: "Hello" });
-        const reloaded4b = encode_decode_round_trip_test(scanData4b, (buffer: Buffer) => {
+        const _reloaded4b = encode_decode_round_trip_test(scanData4b, (buffer: Buffer) => {
             buffer.length.should.eql(4 + 4 + 5);
         });
 
         const scanData5a = new ScanData({ string: "36" });
+        const _reloaded5a = encode_decode_round_trip_test(scanData5a, (buffer: Buffer) => {
+            buffer.length.should.eql(10);
+        });
         const scanData5b = new ScanData({ switchField: 3, value: 36 });
-        const reloaded5b = encode_decode_round_trip_test(scanData5b, (buffer: Buffer) => {
+        const _reloaded5b = encode_decode_round_trip_test(scanData5b, (buffer: Buffer) => {
             buffer.length.should.eql(8);
         });
 
-        const scanData6a = new ScanData({ custom: { dataType: "Double", value: 36 } });
+        const _scanData6a = new ScanData({ custom: { dataType: "Double", value: 36 } });
         const scanData6b = new ScanData({ switchField: 4, custom: { dataType: "Double", value: 36 } });
-        const reloaded6b = encode_decode_round_trip_test(scanData6b, (buffer: Buffer) => {
+        const reloaded6b = encode_decode_round_trip_test(scanData6b, (_buffer: Buffer) => {
             // buffer.length.should.eql(35);
         });
         console.log(reloaded6b.toString());
-        reloaded6b.switchField.should.eql(4);
-        reloaded6b.custom.dataType.should.eql(DataType.Double);
-        reloaded6b.custom.value.should.eql(36);
+        const reloaded = reloaded6b as unknown as { switchField: number; custom: { dataType: DataType; value: number } };
+        reloaded.switchField.should.eql(4);
+        reloaded.custom.dataType.should.eql(DataType.Double);
+        reloaded.custom.value.should.eql(36);
 
         const scanData1 = new ScanData({}); // should throw
-        const reloaded1 = encode_decode_round_trip_test(scanData1, (buffer: Buffer) => {
+        const _reloaded1 = encode_decode_round_trip_test(scanData1, (buffer: Buffer) => {
             buffer.length.should.eql(4);
         });
-
     });
     it("BSHE2 - should parse MyScanResult structure types", async () => {
-        dataTypeFactory.hasStructuredType("MyScanResult").should.eql(true);
+        dataTypeFactory.hasStructureByTypeName("MyScanResult").should.eql(true);
 
         const MyScanResult = getOrCreateConstructor("MyScanResult", dataTypeFactory);
 
         const result = new MyScanResult({
-
             scanData: {
                 string: "36"
             }
         });
-        const reloaded = encode_decode_round_trip_test(result, (buffer: Buffer) => {
+        const reloaded = encode_decode_round_trip_test(result, (_buffer: Buffer) => {
             // buffer.length.should.eql(35);
         });
         console.log(reloaded.toString());
@@ -513,17 +548,16 @@ describe("BSHE - Binary Schemas Helper 5 (Union)", () => {
 });
 
 describe("BSSGF - Binary Schemas Helper 5 (DerivedType -1)", () => {
-
     let dataTypeFactory: DataTypeFactory;
     let old_schema_helpers_doDebug = false;
     before(async () => {
-        const sample_file = path.join(__dirname, "fixtures/sample_type5.xsd");
+        const sample_file = testFixture("sample_type5.xsd");
 
         old_schema_helpers_doDebug = parameters.debugSchemaHelper;
         parameters.debugSchemaHelper = true;
-        const sample = fs.readFileSync(sample_file, "ascii");
+        const sample = fs.readFileSync(sample_file, "utf-8");
         dataTypeFactory = new DataTypeFactory([]);
-        await parseBinaryXSDAsync(sample, idProvider, dataTypeFactory);
+        await parseBinaryXSD(sample, idProvider, dataTypeFactory);
     });
 
     after(() => {
@@ -531,7 +565,6 @@ describe("BSSGF - Binary Schemas Helper 5 (DerivedType -1)", () => {
     });
 
     it("BSHF1 - should handle RecipeIdExternalDataType", async () => {
-
         const RecipeIdExternalDataType = getOrCreateConstructor("RecipeIdExternalDataType", dataTypeFactory);
 
         const data = new RecipeIdExternalDataType({ id: "Id", hash: Buffer.alloc(10) });
@@ -539,6 +572,42 @@ describe("BSSGF - Binary Schemas Helper 5 (DerivedType -1)", () => {
             buffer.length.should.eql(4 /* optionalBit*/ + 4 + 4 + 2 + 10);
         });
         console.log(reloadedData.toJSON());
+    });
+});
 
+describe("BSHG - Binary Schema Helper 6 - Milo", () => {
+    let dataTypeFactory: DataTypeFactory;
+    let old_schema_helpers_doDebug = false;
+    before(async () => {
+        const sample_file = testFixture("sample_milo.xsd");
+
+        old_schema_helpers_doDebug = parameters.debugSchemaHelper;
+        parameters.debugSchemaHelper = true;
+        const sample = fs.readFileSync(sample_file, "utf-8");
+        dataTypeFactory = new DataTypeFactory([]);
+        await parseBinaryXSD(sample, idProvider, dataTypeFactory);
+    });
+
+    after(() => {
+        parameters.debugSchemaHelper = old_schema_helpers_doDebug;
+    });
+
+    it("BSHG-1 - should handle CustomUnionType", async () => {
+        const CustomUnionType = getOrCreateConstructor("CustomUnionType", dataTypeFactory);
+
+        const data1 = new CustomUnionType({ foo: 42 });
+        const reloadedData1 = encode_decode_round_trip_test(data1, (buffer: Buffer) => {
+            buffer.length.should.eql(4 /* optionalBit*/ + 4 /* UInt32 */);
+            const stream = new BinaryStream(buffer);
+            stream.readUInt32().should.eql(0x0001);
+            stream.readUInt32().should.eql(42);
+        });
+        console.log(reloadedData1.toJSON());
+
+        const data2 = new CustomUnionType({ bar: "Hello" });
+        const _reloadedData2 = encode_decode_round_trip_test(data2, (buffer: Buffer) => {
+            buffer.length.should.eql(4 /* optionalBit*/ + 4 /* string length*/ + 5 /* Hello*/);
+        });
+        console.log(reloadedData1.toJSON());
     });
 });

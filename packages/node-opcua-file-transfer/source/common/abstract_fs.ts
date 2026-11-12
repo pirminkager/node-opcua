@@ -1,0 +1,50 @@
+import type { NoParamCallback, OpenMode, PathLike, Stats, WriteFileOptions } from "node:fs";
+
+export interface AbstractFs {
+    stat(path: PathLike, callback: (err: NodeJS.ErrnoException | null, stats: Stats) => void): void;
+
+    statSync(path: PathLike): Stats;
+
+    open(path: PathLike, flags: OpenMode, callback: (err: NodeJS.ErrnoException | null, fd: number) => void): void;
+
+    write<TBuffer extends NodeJS.ArrayBufferView>(
+        fd: number,
+        buffer: TBuffer,
+        offset: number | undefined | null,
+        length: number | undefined | null,
+        position: number | undefined | null,
+        callback: (err: NodeJS.ErrnoException | null, bytesWritten: number, buffer: TBuffer) => void
+    ): void;
+
+    read<TBuffer extends NodeJS.ArrayBufferView>(
+        fd: number,
+        buffer: TBuffer,
+        offset: number,
+        length: number,
+        position: number | null,
+        callback: (err: NodeJS.ErrnoException | null, bytesRead: number, buffer: TBuffer) => void
+    ): void;
+
+    close(fd: number, callback: NoParamCallback): void;
+
+    writeFile(
+        path: PathLike | number,
+        data: string | NodeJS.ArrayBufferView,
+        options: WriteFileOptions,
+        callback: NoParamCallback
+    ): void;
+
+    // `flag` is OpenMode (string | number) and the shorthand form is BufferEncoding, not
+    // string: node's own fs must satisfy this interface, and @types/node 26 widened readFile's
+    // `flag` from string to OpenMode. Declaring it narrower left no overload of fs.readFile
+    // compatible in either direction, so `new FileTypeData({}, file)` could no longer fall
+    // back to node:fs.
+    readFile(
+        path: PathLike | number,
+        options: { encoding: BufferEncoding; flag?: OpenMode } | BufferEncoding,
+        callback: (err: NodeJS.ErrnoException | null, data: string) => void
+    ): void;
+    // readFile(path: PathLike | number, options: { encoding?: null; flag?: string; } | undefined | null, callback: (err: NodeJS.ErrnoException | null, data: Buffer) => void): void;
+
+    existsSync(filename: string): boolean;
+}

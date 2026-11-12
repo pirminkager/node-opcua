@@ -1,0 +1,105 @@
+/**
+ * @module node-opcua-address-space.AlarmsAndConditions
+ */
+
+import type { UAVariableT } from "node-opcua-address-space-base";
+import { assert } from "node-opcua-assert";
+import type { DataValue } from "node-opcua-data-value";
+import type { NodeId } from "node-opcua-nodeid";
+import type { DataType, VariantOptions } from "node-opcua-variant";
+import type { InstallSetPointOptions } from "../../api/interfaces/alarms_and_conditions/install_setpoint_options.js";
+import type { InstantiateLimitAlarmOptions } from "../../api/interfaces/alarms_and_conditions/instantiate_limit_alarm_options.js";
+import type { UANonExclusiveDeviationAlarmEx } from "../../api/interfaces/alarms_and_conditions/ua_non_exclusive_deviation_alarm_ex.js";
+import type { NamespacePrivate } from "../namespace_private.js";
+import {
+    DeviationAlarmHelper_getSetpointNodeNode,
+    DeviationAlarmHelper_getSetpointValue,
+    DeviationAlarmHelper_install_setpoint,
+    DeviationAlarmHelper_onSetpointDataValueChange
+} from "./deviation_alarm_helper.js";
+import { UALimitAlarmImpl } from "./ua_limit_alarm_impl.js";
+import { UANonExclusiveLimitAlarmImpl, UANonExclusiveLimitAlarmImplBase } from "./ua_non_exclusive_limit_alarm_impl.js";
+
+/** @internal */
+export class UANonExclusiveDeviationAlarmImplBase
+    extends UANonExclusiveLimitAlarmImplBase
+    implements UANonExclusiveDeviationAlarmEx
+{
+    /** installed as child nodes by the address space, not assigned here - hence `declare` */
+    declare public readonly setpointNode: UAVariableT<NodeId, DataType.NodeId>;
+    // required here, though SetPointSupport declares it optional
+    declare public readonly setpointNodeNode: UAVariableT<number, DataType.Double> | UAVariableT<number, DataType.Float>;
+
+    public static instantiate(
+        namespace: NamespacePrivate,
+        type: string | NodeId,
+        options: InstantiateLimitAlarmOptions & InstallSetPointOptions,
+        data?: Record<string, VariantOptions>
+    ): UANonExclusiveDeviationAlarmImpl {
+        const addressSpace = namespace.addressSpace;
+
+        const nonExclusiveDeviationAlarmType = addressSpace.findEventType("NonExclusiveDeviationAlarmType");
+        /* c8 ignore next */
+        if (!nonExclusiveDeviationAlarmType) {
+            throw new Error("cannot find ExclusiveDeviationAlarmType");
+        }
+        assert(type === nonExclusiveDeviationAlarmType.browseName.toString());
+
+        const alarm = UANonExclusiveLimitAlarmImplBase.instantiate(
+            namespace,
+            type,
+            options,
+            data
+        ) as UANonExclusiveDeviationAlarmImpl;
+        Object.setPrototypeOf(alarm, UANonExclusiveDeviationAlarmImpl.prototype);
+
+        assert(alarm instanceof UANonExclusiveDeviationAlarmImpl);
+        assert(alarm instanceof UANonExclusiveLimitAlarmImpl);
+        assert(alarm instanceof UALimitAlarmImpl);
+
+        alarm._install_setpoint(options);
+
+        return alarm;
+    }
+    public setStateBasedOnInputValue(value: number): void {
+        const setpointValue = this.getSetpointValue();
+        if (setpointValue === null) {
+            throw new Error("Cannot access setpoint Value");
+        }
+        assert(Number.isFinite(setpointValue), "expecting a valid setpoint value");
+        // call base class implementation
+        super.setStateBasedOnInputValue(value - setpointValue);
+    }
+
+    public getSetpointNodeNode(): UAVariableT<number, DataType.Double> | UAVariableT<number, DataType.Float> | undefined {
+        return DeviationAlarmHelper_getSetpointNodeNode.call(this);
+    }
+
+    public getSetpointValue(): number | null {
+        return DeviationAlarmHelper_getSetpointValue.call(this);
+    }
+
+    /**
+     * What the alarm does when the value of its setpoint node changes: re-evaluate the state
+     * of the alarm against the new setpoint, since the deviation it watches has just moved.
+     */
+    public onSetpointDataValueChange(dataValue: DataValue): void {
+        DeviationAlarmHelper_onSetpointDataValueChange.call(this, dataValue);
+    }
+
+    /**
+     * @deprecated assign {@link onSetpointDataValueChange} instead; this delegates to it.
+     */
+    public _onSetpointDataValueChange(dataValue: DataValue): void {
+        this.onSetpointDataValueChange(dataValue);
+    }
+
+    public _install_setpoint(options: InstallSetPointOptions): void {
+        DeviationAlarmHelper_install_setpoint.call(this, options);
+    }
+}
+
+/** @internal */
+export type UANonExclusiveDeviationAlarmImpl = UANonExclusiveDeviationAlarmImplBase;
+/** @internal */
+export const UANonExclusiveDeviationAlarmImpl = UANonExclusiveDeviationAlarmImplBase;

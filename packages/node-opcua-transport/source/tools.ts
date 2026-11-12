@@ -1,34 +1,34 @@
 /**
  * @module node-opcua-transport
  */
-import * as url from "url";
 
-import { assert } from "node-opcua-assert";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
-import { createFastUninitializedBuffer } from "node-opcua-buffer-utils";
+import { BinaryStream, type OutputBinaryStream } from "node-opcua-binary-stream";
 import { readMessageHeader } from "node-opcua-chunkmanager";
-import { BaseUAObject } from "node-opcua-factory";
-import { TCPErrorMessage } from "./TCPErrorMessage";
-import { UrlWithStringQuery } from "url";
+import type { BaseUAObject } from "node-opcua-factory";
+
+import { TCPErrorMessage } from "./TCPErrorMessage.js";
+
+const validMsgTypes = [
+    "HEL",
+    "ACK",
+    "ERR", // Connection Layer
+    "RHE", // ReverseHello - OPC UA Part 6 §7.1.2.6 (server-initiated / reverse connect)
+    "OPN",
+    "MSG",
+    "CLO" // OPC Unified Architecture, Part 6 page 36
+];
+const validChunkTypes = ["A", "F", "C"];
 
 function is_valid_msg_type(msgType: string): boolean {
-    assert(["HEL", "ACK", "ERR",   // Connection Layer
-        "OPN", "MSG", "CLO"    // OPC Unified Architecture, Part 6 page 36
-    ].indexOf(msgType) >= 0, "invalid message type  " + msgType);
-    return true;
+    return validMsgTypes.indexOf(msgType) >= 0;
 }
 
-export type ConstructorFunc = new (...args: any[]) => BaseUAObject;
+export type ConstructorFunc = new () => BaseUAObject;
 
 export function decodeMessage(stream: BinaryStream, classNameConstructor: ConstructorFunc): BaseUAObject {
-
-    assert(stream instanceof BinaryStream);
-    assert(classNameConstructor instanceof Function, " expecting a function for " + classNameConstructor);
-
     const header = readMessageHeader(stream);
-    assert(stream.length === 8);
 
-    let obj;
+    let obj: BaseUAObject;
     if (header.msgType === "ERR") {
         obj = new TCPErrorMessage();
         obj.decode(stream);
@@ -41,57 +41,71 @@ export function decodeMessage(stream: BinaryStream, classNameConstructor: Constr
 }
 
 export function packTcpMessage(msgType: string, encodableObject: BaseUAObject): Buffer {
-
-    assert(is_valid_msg_type(msgType));
-
-    const messageChunk = createFastUninitializedBuffer(encodableObject.binaryStoreSize() + 8);
-    // encode encodeableObject in a packet
+    const messageChunk = Buffer.allocUnsafe(encodableObject.binaryStoreSize() + 8);
+    // encode encode-ableObject in a packet
     const stream = new BinaryStream(messageChunk);
     encodeMessage(msgType, encodableObject, stream);
 
     return messageChunk;
-
 }
 
-// opc.tcp://xleuri11022:51210/UA/SampleServer
-export function parseEndpointUrl(endpointUrl: string): url.Url {
-    const _url =  url.parse(endpointUrl);
-    if (!_url.protocol || !_url.hostname) {
-        throw new Error("Invalid endpoint url " + endpointUrl);
+export interface ParsedEndpointUrl {
+    protocol: string;
+    hostname: string;
+    port: string | null;
+    pathname: string | null;
+    auth: string | null;
+    href: string;
+}
+
+// opc.tcp://hostname:51210/UA/SampleServer
+export function parseEndpointUrl(endpointUrl: string): ParsedEndpointUrl {
+    // Replace non-standard protocols (e.g. opc.tcp:) with http:
+    // so the WHATWG URL parser can handle them, then restore the
+    // original protocol in the result.
+    const protocolMatch = endpointUrl.match(/^([a-z][a-z0-9.+-]*):/i);
+    if (!protocolMatch) {
+        throw new Error(`Invalid endpoint url ${endpointUrl}`);
     }
-    return _url;
-/*
-    const r = /^([a-z.]*):\/\/([a-zA-Z_\-.\-0-9]*):([0-9]*)(\/.*){0,1}/;
+    const originalProtocol = `${protocolMatch[1].toLowerCase()}:`;
+    const normalizedUrl = endpointUrl.replace(/^[a-z][a-z0-9.+-]*:/i, "http:");
 
-    const matches = r.exec(endpointUrl);
-
-    if (!matches) {
-        throw new Error("Invalid endpoint url " + endpointUrl);
+    let parsed: URL;
+    try {
+        parsed = new URL(normalizedUrl);
+    } catch {
+        throw new Error(`Invalid endpoint url ${endpointUrl}`);
+    }
+    if (!parsed.hostname) {
+        throw new Error(`Invalid endpoint url ${endpointUrl}`);
     }
     return {
-        protocol: matches[1],
-
-        hostname: matches[2],
-
-        port: parseInt(matches[3], 10),
-
-        address: matches[4] || ""
+        protocol: originalProtocol,
+        hostname: parsed.hostname,
+        port: parsed.port || null,
+        pathname: parsed.pathname !== "/" ? parsed.pathname : null,
+        auth: parsed.username ? (parsed.password ? `${parsed.username}:${parsed.password}` : parsed.username) : null,
+        href: endpointUrl
     };
-   */
 }
 
 export function is_valid_endpointUrl(endpointUrl: string): boolean {
     const e = parseEndpointUrl(endpointUrl);
-    return e.hasOwnProperty("hostname");
+    return Object.hasOwn(e, "hostname");
 }
 
-export function writeTCPMessageHeader(msgType: string, chunkType: string, totalLength: number, stream: OutputBinaryStream) {
-
+export function writeTCPMessageHeader(msgType: string, chunkType: string, totalLength: number, stream: OutputBinaryStream): void {
     if (stream instanceof Buffer) {
         stream = new BinaryStream(stream);
     }
-    assert(is_valid_msg_type(msgType));
-    assert(["A", "F", "C"].indexOf(chunkType) !== -1);
+    // the caller is always node-opcua code: a bad type is a programming error, reported
+    // as a plain exception so that it surfaces where the chunk is built.
+    if (!is_valid_msg_type(msgType)) {
+        throw new Error(`invalid message type ${JSON.stringify(msgType)}`);
+    }
+    if (validChunkTypes.indexOf(chunkType) === -1) {
+        throw new Error(`invalid chunk type ${JSON.stringify(chunkType)}`);
+    }
 
     stream.writeUInt8(msgType.charCodeAt(0));
     stream.writeUInt8(msgType.charCodeAt(1));
@@ -103,11 +117,12 @@ export function writeTCPMessageHeader(msgType: string, chunkType: string, totalL
 }
 
 function encodeMessage(msgType: string, messageContent: BaseUAObject, stream: OutputBinaryStream) {
-
     // the length of the message, in bytes. (includes the 8 bytes of the message header)
     const totalLength = messageContent.binaryStoreSize() + 8;
 
     writeTCPMessageHeader(msgType, "F", totalLength, stream);
     messageContent.encode(stream);
-    assert(totalLength === stream.length, "invalid message size");
+    if (totalLength !== stream.length) {
+        throw new Error(`invalid message size: binaryStoreSize announced ${totalLength} bytes, encode wrote ${stream.length}`);
+    }
 }

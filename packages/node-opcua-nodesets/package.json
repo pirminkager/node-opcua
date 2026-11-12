@@ -1,13 +1,17 @@
 {
     "name": "node-opcua-nodesets",
+    "type": "module",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -nodesets",
+    "browser": "./dist/index_web.js",
+    "version": "2.187.4",
+    "description": "pure nodejs OPCUA SDK - module nodesets",
     "scripts": {
         "build": "tsc -b",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "test": "echo no test"
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "echo no test",
+        "build:images": "node ../../tools/build-nodeset-images.mjs",
+        "prepublishOnly": "node ../../tools/build-nodeset-images.mjs && node ../../tools/check-nodeset-images.mjs"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
@@ -24,5 +28,13 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "e4d73afdfcccb3491423149d9b9785888f4ebb3c"
+    "gitHead": "50cfa07779d4c07b299176ac9c27527fcd97d079",
+    "engines": {
+        "node": ">=22.13.0"
+    },
+    "files": [
+        "dist",
+        "source",
+        "nodesets"
+    ]
 }

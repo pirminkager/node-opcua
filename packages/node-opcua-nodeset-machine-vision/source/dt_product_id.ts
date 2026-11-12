@@ -1,0 +1,22 @@
+import type { UAString } from "node-opcua-basic-types";
+import type { LocalizedText } from "node-opcua-data-model";
+import type { ExtensionObject } from "node-opcua-extension-object";
+import type { DTStructure } from "node-opcua-nodeset-ua/dist/dt_structure.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |           |                                                            |
+ * |-----------|------------------------------------------------------------|
+ * | namespace |http://opcfoundation.org/UA/MachineVision                   |
+ * | nodeClass |DataType                                                    |
+ * | name      |ProductIdDataType                                           |
+ * | isAbstract|false                                                       |
+ */
+export interface DTProductId extends DTStructure {
+  /** Id is a system-wide unique identifier/name for identifying the product.*/
+  id: UAString; // String ns=4;i=3017
+  /** Optional short human readable description of the configuration*/
+  description?: LocalizedText; // LocalizedText ns=0;i=21
+}
+export interface UDTProductId extends ExtensionObject, DTProductId {};

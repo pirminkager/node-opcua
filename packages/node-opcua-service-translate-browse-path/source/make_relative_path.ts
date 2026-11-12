@@ -3,8 +3,9 @@
  */
 import { assert } from "node-opcua-assert";
 import { QualifiedName } from "node-opcua-data-model";
-import { NodeId, resolveNodeId } from "node-opcua-nodeid";
-import { RelativePath } from "node-opcua-types";
+import { type NodeId, resolveNodeId } from "node-opcua-nodeid";
+import { RelativePath, RelativePathElement } from "node-opcua-types";
+
 /*=
  * Release 1.03 page 152 OPC Unified Architecture, Part 4
  * Annex A (informative) BNF definitions
@@ -73,17 +74,49 @@ const aggregatesReferenceTypeNodeId = resolveNodeId("Aggregates");
 //  <reserved-char> ::= '/' | '.' | '<' | '>' | ':' | '#' | '!' | '&'
 //  <name-char> ::= All valid characters for a String (see Part 3) excluding reserved-chars.
 //
+
+// regular character
 const regCharacters = /[^/.<>:#!&]/;
+// reserved character
 const regReservedCharacters = /[/.<>:#!&]/;
-const regName = new RegExp("(" + regCharacters.source + "|(&" + regReservedCharacters.source + "))+");
+
+const regName = new RegExp(`(${regCharacters.source}|(&${regReservedCharacters.source}))+`);
+
 const regNamespaceIndex = /[0-9]+/;
-const regBrowseName = new RegExp("(" + regNamespaceIndex.source + ":)?(" + regName.source + ")");
-const regReferenceType = new RegExp("/|\\.|(<(#)?(!)?(" + regBrowseName.source + ")>)");
 
-const regRelativePath = new RegExp("(" + regReferenceType.source + ")(" + regBrowseName.source + ")?");
+const regBrowseName = new RegExp(`(${regNamespaceIndex.source}:)?(${regName.source})`);
 
-function unescape(str: string): string {
-    return str.replace(/&/g, "");
+const regReferenceType = new RegExp(`/|\\.|(<(#)?(!)?(${regBrowseName.source})>)`);
+
+// anchored: each element must start where the previous one ended, otherwise an unescaped
+// reserved character would be skipped silently and the remainder parsed out of alignment
+const regRelativePath = new RegExp(`^(${regReferenceType.source})(${regBrowseName.source})?`);
+
+// biome-ignore lint/suspicious/noShadowRestrictedNames: public API of this package, renaming would be a breaking change
+export function unescape(str: string): string {
+    // replace all &x by
+    str = str.replace(/&\//g, "/");
+    str = str.replace(/&\./g, ".");
+    str = str.replace(/&</g, "<");
+    str = str.replace(/&>/g, ">");
+    str = str.replace(/&:/g, ":");
+    str = str.replace(/&#/g, "#");
+    str = str.replace(/&!/g, "!");
+    return str.replace(/&&/g, "&");
+}
+
+// biome-ignore lint/suspicious/noShadowRestrictedNames: public API of this package, renaming would be a breaking change
+export function escape(str: string): string {
+    // replace all &x by
+    str = str.replace(/&/g, "&&");
+    str = str.replace(/\//g, "&/");
+    str = str.replace(/\./g, "&.");
+    str = str.replace(/</g, "&<");
+    str = str.replace(/>/g, "&>");
+    str = str.replace(/:/g, "&:");
+    str = str.replace(/#/g, "&#");
+    str = str.replace(/!/g, "&!");
+    return str;
 }
 
 function makeQualifiedName(mm: RegExpMatchArray): QualifiedName {
@@ -93,13 +126,17 @@ function makeQualifiedName(mm: RegExpMatchArray): QualifiedName {
     }
     const namespaceIndex = mm[11] ? parseInt(mm[11], 10) : 0;
     const name = unescape(mm[12]);
-    return new QualifiedName({namespaceIndex, name});
+    return new QualifiedName({ namespaceIndex, name });
+}
+
+export interface RelativePathEx extends RelativePath {
+    elements: RelativePathElement[];
 }
 
 /**
  * construct a RelativePath from a string containing the relative path description.
- * The string must comply to the OPCUA BNF for RelativePath ( see part 4 - Annexe A)
- * @method makeRelativePath
+ * The string must comply to the OPCUA BNF for RelativePath ( see part 4 - Annex A)
+
  * @param str {String}
  * @param addressSpace {AddressSpace}
  * @return {RelativePath}
@@ -109,18 +146,21 @@ function makeQualifiedName(mm: RegExpMatchArray): QualifiedName {
  *      var relativePath = makeRelativePath("/Server.ServerStatus.CurrentTime");
  *
  */
-export function makeRelativePath(str: string, addressSpace?: any) {
+interface AddressSpaceLike {
+    findReferenceType(name: string, namespaceIndex: number): NodeId;
+}
 
-    let r: any = {
-        elements: []
-    };
-
+export function makeRelativePath(str: string, addressSpace?: AddressSpaceLike): RelativePathEx {
+    const elements: RelativePathElement[] = [];
+    const originalStr = str;
     while (str.length > 0) {
         const matches = str.match(regRelativePath);
         if (!matches) {
-            throw new Error("Malformed relative path  :'" + str + "'");
+            throw new Error(
+                `Malformed relative path  :'${str}' in ${originalStr}` +
+                    ` (reserved characters / . < > : # ! & inside a browse name must be escaped with '&', e.g. '&:')`
+            );
         }
-        // console.log(mm);
 
         let referenceTypeId: NodeId;
         let includeSubtypes: boolean;
@@ -131,31 +171,41 @@ export function makeRelativePath(str: string, addressSpace?: any) {
         //
         const refStr = matches[1];
         if (refStr === "/") {
+            // The forward slash character indicates that the Server is to follow
+            // any subtype of HierarchicalReferences.
             referenceTypeId = hierarchicalReferenceTypeNodeId;
             isInverse = false;
             includeSubtypes = true;
         } else if (refStr === ".") {
-
+            // The period (dot) character indicates that the Server is to follow
+            // any subtype of a Aggregates ReferenceType.
             referenceTypeId = aggregatesReferenceTypeNodeId;
             isInverse = false;
             includeSubtypes = true;
         } else {
-
             // match  3 =>    "#" or null
-            includeSubtypes = (matches[3] !== "#");
+            // A ‘#’ placed in front of the BrowseName indicates that subtypes should not be followed.
+            includeSubtypes = matches[3] !== "#";
 
             // match  4 =>    "!" or null
-            isInverse = (matches[4] === "!");
+            // A ‘!’ in front of the BrowseName is used to indicate that the inverse Reference should be followed.
+            isInverse = matches[4] === "!";
 
             // match 5
             // namespace match 6 ( ns:)
             // name      match 7
+            //  This namespace index is used specify the namespace component of the BrowseName
+            //  for the ReferenceType. If the namespace prefix is omitted then namespace index 0 is used.
             const ns = matches[6] ? parseInt(matches[6], 10) : 0;
             const name = matches[7];
             if (!matches[6]) {
                 referenceTypeId = resolveNodeId(name);
-
             } else {
+                if (!addressSpace) {
+                    throw new Error(
+                        `makeRelativePath: an addressSpace is required to resolve namespace-qualified reference type '${name}'`
+                    );
+                }
                 // AddressSpace.prototype.findReferenceType = function (refType,namespace)
                 referenceTypeId = addressSpace.findReferenceType(name, ns);
             }
@@ -164,10 +214,9 @@ export function makeRelativePath(str: string, addressSpace?: any) {
 
         const targetName = makeQualifiedName(matches);
 
-        r.elements.push({referenceTypeId, isInverse, includeSubtypes, targetName});
+        elements.push(new RelativePathElement({ referenceTypeId, isInverse, includeSubtypes, targetName }));
 
-        str = str.substr(matches[0].length);
+        str = str.substring(matches[0].length);
     }
-    r = new RelativePath(r);
-    return r;
+    return new RelativePath({ elements }) as RelativePathEx;
 }

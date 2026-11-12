@@ -1,0 +1,16 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "module": "ES2022",
+        "moduleResolution": "bundler",
+        "outDir": "dist-esm",
+        "composite": false,
+        "declaration": false,
+        "declarationMap": false,
+        "tsBuildInfoFile": null
+    },
+    "include": [
+        "source/**/*.ts"
+    ],
+    "references": []
+}

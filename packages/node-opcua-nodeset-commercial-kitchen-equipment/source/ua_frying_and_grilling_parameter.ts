@@ -1,0 +1,59 @@
+import type { UAProperty } from "node-opcua-address-space-base";
+import type { Int32, UAString } from "node-opcua-basic-types";
+import type { EUInformation } from "node-opcua-data-access";
+import type { DTRange } from "node-opcua-nodeset-ua/dist/dt_range.js";
+import type { UAAnalogItem } from "node-opcua-nodeset-ua/dist/ua_analog_item.js";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { EnumGrillingZoneState } from "./enum_grilling_zone_state.js";
+import type { EnumPlatenPositionState } from "./enum_platen_position_state.js";
+import type { UAKitchenDeviceParameter, UAKitchenDeviceParameter_Base } from "./ua_kitchen_device_parameter.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAFryingAndGrillingParameter_actualGrillTemperature_$No_$<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UAFryingAndGrillingParameter_actualPlatenTemperature_$No_$<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UAFryingAndGrillingParameter_remainingProcessTime<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UAFryingAndGrillingParameter_setGrillTemperature_$No_$<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UAFryingAndGrillingParameter_setPlatenTemperature_$No_$<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+export interface UAFryingAndGrillingParameter_setProcessTime<T, DT extends DataType> extends Omit<UAAnalogItem<T, DT>, "engineeringUnits"|"euRange"> { // Variable
+      engineeringUnits: UAProperty<EUInformation, DataType.ExtensionObject>;
+      euRange: UAProperty<DTRange, DataType.ExtensionObject>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/CommercialKitchenEquipment/     |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |FryingAndGrillingParameterType i=1031                       |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAFryingAndGrillingParameter_Base extends UAKitchenDeviceParameter_Base {
+   // PlaceHolder for actualGrillTemperature_$No_$
+   // PlaceHolder for actualPlatenTemperature_$No_$
+    currentState?: UABaseDataVariable<EnumGrillingZoneState, DataType.Int32>;
+    grillingZoneName?: UABaseDataVariable<UAString, DataType.String>;
+    isWithPlaten: UABaseDataVariable<boolean, DataType.Boolean>;
+    platenPositionState?: UABaseDataVariable<EnumPlatenPositionState, DataType.Int32>;
+    remainingProcessTime?: UAFryingAndGrillingParameter_remainingProcessTime<Int32, DataType.Int32>;
+   // PlaceHolder for setGrillTemperature_$No_$
+   // PlaceHolder for setPlatenTemperature_$No_$
+    setProcessTime?: UAFryingAndGrillingParameter_setProcessTime<Int32, DataType.Int32>;
+}
+export interface UAFryingAndGrillingParameter extends UAKitchenDeviceParameter, UAFryingAndGrillingParameter_Base {}

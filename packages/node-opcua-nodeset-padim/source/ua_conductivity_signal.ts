@@ -1,0 +1,34 @@
+import type { UAObject, UAProperty } from "node-opcua-address-space-base";
+import type { UInt32 } from "node-opcua-basic-types";
+import type { UAAnalogUnit } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { UAMultiStateDictionaryEntryDiscrete } from "node-opcua-nodeset-ua/dist/ua_multi_state_dictionary_entry_discrete.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { UAAnalogSignal_$SignalCalibrationIdentifier$ } from "./ua_analog_signal.js";
+import type { UAAnalyticalSignal, UAAnalyticalSignal_Base } from "./ua_analytical_signal.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAConductivitySignal_$SignalCalibrationIdentifier$ extends UAAnalogSignal_$SignalCalibrationIdentifier$ { // Object
+      conductivityCellConstant?: UAAnalogUnit<number, DataType.Float>;
+}
+export interface UAConductivitySignal_signalConditionSet extends UAObject { // Object
+      conductivityMeasuringMethod?: UAMultiStateDictionaryEntryDiscrete<UInt32, DataType.UInt32>;
+      sensorCleaningsCounter?: UAProperty<UInt32, DataType.UInt32>;
+      sensorSterilisationsCounter?: UAProperty<UInt32, DataType.UInt32>;
+      sensingElementTemperature?: UAAnalogUnit<number, DataType.Float>;
+      temperatureCompensationStyle?: UAMultiStateDictionaryEntryDiscrete<UInt32, DataType.UInt32>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/PADIM/                          |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |ConductivitySignalType i=1067                               |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAConductivitySignal_Base extends UAAnalyticalSignal_Base {
+   // PlaceHolder for $SignalCalibrationIdentifier$
+    signalConditionSet?: UAConductivitySignal_signalConditionSet;
+}
+export interface UAConductivitySignal extends Omit<UAAnalyticalSignal, "$SignalCalibrationIdentifier$"|"signalConditionSet">, UAConductivitySignal_Base {}

@@ -1,282 +1,297 @@
 /**
  * @module node-opcua-server
  */
-// tslint:disable:no-console
 
-import { TimestampsToReturn } from "node-opcua-data-value";
-
-// tslint:disable-next-line:no-var-requires
-const Dequeue = require("dequeue");
-import * as chalk from "chalk";
-import { EventEmitter } from "events";
-import * as _ from "underscore";
-import * as util from "util";
-
-import { AddressSpace, BaseNode, Duration, UAObjectType, UAVariable } from "node-opcua-address-space";
-import { checkSelectClauses } from "node-opcua-address-space";
-import { SessionContext } from "node-opcua-address-space";
+import { EventEmitter } from "node:events";
+import chalk from "chalk";
+import {
+    type BaseNode,
+    type Duration,
+    type ISessionContext,
+    SessionContext,
+    type UAMethod,
+    type UAObject,
+    type UAObjectType,
+    type UAVariable
+} from "node-opcua-address-space";
 import { assert } from "node-opcua-assert";
-import { Byte } from "node-opcua-basic-types";
-import { SessionDiagnosticsDataType, SubscriptionDiagnosticsDataType } from "node-opcua-common";
-import { NodeClass } from "node-opcua-data-model";
-import { AttributeIds } from "node-opcua-data-model";
-import { isValidDataEncoding } from "node-opcua-data-model";
-import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
-import { ExtensionObject } from "node-opcua-extension-object";
-import {
-  NodeId
-} from "node-opcua-nodeid";
+import type { Byte, UInt32 } from "node-opcua-basic-types";
+import { SubscriptionDiagnosticsDataType } from "node-opcua-common";
+import { AttributeIds, isValidDataEncoding, NodeClass, type QualifiedNameLike } from "node-opcua-data-model";
+import type { TimestampsToReturn } from "node-opcua-data-value";
+import { DataValue } from "node-opcua-data-value";
+import { checkDebugFlag, make_debugLog, make_warningLog } from "node-opcua-debug";
+import { NodeId } from "node-opcua-nodeid";
+import type { NumericRange } from "node-opcua-numeric-range";
 import { ObjectRegistry } from "node-opcua-object-registry";
+import { SequenceNumberGenerator } from "node-opcua-secure-channel";
+import { checkSelectClauses, EventFilter } from "node-opcua-service-filter";
 import {
-  SequenceNumberGenerator
-} from "node-opcua-secure-channel";
-import { EventFilter } from "node-opcua-service-filter";
-import { AggregateFilter } from "node-opcua-service-subscription";
-import {
-  DataChangeNotification,
-  EventNotificationList,
-  MonitoringMode,
-  NotificationMessage,
-  StatusChangeNotification
+    AggregateFilter,
+    DataChangeFilter,
+    DataChangeNotification,
+    EventNotificationList,
+    MonitoredItemCreateRequest,
+    MonitoredItemCreateResult,
+    MonitoredItemNotification,
+    MonitoringMode,
+    NotificationMessage,
+    PublishResponse,
+    StatusChangeNotification
 } from "node-opcua-service-subscription";
+import { type StatusCode, StatusCodes } from "node-opcua-status-code";
 import {
-  DataChangeFilter,
-  MonitoredItemCreateRequest
-} from "node-opcua-service-subscription";
-import {
-  StatusCode,
-  StatusCodes
-} from "node-opcua-status-code";
-import {
-  AggregateFilterResult,
-  ContentFilterResult,
-  EventFieldList,
-  EventFilterResult,
-  MonitoredItemCreateResult,
-  MonitoredItemNotification,
-  SubscriptionDiagnosticsDataTypeOptions
+    AggregateFilterResult,
+    ContentFilterResult,
+    EventFieldList,
+    EventFilterResult,
+    type MonitoringFilter
 } from "node-opcua-types";
+import { type IServerSidePublishEngine, TransferredSubscription } from "./i_server_side_publish_engine.js";
+import type { CompactMonitorableNode, INodeFinder, MonitorableNode } from "./monitorable_node.js";
 
-import {
-  MonitoredItem,
-  MonitoredItemOptions,
-  ISubscription
-} from "./monitored_item";
-import { ServerSession } from "./server_session";
-import { validateFilter } from "./validate_filter";
+import { MonitoredItem, type MonitoredItemOptions, type QueueItem } from "./monitored_item.js";
+import { Queue } from "./queue.js";
+import type { ServerSession } from "./server_session.js";
+import type { ITransferSessionIdentity } from "./sessions_compatible_for_transfer.js";
+import { validateFilter } from "./validate_filter.js";
 
-const debugLog = make_debugLog(__filename);
-const doDebug = checkDebugFlag(__filename);
+const debugLog = make_debugLog("server_subscription");
+const doDebug = checkDebugFlag("server_subscription");
+const warningLog = make_warningLog("server_subscription");
 const maxNotificationMessagesInQueue = 100;
 
+/**
+ * Bytes reserved for everything in a PublishResponse that is not a notification:
+ * the response and notification-message headers, the DataChangeNotification
+ * wrapper and the diagnostic-info arrays. Deliberately generous - overshooting
+ * the budget costs one extra message, exceeding it costs the whole message.
+ */
+const notificationMessageOverhead = 2048;
+
 export interface SubscriptionDiagnosticsDataTypePriv extends SubscriptionDiagnosticsDataType {
-  $subscription: Subscription;
+    $subscription: Subscription;
 }
 
 export enum SubscriptionState {
-  CLOSED = 1,   // The Subscription has not yet been created or has terminated.
-  CREATING = 2, // The Subscription is being created
-  NORMAL = 3,   // The Subscription is cyclically checking for Notifications from its MonitoredItems.
-  // The keep-alive counter is not used in this state.
-  LATE = 4,     // The publishing timer has expired and there are Notifications available or a keep-alive Message is
-  // ready to be sent, but there are no Publish requests queued. When in this state, the next Publish
-  // request is processed when it is received. The keep-alive counter is not used in this state.
-  KEEPALIVE = 5, // The Subscription is cyclically checking for Notification
-  // alive counter to count down to 0 from its maximum.
-  TERMINATED = 6
+    CLOSED = 1, // The Subscription has not yet been created or has terminated.
+    CREATING = 2, // The Subscription is being created
+    NORMAL = 3, // The Subscription is cyclically checking for Notifications from its MonitoredItems.
+    // The keep-alive counter is not used in this state.
+    LATE = 4, // The publishing timer has expired and there are Notifications available or a keep-alive Message is
+    // ready to be sent, but there are no Publish requests queued. When in this state, the next Publish
+    // request is processed when it is received. The keep-alive counter is not used in this state.
+    KEEPALIVE = 5, // The Subscription is cyclically checking for Notification
+    // alive counter to count down to 0 from its maximum.
+    TERMINATED = 6
 }
 
 function _adjust_publishing_interval(publishingInterval?: number): number {
-  publishingInterval = (publishingInterval === undefined || Number.isNaN(publishingInterval)) ? Subscription.defaultPublishingInterval : publishingInterval;
-  publishingInterval = Math.max(publishingInterval, Subscription.minimumPublishingInterval);
-  publishingInterval = Math.min(publishingInterval, Subscription.maximumPublishingInterval);
-  return publishingInterval;
+    publishingInterval =
+        publishingInterval === undefined || Number.isNaN(publishingInterval)
+            ? Subscription.defaultPublishingInterval
+            : publishingInterval;
+    publishingInterval = Math.max(publishingInterval, Subscription.minimumPublishingInterval);
+    publishingInterval = Math.min(publishingInterval, Subscription.maximumPublishingInterval);
+    return publishingInterval;
 }
 
 const minimumMaxKeepAliveCount = 2;
 const maximumMaxKeepAliveCount = 12000;
 
-function _adjust_maxKeepAliveCount(maxKeepAliveCount?: number/*,publishingInterval*/): number {
-  maxKeepAliveCount = maxKeepAliveCount || minimumMaxKeepAliveCount;
-  maxKeepAliveCount = Math.max(maxKeepAliveCount, minimumMaxKeepAliveCount);
-  maxKeepAliveCount = Math.min(maxKeepAliveCount, maximumMaxKeepAliveCount);
-  return maxKeepAliveCount;
+function _adjust_maxKeepAliveCount(maxKeepAliveCount?: number /*,publishingInterval*/): number {
+    maxKeepAliveCount = maxKeepAliveCount || minimumMaxKeepAliveCount;
+    maxKeepAliveCount = Math.max(maxKeepAliveCount, minimumMaxKeepAliveCount);
+    maxKeepAliveCount = Math.min(maxKeepAliveCount, maximumMaxKeepAliveCount);
+    return maxKeepAliveCount;
 }
 
-function _adjust_lifeTimeCount(
-  lifeTimeCount: number,
-  maxKeepAliveCount: number,
-  publishingInterval: number
-): number {
-  lifeTimeCount = lifeTimeCount || 1;
+const MaxUint32 = 0xffffffff;
 
-  // let's make sure that lifeTimeCount is at least three time maxKeepAliveCount
-  // Note : the specs say ( part 3  - CreateSubscriptionParameter )
-  //        "The lifetime count shall be a minimum of three times the keep keep-alive count."
-  lifeTimeCount = Math.max(lifeTimeCount, maxKeepAliveCount * 3);
+function _adjust_lifeTimeCount(lifeTimeCount: number, maxKeepAliveCount: number, publishingInterval: number): number {
+    lifeTimeCount = lifeTimeCount || 1;
 
-  const minTicks = Math.ceil(5 * 1000 / (publishingInterval)); // we want 5 seconds min
+    const minTicks = Math.ceil(Subscription.minimumLifetimeDuration / publishingInterval);
+    const maxTicks = Math.floor(Subscription.maximumLifetimeDuration / publishingInterval);
 
-  lifeTimeCount = Math.max(minTicks, lifeTimeCount);
-  return lifeTimeCount;
+    lifeTimeCount = Math.max(minTicks, lifeTimeCount);
+    lifeTimeCount = Math.min(maxTicks, lifeTimeCount);
+
+    // let's make sure that lifeTimeCount is at least three time maxKeepAliveCount
+    // Note : the specs say ( part 3  - CreateSubscriptionParameter )
+    //        "The lifetime count shall be a minimum of three times the keep keep-alive count."
+    lifeTimeCount = Math.max(lifeTimeCount, Math.min(maxKeepAliveCount * 3, MaxUint32));
+
+    return lifeTimeCount;
 }
 
-function _adjust_publishinEnable(
-  publishingEnabled?: boolean | null
-): boolean {
-  return (publishingEnabled === null || publishingEnabled === undefined) ? true : !!publishingEnabled;
+function _adjust_publishingEnable(publishingEnabled?: boolean | null): boolean {
+    return publishingEnabled === null || publishingEnabled === undefined ? true : !!publishingEnabled;
 }
 
-function _adjust_maxNotificationsPerPublish(
-  maxNotificationsPerPublish?: number
-): number {
-  maxNotificationsPerPublish = maxNotificationsPerPublish === undefined ? 0 : maxNotificationsPerPublish;
-  assert(_.isNumber(maxNotificationsPerPublish));
-  return (maxNotificationsPerPublish >= 0) ? maxNotificationsPerPublish : 0;
+function _adjust_maxNotificationsPerPublish(maxNotificationsPerPublish?: number): number {
+    assert(Subscription.maxNotificationPerPublishHighLimit > 0, "Subscription.maxNotificationPerPublishHighLimit must be positive");
+
+    maxNotificationsPerPublish = maxNotificationsPerPublish || 0;
+    assert(typeof maxNotificationsPerPublish === "number");
+
+    // must be strictly positive
+    maxNotificationsPerPublish = maxNotificationsPerPublish >= 0 ? maxNotificationsPerPublish : 0;
+
+    if (maxNotificationsPerPublish === 0) {
+        // if zero then => use our HighLimit
+        maxNotificationsPerPublish = Subscription.maxNotificationPerPublishHighLimit;
+    } else {
+        // if not zero then should be capped by maxNotificationPerPublishHighLimit
+        maxNotificationsPerPublish = Math.min(Subscription.maxNotificationPerPublishHighLimit, maxNotificationsPerPublish);
+    }
+
+    assert(maxNotificationsPerPublish !== 0 && maxNotificationsPerPublish <= Subscription.maxNotificationPerPublishHighLimit);
+    return maxNotificationsPerPublish;
 }
 
 function w(s: string | number, length: number): string {
-  return ("000" + s).substr(-length);
+    return `000${s}`.padStart(length);
 }
 
 function t(d: Date): string {
-  return w(d.getHours(), 2) + ":"
-    + w(d.getMinutes(), 2) + ":"
-    + w(d.getSeconds(), 2) + ":"
-    + w(d.getMilliseconds(), 3);
+    return `${w(d.getHours(), 2)}:${w(d.getMinutes(), 2)}:${w(d.getSeconds(), 2)}:${w(d.getMilliseconds(), 3)}`;
 }
 
-// verify that the injected publishEngine provides the expected services
-// regarding the Subscription requirements...
-function _assert_valid_publish_engine(publishEngine: any) {
-  assert(_.isObject(publishEngine));
-  assert(_.isNumber(publishEngine.pendingPublishRequestCount));
-  assert(_.isFunction(publishEngine.send_notification_message));
-  assert(_.isFunction(publishEngine.send_keep_alive_response));
-  assert(_.isFunction(publishEngine.on_close_subscription));
+function _getSequenceNumbers(arr: NotificationMessage[]): number[] {
+    return arr.map((notificationMessage) => notificationMessage.sequenceNumber);
 }
 
-function assert_validNotificationData(n: any) {
-  assert(
-    n instanceof DataChangeNotification ||
-    n instanceof EventNotificationList ||
-    n instanceof StatusChangeNotification
-  );
+function analyzeEventFilterResult(node: BaseNode, eventFilter: EventFilter): EventFilterResult {
+    /* c8 ignore next */
+    if (!(eventFilter instanceof EventFilter)) {
+        throw new Error("Internal Error");
+    }
+
+    // a node of a session worker: the engine, where the event types are, checked the filter
+    const checked = (node as Pick<CompactMonitorableNode, "analyzeEventFilter">).analyzeEventFilter?.(eventFilter);
+    if (checked) {
+        return checked;
+    }
+    const selectClauseResults = checkSelectClauses(node as UAObjectType, eventFilter.selectClauses || []);
+
+    const whereClauseResult = new ContentFilterResult();
+
+    return new EventFilterResult({
+        selectClauseDiagnosticInfos: [],
+        selectClauseResults,
+        whereClauseResult
+    });
 }
 
-function getSequenceNumbers(arr: any[]): number[] {
-  return arr.map((e: any) => {
-    return e.notification.sequenceNumber;
-  });
-}
-
-function analyseEventFilterResult(
-  node: BaseNode,
-  eventFilter: EventFilter
-): EventFilterResult {
-
-  if (!(eventFilter instanceof EventFilter)) {
-    throw new Error("Internal Error");
-  }
-
-  const selectClauseResults = checkSelectClauses(
-    node as UAObjectType,
-    eventFilter.selectClauses || []
-  );
-
-  const whereClauseResult = new ContentFilterResult();
-
-  return new EventFilterResult({
-    selectClauseDiagnosticInfos: [],
-    selectClauseResults,
-    whereClauseResult
-  });
-}
-
-function analyseDataChangeFilterResult(
-  node: BaseNode,
-  dataChangeFilter: DataChangeFilter
-): null {
-  assert(dataChangeFilter instanceof DataChangeFilter);
-  // the opcua specification doesn't provide dataChangeFilterResult
-  return null;
-}
-
-function analyseAggregateFilterResult(
-  node: BaseNode,
-  aggregateFilter: AggregateFilter
-): AggregateFilterResult {
-  assert(aggregateFilter instanceof AggregateFilter);
-  return new AggregateFilterResult({});
-}
-
-function _process_filter(
-  node: BaseNode,
-  filter: any
-): EventFilterResult | AggregateFilterResult | null {
-
-  if (!filter) {
+function analyzeDataChangeFilterResult(_node: BaseNode, dataChangeFilter: DataChangeFilter): null {
+    assert(dataChangeFilter instanceof DataChangeFilter);
+    // the opcua specification doesn't provide dataChangeFilterResult
     return null;
-  }
+}
 
-  if (filter instanceof EventFilter) {
-    return analyseEventFilterResult(node, filter);
-  } else if (filter instanceof DataChangeFilter) {
-    return analyseDataChangeFilterResult(node, filter);
-  } else if (filter instanceof AggregateFilter) {
-    return analyseAggregateFilterResult(node, filter);
-  }
-  // istanbul ignore next
-  throw new Error("invalid filter");
+function analyzeAggregateFilterResult(_node: BaseNode, aggregateFilter: AggregateFilter): AggregateFilterResult {
+    assert(aggregateFilter instanceof AggregateFilter);
+    return new AggregateFilterResult({});
+}
+
+function _process_filter(node: BaseNode, filter: MonitoringFilter | null): EventFilterResult | AggregateFilterResult | null {
+    if (!filter) {
+        return null;
+    }
+
+    if (filter instanceof EventFilter) {
+        return analyzeEventFilterResult(node, filter);
+    } else if (filter instanceof DataChangeFilter) {
+        return analyzeDataChangeFilterResult(node, filter);
+    } else if (filter instanceof AggregateFilter) {
+        return analyzeAggregateFilterResult(node, filter);
+    }
+    // c8 ignore next
+    throw new Error("invalid filter");
 }
 
 /**
  * @private
  */
 function createSubscriptionDiagnostics(subscription: Subscription): SubscriptionDiagnosticsDataTypePriv {
+    assert(subscription instanceof Subscription);
 
-  assert(subscription instanceof Subscription);
+    const subscriptionDiagnostics = new SubscriptionDiagnosticsDataType({});
 
-  const subscriptionDiagnostics = new SubscriptionDiagnosticsDataType({});
+    const sd = subscriptionDiagnostics as SubscriptionDiagnosticsDataTypePriv;
+    sd.$subscription = subscription;
 
-  const subscription_subscriptionDiagnostics = (subscriptionDiagnostics as any);
-  subscription_subscriptionDiagnostics.$subscription = subscription;
-  // "sessionId"
-  subscription_subscriptionDiagnostics.__defineGetter__("sessionId", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.getSessionId();
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("subscriptionId", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.id;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("priority", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.priority;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("publishingInterval", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.publishingInterval;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("maxLifetimeCount", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.lifeTimeCount;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("maxKeepAliveCount", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.maxKeepAliveCount;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("maxNotificationsPerPublish", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.maxNotificationsPerPublish;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("publishingEnabled", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.publishingEnabled;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("monitoredItemCount", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.monitoredItemCount;
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("nextSequenceNumber", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription._get_future_sequence_number();
-  });
-  subscription_subscriptionDiagnostics.__defineGetter__("disabledMonitoredItemCount", function (this: SubscriptionDiagnosticsDataTypePriv) {
-    return this.$subscription.disabledMonitoredItemCount;
-  });
+    const defineGetter = <T>(name: string, getter: (this: SubscriptionDiagnosticsDataTypePriv) => T) => {
+        Object.defineProperty(sd, name, { get: getter, configurable: true });
+    };
 
-  /* those member of self.subscriptionDiagnostics are handled directly
+    // "sessionId"
+    defineGetter("sessionId", function (this: SubscriptionDiagnosticsDataTypePriv): NodeId {
+        if (!this.$subscription) {
+            return NodeId.nullNodeId;
+        }
+        return this.$subscription.getSessionId();
+    });
+    defineGetter("subscriptionId", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.id;
+    });
+    defineGetter("priority", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.priority;
+    });
+    defineGetter("publishingInterval", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.publishingInterval;
+    });
+    defineGetter("maxLifetimeCount", function (this: SubscriptionDiagnosticsDataTypePriv) {
+        return this.$subscription.lifeTimeCount;
+    });
+    defineGetter("maxKeepAliveCount", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.maxKeepAliveCount;
+    });
+    defineGetter("maxNotificationsPerPublish", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.maxNotificationsPerPublish;
+    });
+    defineGetter("publishingEnabled", function (this: SubscriptionDiagnosticsDataTypePriv): boolean {
+        if (!this.$subscription) {
+            return false;
+        }
+        return this.$subscription.publishingEnabled;
+    });
+    defineGetter("monitoredItemCount", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.monitoredItemCount;
+    });
+    defineGetter("nextSequenceNumber", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.futureSequenceNumber;
+    });
+    defineGetter("disabledMonitoredItemCount", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.disabledMonitoredItemCount;
+    });
+
+    /* those member of self.subscriptionDiagnostics are handled directly
 
    modifyCount
    enableCount,
@@ -288,7 +303,7 @@ function createSubscriptionDiagnostics(subscription: Subscription): Subscription
    eventNotificationsCount,
   */
 
-  /*
+    /*
    those members are not updated yet in the code :
    "republishMessageRequestCount",
    "republishMessageCount",
@@ -296,1423 +311,1961 @@ function createSubscriptionDiagnostics(subscription: Subscription): Subscription
    "transferredToAltClientCount",
    "transferredToSameClientCount",
    "latePublishRequestCount",
-   "currentKeepAliveCount",
-   "currentLifetimeCount",
    "unacknowledgedMessageCount",
    "discardedMessageCount",
    "monitoringQueueOverflowCount",
-   "eventQueueOverFlowCount"
+   "eventQueueOverflowCount"
    */
-  // add object in Variable SubscriptionDiagnosticArray (i=2290) ( Array of SubscriptionDiagnostics)
-  // add properties in Variable to reflect
-  return subscriptionDiagnostics as SubscriptionDiagnosticsDataTypePriv;
+    defineGetter("currentKeepAliveCount", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.currentKeepAliveCount;
+    });
+    defineGetter("currentLifetimeCount", function (this: SubscriptionDiagnosticsDataTypePriv): number {
+        if (!this.$subscription) {
+            return 0;
+        }
+        return this.$subscription.currentLifetimeCount;
+    });
+    // add object in Variable SubscriptionDiagnosticArray (i=2290) ( Array of SubscriptionDiagnostics)
+    // add properties in Variable to reflect
+    return subscriptionDiagnostics as SubscriptionDiagnosticsDataTypePriv;
+}
+
+interface IGlobalMonitoredItemCounter {
+    totalMonitoredItemCount: number;
+}
+
+/**
+ * what a Subscription carries to another thread of the same server for TransferSubscriptions: its
+ * parameters, its monitored items as they were created and revised, its next sequence number and
+ * the NotificationMessages the client has not acknowledged yet
+ */
+export interface SubscriptionTransferState {
+    id: number;
+    publishingInterval: number;
+    lifeTimeCount: number;
+    maxKeepAliveCount: number;
+    maxNotificationsPerPublish: number;
+    publishingEnabled: boolean;
+    priority: number;
+    nextSequenceNumber: number;
+    sentNotificationMessages: NotificationMessage[];
+    /** the data changes and events collected for the client and not published yet (takePendingNotifications) */
+    pendingNotifications?: { monitoredItemId: number; notification: QueueItem }[];
+    monitoredItems: {
+        monitoredItemId: number;
+        timestampsToReturn: TimestampsToReturn;
+        request: MonitoredItemCreateRequest;
+        /** the items this one triggers */
+        linkedItems: number[];
+    }[];
 }
 
 export interface SubscriptionOptions {
-  sessionId?: NodeId;
-  /**
-   * (default:1000) the publishing interval.
-   */
-  publishingInterval?: number;
-  /**
-   * (default:10) the max Life Time Count
-   */
-  maxKeepAliveCount?: number;
+    sessionId?: NodeId;
+    /**
+     * (default:1000) the publishing interval.
+     */
+    publishingInterval?: number;
+    /**
+     * (default:10) the max Life Time Count
+     */
+    maxKeepAliveCount?: number;
 
-  lifeTimeCount?: number;
-  /**
-   * (default:true)
-   */
-  publishingEnabled?: boolean;
-  /**
-   * (default:0)
-   */
-  maxNotificationsPerPublish?: number;
-  /**
-   * subscription priority Byte:(0-255)
-   */
-  priority?: number;
+    lifeTimeCount?: number;
+    /**
+     * (default:true)
+     */
+    publishingEnabled?: boolean;
+    /**
+     * (default:0)
+     */
+    maxNotificationsPerPublish?: number;
+    /**
+     * subscription priority Byte:(0-255)
+     */
+    priority?: number;
 
-  publishEngine?: IServerPublishEngine;
-  /**
-   *  a unique identifier
-   */
-  id?: number;
+    publishEngine?: IServerSidePublishEngine;
+    /**
+     *  a unique identifier
+     */
+    id?: number;
+
+    serverCapabilities: ServerCapabilitiesPartial;
+    globalCounter: IGlobalMonitoredItemCounter;
+    /**
+     * the id of each new MonitoredItem; by default a counter of this thread. Where subscriptions move
+     * between threads (session workers), one counter for all of them keeps the ids of a Subscription unique.
+     */
+    monitoredItemIdAllocator?: () => number;
 }
 
-type IServerPublishEngine = any;
-
-let g_monitoredItemId = 1;
+let g_monitoredItemId = Math.ceil(Math.random() * 100000);
 
 function getNextMonitoredItemId() {
-  return g_monitoredItemId++;
+    return g_monitoredItemId++;
 }
 
+// function myFilter<T>(t1: any, chunk: any[]): T[] {
+//     return chunk.filter(filter_instanceof.bind(null, t1));
+// }
+
+// function makeNotificationData(notifications_chunk: QueueItem): NotificationData {
+//     const dataChangedNotificationData = myFilter<MonitoredItemNotification>(MonitoredItemNotification, notifications_chunk);
+//     const eventNotificationListData = myFilter<EventFieldList>(EventFieldList, notifications_chunk);
+
+//     assert(notifications_chunk.length === dataChangedNotificationData.length + eventNotificationListData.length);
+
+//     const notifications: (DataChangeNotification | EventNotificationList)[] = [];
+
+//     // add dataChangeNotification
+//     if (dataChangedNotificationData.length) {
+//         const dataChangeNotification = new DataChangeNotification({
+//             diagnosticInfos: [],
+//             monitoredItems: dataChangedNotificationData
+//         });
+//         notifications.push(dataChangeNotification);
+//     }
+
+//     // add dataChangeNotification
+//     if (eventNotificationListData.length) {
+//         const eventNotificationList = new EventNotificationList({
+//             events: eventNotificationListData
+//         });
+//         notifications.push(eventNotificationList);
+//     }
+//     return notifications.length === 0 ? null : notifications;
+// }
 const INVALID_ID = -1;
 
 export type Notification = DataChangeNotification | EventNotificationList | StatusChangeNotification;
 export type Counter = number;
 
 export interface ModifySubscriptionParameters {
-  /**
-   *     requestedPublishingInterval =0 means fastest possible
-   */
-  requestedPublishingInterval?: Duration;
-  /*
-   * requestedLifetimeCount=0 means no change
-   */
-  requestedLifetimeCount?: Counter;
-  /**
-   * requestedMaxKeepAliveCount  ===0 means no change
-   */
-  requestedMaxKeepAliveCount?: Counter;
-  maxNotificationsPerPublish?: Counter;
-  priority?: Byte;
+    /**
+     *     requestedPublishingInterval =0 means fastest possible
+     */
+    requestedPublishingInterval?: Duration;
+    /*
+     * requestedLifetimeCount=0 means no change
+     */
+    requestedLifetimeCount?: Counter;
+    /**
+     * requestedMaxKeepAliveCount  ===0 means no change
+     */
+    requestedMaxKeepAliveCount?: Counter;
+    maxNotificationsPerPublish?: Counter;
+    priority?: Byte;
 }
 
 export interface GetMonitoredItemsResult {
-  /**
-   * array of serverHandles for all MonitoredItems of the subscription
-   * identified by subscriptionId.
-   */
-  serverHandles: number[];
-  /**
-   *  array of clientHandles for all MonitoredItems of the subscription
-   *  identified by subscriptionId.
-   */
-  clientHandles: number[];
-  statusCode: StatusCode;
+    /**
+     * array of serverHandles for all MonitoredItems of the subscription
+     * identified by subscriptionId.
+     */
+    serverHandles: Uint32Array;
+    /**
+     *  array of clientHandles for all MonitoredItems of the subscription
+     *  identified by subscriptionId.
+     */
+    clientHandles: Uint32Array;
+    statusCode: StatusCode;
 }
 
-interface InternalNotification {
-  notification: NotificationMessage;
-  publishTime: Date;
-  sequenceNumber: number;
-  start_tick: number;
+export interface InternalNotification {
+    monitoredItemId?: number;
+    notification: QueueItem | StatusChangeNotification;
+    publishTime: Date;
+    start_tick: number;
+    /** encoded size, measured once when the notification was queued; see _degradeIfUndeliverable */
+    size?: number;
+}
+
+export interface InternalCreateMonitoredItemResult {
+    monitoredItem?: MonitoredItem;
+    monitoredItemCreateRequest: MonitoredItemCreateRequest;
+    createResult: MonitoredItemCreateResult;
+}
+
+export interface MonitoredItemBase {
+    node: MonitorableNode | null;
+    // from monitoring parameters
+    filter: MonitoringFilter | null;
+    monitoringMode: MonitoringMode;
+    timestampsToReturn: TimestampsToReturn;
+    discardOldest: boolean;
+    queueSize: number;
+    clientHandle: UInt32;
+}
+export type CreateMonitoredItemHook = (subscription: Subscription, monitoredItem: MonitoredItemBase) => Promise<StatusCode>;
+export type DeleteMonitoredItemHook = (subscription: Subscription, monitoredItem: MonitoredItemBase) => Promise<StatusCode>;
+
+export interface ServerCapabilitiesPartial {
+    maxMonitoredItems: UInt32;
+    maxMonitoredItemsPerSubscription: UInt32;
+    maxWhereClauseParameters?: UInt32;
+    maxSelectClauseParameters?: UInt32;
+    /**
+     * the advertised MinSupportedSampleRate: the floor of a revised samplingInterval when 0 is
+     * requested (undefined = MonitoredItem.minimumSamplingInterval)
+     */
+    minSupportedSampleRate?: number;
+}
+
+export interface IReadAttributeCapable {
+    readAttribute(
+        context: ISessionContext | null,
+        attributeId: AttributeIds,
+        indexRange?: NumericRange,
+        dataEncoding?: QualifiedNameLike | null
+    ): DataValue;
 }
 
 /**
  * The Subscription class used in the OPCUA server side.
  */
 export class Subscription extends EventEmitter {
-
-  public static minimumPublishingInterval: number = 50;  // fastest possible
-  public static defaultPublishingInterval: number = 1000; // one second
-  public static maximumPublishingInterval: number = 1000 * 60 * 60 * 24 * 15; // 15 days
-  public static registry = new ObjectRegistry();
-
-  public sessionId: NodeId;
-  public publishEngine: IServerPublishEngine;
-  public id: number;
-  public priority: number;
-  /**
-   * the Subscription publishing interval
-   * @default 1000
-   */
-  public publishingInterval: number;
-  /**
-   * The keep alive count defines how many times the publish interval need to
-   * expires without having notifications available before the server send an
-   * empty message.
-   * OPCUA Spec says: a value of 0 is invalid.
-   * @default 10
-   *
-   */
-  public maxKeepAliveCount: number;
-  /**
-   * The life time count defines how many times the publish interval expires without
-   * having a connection to the client to deliver data.
-   * If the life time count reaches maxKeepAliveCount, the subscription will
-   * automatically terminate.
-   * OPCUA Spec: The life-time count shall be a minimum of three times the keep keep-alive count.
-   *
-   * Note: this has to be interpreted as without having a PublishRequest available
-   * @default 1
-   */
-  public lifeTimeCount: number;
-  /**
-   * The maximum number of notifications that the Client wishes to receive in a
-   * single Publish response. A value of zero indicates that there is no limit.
-   * The number of notifications per Publish is the sum of monitoredItems in the
-   * DataChangeNotification and events in the EventNotificationList.
-   *
-   * @property maxNotificationsPerPublish
-   * @default 0
-   */
-  public maxNotificationsPerPublish: number;
-  public publishingEnabled: boolean;
-  public subscriptionDiagnostics: SubscriptionDiagnosticsDataTypePriv;
-
-  public state: any;
-  public messageSent: boolean;
-  public $session?: ServerSession;
-
-  private _life_time_counter: number;
-  private _keep_alive_counter: number = 0;
-  private _pending_notifications: InternalNotification[];
-  private _sent_notifications: InternalNotification[];
-  private readonly _sequence_number_generator: SequenceNumberGenerator;
-  private publishIntervalCount: number;
-  private readonly monitoredItems: any;
-  /**
-   *  number of monitored Item
-   */
-  private monitoredItemIdCounter: number;
-  private timerId: any;
-  private _hasMonitoredItemNotifications: boolean = false;
-
-  constructor(options: SubscriptionOptions) {
-
-    super();
-
-    options = options || {};
-
-    Subscription.registry.register(this);
-
-    this.sessionId = options.sessionId || NodeId.nullNodeId;
-    assert(this.sessionId instanceof NodeId, "expecting a sessionId NodeId");
-
-    this.publishEngine = options.publishEngine;
-    _assert_valid_publish_engine(this.publishEngine);
-
-    this.id = options.id || INVALID_ID;
-
-    this.priority = options.priority || 0;
-
-    this.publishingInterval = _adjust_publishing_interval(options.publishingInterval);
-
-    this.maxKeepAliveCount = _adjust_maxKeepAliveCount(options.maxKeepAliveCount); // , this.publishingInterval);
-
-    this.resetKeepAliveCounter();
-
-    this.lifeTimeCount = _adjust_lifeTimeCount(
-      options.lifeTimeCount || 0, this.maxKeepAliveCount, this.publishingInterval);
-
-    this.maxNotificationsPerPublish = _adjust_maxNotificationsPerPublish(options.maxNotificationsPerPublish);
-
-    this._life_time_counter = 0;
-    this.resetLifeTimeCounter();
-
-    // notification message that are ready to be sent to the client
-    this._pending_notifications = new Dequeue();
-
-    this._sent_notifications = [];
-
-    this._sequence_number_generator = new SequenceNumberGenerator();
-
-    // initial state of the subscription
-    this.state = SubscriptionState.CREATING;
-
-    this.publishIntervalCount = 0;
-
-    this.monitoredItems = {}; // monitored item map
-
-    this.monitoredItemIdCounter = 0;
-
-    this.publishingEnabled = _adjust_publishinEnable(options.publishingEnabled);
-
-    this.subscriptionDiagnostics = createSubscriptionDiagnostics(this);
-
-    // A boolean value that is set to TRUE to mean that either a NotificationMessage or a keep-alive
-    // Message has been sent on the Subscription. It is a flag that is used to ensure that either a
-    // NotificationMessage or a keep-alive Message is sent out the first time the publishing
-    // timer expires.
-    this.messageSent = false;
-
-    this.timerId = null;
-    this._start_timer();
-
-  }
-
-  public getSessionId(): NodeId {
-    return this.sessionId;
-  }
-
-  public toString(): string {
-
-    let str = "Subscription:\n";
-    str += "  subscriptionId          " + this.id + "\n";
-    str += "  sessionId          " + this.getSessionId().toString() + "\n";
-
-    str += "  publishingEnabled  " + this.publishingEnabled + "\n";
-    str += "  maxKeepAliveCount  " + this.maxKeepAliveCount + "\n";
-    str += "  publishingInterval " + this.publishingInterval + "\n";
-    str += "  lifeTimeCount      " + this.lifeTimeCount + "\n";
-    str += "  maxKeepAliveCount  " + this.maxKeepAliveCount + "\n";
-    return str;
-  }
-
-  /**
-   * modify subscription parameters
-   * @param param
-   */
-  public modify(param: ModifySubscriptionParameters): void {
-
-    // update diagnostic counter
-    this.subscriptionDiagnostics.modifyCount += 1;
-
-    const publishingInterval_old = this.publishingInterval;
-
-    param.requestedPublishingInterval = param.requestedPublishingInterval || 0;
-    param.requestedMaxKeepAliveCount = param.requestedMaxKeepAliveCount || this.maxKeepAliveCount;
-    param.requestedLifetimeCount = param.requestedLifetimeCount || this.lifeTimeCount;
-
-    this.publishingInterval = _adjust_publishing_interval(param.requestedPublishingInterval);
-    this.maxKeepAliveCount = _adjust_maxKeepAliveCount(param.requestedMaxKeepAliveCount);
-    // this.publishingInterval);
-    this.lifeTimeCount = _adjust_lifeTimeCount(param.requestedLifetimeCount,
-      this.maxKeepAliveCount, this.publishingInterval);
-
-    this.maxNotificationsPerPublish = param.maxNotificationsPerPublish || 0;
-    this.priority = param.priority || 0;
-
-    this.resetLifeTimeAndKeepAliveCounters();
-
-    if (publishingInterval_old !== this.publishingInterval) {
-      // todo
-    }
-    this._stop_timer();
-    this._start_timer();
-
-  }
-
-  /**
-   * set publishing mode
-   * @param publishingEnabled
-   */
-  public setPublishingMode(publishingEnabled: boolean): StatusCode {
-
-    this.publishingEnabled = !!publishingEnabled;
-    // update diagnostics
-    if (this.publishingEnabled) {
-      this.subscriptionDiagnostics.enableCount += 1;
-    } else {
-      this.subscriptionDiagnostics.disableCount += 1;
-    }
-
-    this.resetLifeTimeCounter();
-
-    if (!publishingEnabled && this.state !== SubscriptionState.CLOSED) {
-      this.state = SubscriptionState.NORMAL;
-    }
-    return StatusCodes.Good;
-  }
-
-  /**
-   * @private
-   */
-  public get keepAliveCounterHasExpired(): boolean {
-    return this._keep_alive_counter >= this.maxKeepAliveCount;
-  }
-
-  /**
-   * Reset the Lifetime Counter Variable to the value specified for the lifetime of a Subscription in
-   * the CreateSubscription Service( 5.13.2).
-   * @private
-   */
-  public resetLifeTimeCounter() {
-    this._life_time_counter = 0;
-  }
-
-  /**
-   * @private
-   */
-  public increaseLifeTimeCounter() {
-    this._life_time_counter += 1;
-  }
-
-  /**
-   *  True if the subscription life time has expired.
-   *
-   */
-  public get lifeTimeHasExpired(): boolean {
-    assert(this.lifeTimeCount > 0);
-    return this._life_time_counter >= this.lifeTimeCount;
-  }
-
-  /**
-   * number of milliseconds before this subscription times out (lifeTimeHasExpired === true);
-   */
-  public get timeToExpiration(): number {
-    return (this.lifeTimeCount - this._life_time_counter) * this.publishingInterval;
-  }
-
-  public get timeToKeepAlive(): number {
-    return (this.maxKeepAliveCount - this._keep_alive_counter) * this.publishingInterval;
-  }
-
-  /**
-   * Terminates the subscription.
-   * Calling this method will also remove any monitored items.
-   *
-   */
-  public terminate() {
-
-    assert(arguments.length === 0);
-    debugLog("Subscription#terminate status", this.state);
-
-    if (this.state === SubscriptionState.CLOSED) {
-      // todo verify if asserting is required here
-      return;
-    }
-    assert(this.state !== SubscriptionState.CLOSED, "terminate already called ?");
-
-    // stop timer
-    this._stop_timer();
-
-    debugLog("terminating Subscription  ", this.id, " with ", this.monitoredItemCount, " monitored items");
-
-    // dispose all monitoredItem
-    const keys = Object.keys(this.monitoredItems);
-
-    for (const key of keys) {
-      const status = this.removeMonitoredItem(key);
-      assert(status === StatusCodes.Good);
-    }
-    assert(this.monitoredItemCount === 0);
-
-    if (this.$session) {
-      this.$session._unexposeSubscriptionDiagnostics(this);
-    }
-    this.state = SubscriptionState.CLOSED;
+    public static minimumPublishingInterval = 50; // fastest possible
+    public static defaultPublishingInterval = 1000; // one second
+    public static maximumPublishingInterval: number = 1000 * 60; // one minute
+    public static maxNotificationPerPublishHighLimit = 1000;
+    public static minimumLifetimeDuration = 5 * 1000; //  // we want 2 seconds minimum lifetime for any subscription
+    public static maximumLifetimeDuration = 60 * 60 * 1000; // 1 hour
 
     /**
-     * notify the subscription owner that the subscription has been terminated.
-     * @event "terminated"
+     * maximum number of monitored item in a subscription to be used
+     * when serverCapacity.maxMonitoredItems and serverCapacity.maxMonitoredItemsPerSubscription are not set.
      */
-    this.emit("terminated");
-
-    this.publishEngine.on_close_subscription(this);
-
-  }
-
-  public dispose() {
-
-    if (doDebug) {
-      debugLog("Subscription#dispose", this.id, this.monitoredItemCount);
-    }
-
-    assert(this.monitoredItemCount === 0, "MonitoredItems haven't been  deleted first !!!");
-    assert(this.timerId === null, "Subscription timer haven't been terminated");
-
-    if (this.subscriptionDiagnostics) {
-      delete (this.subscriptionDiagnostics as SubscriptionDiagnosticsDataTypePriv).$subscription;
-    }
-
-    this.publishEngine = null;
-    this._pending_notifications = [];
-    this._sent_notifications = [];
-
-    this.sessionId = NodeId.nullNodeId;
-
-    this.$session = undefined;
-    this.removeAllListeners();
-
-    Subscription.registry.unregister(this);
-
-  }
-
-  public get aborted(): boolean {
-    const session = this.$session;
-    if (!session) {
-      return true;
-    }
-    return session.aborted;
-  }
-
-  /**
-   * number of pending notifications
-   */
-  public get pendingNotificationsCount(): number {
-    return this._pending_notifications ? this._pending_notifications.length : 0;
-  }
-
-  /**
-   * is 'true' if there are pending notifications for this subscription. (i.e moreNotifications)
-   */
-  public get hasPendingNotifications(): boolean {
-    return this.pendingNotificationsCount > 0;
-  }
-
-  /**
-   * number of sent notifications
-   */
-  public get sentNotificationsCount(): number {
-    return this._sent_notifications.length;
-  }
-
-  /**
-   * number of monitored items handled by this subscription
-   */
-  public get monitoredItemCount() {
-    return Object.keys(this.monitoredItems).length;
-  }
-
-  /**
-   * number of disabled monitored items.
-   */
-  public get disabledMonitoredItemCount(): number {
-    return _.reduce(_.values(this.monitoredItems), (cumul: any, monitoredItem: MonitoredItem) => {
-      return cumul + ((monitoredItem.monitoringMode === MonitoringMode.Disabled) ? 1 : 0);
-    }, 0);
-  }
-
-  /**
-   * The number of unacknowledged messages saved in the republish queue.
-   */
-  public get unacknowledgedMessageCount(): number {
-    return this.subscriptionDiagnostics.unacknowledgedMessageCount;
-  }
-
-  /**
-   * adjust monitored item sampling interval
-   *  - an samplingInterval ===0 means that we use a event-base model ( no sampling)
-   *  - otherwise the sampling is adjusted
-   * @private
-   */
-  public adjustSamplingInterval(samplingInterval: number, node: BaseNode) {
-
-    if (samplingInterval < 0) {
-      // - The value -1 indicates that the default sampling interval defined by the publishing
-      //   interval of the Subscription is requested.
-      // - Any negative number is interpreted as -1.
-      samplingInterval = this.publishingInterval;
-
-    } else if (samplingInterval === 0) {
-
-      // OPCUA 1.0.3 Part 4 - 5.12.1.2
-      // The value 0 indicates that the Server should use the fastest practical rate.
-
-      // The fastest supported sampling interval may be equal to 0, which indicates
-      // that the data item is exception-based rather than being sampled at some period.
-      // An exception-based model means that the underlying system does not require
-      // sampling and reports data changes.
-
-      const dataValueSamplingInterval = node.readAttribute(
-        SessionContext.defaultContext, AttributeIds.MinimumSamplingInterval);
-
-      // TODO if attributeId === AttributeIds.Value : sampling interval required here
-      if (dataValueSamplingInterval.statusCode === StatusCodes.Good) {
-        // node provides a Minimum sampling interval ...
-        samplingInterval = dataValueSamplingInterval.value.value;
-        assert(samplingInterval >= 0 && samplingInterval <= MonitoredItem.maximumSamplingInterval);
-
-        // note : at this stage, a samplingInterval===0 means that the data item is really exception-based
-
-      }
-
-    } else if (samplingInterval < MonitoredItem.minimumSamplingInterval) {
-
-      samplingInterval = MonitoredItem.minimumSamplingInterval;
-
-    } else if (samplingInterval > MonitoredItem.maximumSamplingInterval) {
-
-      // If the requested samplingInterval is higher than the
-      // maximum sampling interval supported by the Server, the maximum sampling
-      // interval is returned.
-      samplingInterval = MonitoredItem.maximumSamplingInterval;
-    }
-
-    const node_minimumSamplingInterval =
-      (node && (node as any).minimumSamplingInterval)
-        ? (node as any).minimumSamplingInterval : 0;
-
-    samplingInterval = Math.max(samplingInterval, node_minimumSamplingInterval);
-
-    return samplingInterval;
-  }
-
-  /**
-   * create a monitored item
-   * @param addressSpace - address space
-   * @param timestampsToReturn  - the timestamp to return
-   * @param monitoredItemCreateRequest - the parameters describing the monitored Item to create
-   */
-  public createMonitoredItem(
-    addressSpace: AddressSpace,
-    timestampsToReturn: TimestampsToReturn,
-    monitoredItemCreateRequest: MonitoredItemCreateRequest
-  ): MonitoredItemCreateResult {
-
-    assert(monitoredItemCreateRequest instanceof MonitoredItemCreateRequest);
-
-    function handle_error(statusCode: StatusCode): MonitoredItemCreateResult {
-      return new MonitoredItemCreateResult({ statusCode });
-    }
-
-    const itemToMonitor = monitoredItemCreateRequest.itemToMonitor;
-
-    const node = addressSpace.findNode(itemToMonitor.nodeId);
-    if (!node) {
-      return handle_error(StatusCodes.BadNodeIdUnknown);
-    }
-
-    if (itemToMonitor.attributeId === AttributeIds.Value && !(node.nodeClass === NodeClass.Variable)) {
-      // AttributeIds.Value is only valid for monitoring value of UAVariables.
-      return handle_error(StatusCodes.BadAttributeIdInvalid);
-    }
-
-    if (itemToMonitor.attributeId === AttributeIds.INVALID) {
-      return handle_error(StatusCodes.BadAttributeIdInvalid);
-    }
-
-    if (!itemToMonitor.indexRange.isValid()) {
-      return handle_error(StatusCodes.BadIndexRangeInvalid);
-    }
-
-    // check dataEncoding applies only on Values
-    if (itemToMonitor.dataEncoding.name && itemToMonitor.attributeId !== AttributeIds.Value) {
-      return handle_error(StatusCodes.BadDataEncodingInvalid);
-    }
-
-    // check dataEncoding
-    if (!isValidDataEncoding(itemToMonitor.dataEncoding)) {
-      return handle_error(StatusCodes.BadDataEncodingUnsupported);
-    }
-
-    // check that item can be read by current user session
-
-    // filter
-    const requestedParameters = monitoredItemCreateRequest.requestedParameters;
-    const filter = requestedParameters.filter;
-    const statusCodeFilter = validateFilter(filter, itemToMonitor, node);
-    if (statusCodeFilter !== StatusCodes.Good) {
-      return handle_error(statusCodeFilter);
-    }
-    // xx var monitoringMode      = monitoredItemCreateRequest.monitoringMode; // Disabled, Sampling, Reporting
-    // xx var requestedParameters = monitoredItemCreateRequest.requestedParameters;
-
-    const monitoredItemCreateResult =
-      this._createMonitoredItemStep2(timestampsToReturn, monitoredItemCreateRequest, node);
-
-    assert(monitoredItemCreateResult.statusCode === StatusCodes.Good);
-
-    const monitoredItem = this.getMonitoredItem(monitoredItemCreateResult.monitoredItemId);
-    assert(monitoredItem);
-
-    // TODO: fix old way to set node. !!!!
-    monitoredItem.setNode(node);
-
-    this.emit("monitoredItem", monitoredItem, itemToMonitor);
-
-    this._createMonitoredItemStep3(monitoredItem, monitoredItemCreateRequest);
-
-    return monitoredItemCreateResult;
-
-  }
-
-  /**
-   * get a monitoredItem by Id.
-   * @param monitoredItemId : the id of the monitored item to get.
-   * @return the monitored item matching monitoredItemId
-   */
-  public getMonitoredItem(monitoredItemId: number | string): MonitoredItem {
-    assert(_.isFinite(monitoredItemId));
-    return this.monitoredItems[monitoredItemId];
-  }
-
-  /**
-   * remove a monitored Item from the subscription.
-   * @param monitoredItemId : the id of the monitored item to get.
-   */
-  public removeMonitoredItem(monitoredItemId: number | string): StatusCode {
-
-    debugLog("Removing monitoredIem ", monitoredItemId);
-
-    assert(_.isFinite(monitoredItemId));
-    if (!this.monitoredItems.hasOwnProperty(monitoredItemId)) {
-      return StatusCodes.BadMonitoredItemIdInvalid;
-    }
-
-    const monitoredItem = this.monitoredItems[monitoredItemId];
-
-    monitoredItem.terminate();
-
-    monitoredItem.dispose();
+    public static defaultMaxMonitoredItemCount = 20000;
 
     /**
+     * @deprecated use serverCapacity.maxMonitoredItems and serverCapacity.maxMonitoredItemsPerSubscription instead
+     */
+    protected static get maxMonitoredItemCount() {
+        return Subscription.defaultMaxMonitoredItemCount;
+    }
+
+    public static registry = new ObjectRegistry();
+
+    public publishEngine?: IServerSidePublishEngine;
+    public id: number;
+    public priority: number;
+    /**
+     * the Subscription publishing interval
+     * @default 1000
+     */
+    public publishingInterval: number;
+    /**
+     * The keep alive count defines how many times the publish interval need to
+     * expires without having notifications available before the server send an
+     * empty message.
+     * OPCUA Spec says: a value of 0 is invalid.
+     * @default 10
      *
-     * notify that a monitored item has been removed from the subscription
-     * @param monitoredItem {MonitoredItem}
      */
-    this.emit("removeMonitoredItem", monitoredItem);
+    public maxKeepAliveCount: number;
+    /**
+     * The life time count defines how many times the publish interval expires without
+     * having a connection to the client to deliver data.
+     * If the life time count reaches maxKeepAliveCount, the subscription will
+     * automatically terminate.
+     * OPCUA Spec: The life-time count shall be a minimum of three times the keep keep-alive count.
+     *
+     * Note: this has to be interpreted as without having a PublishRequest available
+     * @default 1
+     */
+    public lifeTimeCount: number;
+    /**
+     * The maximum number of notifications that the Client wishes to receive in a
+     * single Publish response. A value of zero indicates that there is no limit.
+     * The number of notifications per Publish is the sum of monitoredItems in the
+     * DataChangeNotification and events in the EventNotificationList.
+     *
+     * @property maxNotificationsPerPublish
+     * @default 0
+     */
+    public maxNotificationsPerPublish: number;
+    public publishingEnabled: boolean;
+    public subscriptionDiagnostics: SubscriptionDiagnosticsDataTypePriv;
+    public publishIntervalCount: number;
+    /**
+     *  number of monitored Item
+     */
+    public monitoredItemIdCounter: number;
 
-    delete this.monitoredItems[monitoredItemId];
-
-    return StatusCodes.Good;
-
-  }
-
-  /**
-   * rue if monitored Item have uncollected Notifications
-   */
-  public get hasMonitoredItemNotifications(): boolean {
-    if (this._hasMonitoredItemNotifications) {
-      return true;
-    }
-    const keys = Object.keys(this.monitoredItems);
-    const n = keys.length;
-    for (let i = 0; i < n; i++) {
-      const key = keys[i];
-      const monitoredItem = this.monitoredItems[key];
-      if (monitoredItem.hasMonitoredItemNotifications) {
-        this._hasMonitoredItemNotifications = true;
-        return true;
-      }
-    }
-    return false;
-  }
-
-  public get subscriptionId() {
-    return this.id;
-  }
-
-  public getMessageForSequenceNumber(sequenceNumber: number) {
-
-    function filter_func(e: any): boolean {
-      return e.sequenceNumber === sequenceNumber;
-    }
-
-    const notification_message = _.find(this._sent_notifications, filter_func);
-
-    if (!notification_message) {
-      return null;
-    }
-    return notification_message;
-
-  }
-
-  /**
-   * returns true if the notification has expired
-   * @param notification
-   */
-  public notificationHasExpired(notification: any): boolean {
-    assert(notification.hasOwnProperty("start_tick"));
-    assert(_.isFinite(notification.start_tick + this.maxKeepAliveCount));
-    return (notification.start_tick + this.maxKeepAliveCount) < this.publishIntervalCount;
-  }
-
-  /**
-   *  returns in an array the sequence numbers of the notifications that haven't been
-   *  acknowledged yet.
-   */
-  public getAvailableSequenceNumbers(): number[] {
-    const availableSequenceNumbers = getSequenceNumbers(this._sent_notifications);
-    return availableSequenceNumbers;
-  }
-
-  /**
-   * acknowledges a notification identified by its sequence number
-   */
-  public acknowledgeNotification(sequenceNumber: number): StatusCode {
-
-    let foundIndex = -1;
-    _.find(this._sent_notifications, (e: any, index: number) => {
-      if (e.sequenceNumber === sequenceNumber) {
-        foundIndex = index;
-      }
-    });
-
-    if (foundIndex === -1) {
-      if (doDebug) {
-        debugLog(chalk.red("acknowledging sequence FAILED !!! "),
-          chalk.cyan(sequenceNumber.toString()));
-      }
-      return StatusCodes.BadSequenceNumberUnknown;
-    } else {
-      if (doDebug) {
-        debugLog(chalk.yellow("acknowledging sequence "),
-          chalk.cyan(sequenceNumber.toString()));
-      }
-      this._sent_notifications.splice(foundIndex, 1);
-      this.subscriptionDiagnostics.unacknowledgedMessageCount--;
-      return StatusCodes.Good;
-    }
-  }
-
-  /**
-   * getMonitoredItems is used to get information about monitored items of a subscription.Its intended
-   * use is defined in Part 4. This method is the implementation of the Standard OPCUA GetMonitoredItems Method.
-   * from spec:
-   * This method can be used to get the  list of monitored items in a subscription if CreateMonitoredItems
-   * failed due to a network interruption and the client does not know if the creation succeeded in the server.
-   *
-   */
-  public getMonitoredItems(): GetMonitoredItemsResult {
-
-    const result: GetMonitoredItemsResult = {
-      clientHandles: [] as number[],
-      serverHandles: [] as number[],
-      statusCode: StatusCodes.Good
-    };
-    Object.keys(this.monitoredItems).forEach((monitoredItemId: string) => {
-
-      const monitoredItem = this.getMonitoredItem(monitoredItemId)!;
-
-      result.clientHandles.push(monitoredItem.clientHandle!);
-      // TODO:  serverHandle is defined anywhere in the OPCUA Specification 1.02
-      //        I am not sure what shall be reported for serverHandle...
-      //        using monitoredItem.monitoredItemId instead...
-      //        May be a clarification in the OPCUA Spec is required.
-      result.serverHandles.push(parseInt(monitoredItemId, 10));
-
-    });
-    return result;
-  }
-
-  /**
-   * @private
-   */
-  public resendInitialValues(): void {
-    _.forEach(this.monitoredItems, (monitoredItem: MonitoredItem/*,monitoredItemId*/) => {
-      monitoredItem.resendInitialValues();
-    });
-  }
-
-  /**
-   * @private
-   */
-  public notifyTransfer(): void {
-    // OPCUA UA Spec 1.0.3 : part 3 - page 82 - 5.13.7 TransferSubscriptions:
-    // If the Server transfers the Subscription to the new Session, the Server shall issue
-    // a StatusChangeNotification notificationMessage with the status code
-    // Good_SubscriptionTransferred to the old Session.
-    const subscription = this;
-
-    debugLog(chalk.red(" Subscription => Notifying Transfer                                  "));
-
-    const notificationData = [
-      new StatusChangeNotification({
-        status: StatusCodes.GoodSubscriptionTransferred
-      })
-    ];
-
-    this.subscriptionDiagnostics.publishRequestCount += 1;
-    subscription.publishEngine.send_notification_message({
-      moreNotifications: false,
-      notificationData,
-      sequenceNumber: subscription._get_next_sequence_number(),
-      subscriptionId: subscription.id
-    }, true);
-  }
-
-  /**
-   *
-   *  the server invokes the resetLifeTimeAndKeepAliveCounters method of the subscription
-   *  when the server  has send a Publish Response, so that the subscription
-   *  can reset its life time counter.
-   *
-   * @private
-   */
-  public resetLifeTimeAndKeepAliveCounters() {
-    this.resetLifeTimeCounter();
-    this.resetKeepAliveCounter();
-  }
-
-  /**
-   *  _publish_pending_notifications send a "notification" event:
-   *
-   * @private
-   *
-   */
-  public _publish_pending_notifications() {
-
-    const publishEngine = this.publishEngine;
-    const subscriptionId = this.id;
-
-    // preconditions
-    assert(publishEngine.pendingPublishRequestCount > 0);
-    assert(this.hasPendingNotifications);
-
-    // todo : get rid of this....
-    this.emit("notification");
-
-    const notificationMessage = this._popNotificationToSend().notification;
-
-    this.emit("notificationMessage", notificationMessage);
-
-    assert(_.isArray(notificationMessage.notificationData));
-
-    notificationMessage.notificationData!.forEach(
-      (notificationData: ExtensionObject | null) => {
-
-        // update diagnostics
-        if (notificationData instanceof DataChangeNotification) {
-          const nbNotifs = notificationData.monitoredItems!.length;
-          this.subscriptionDiagnostics.dataChangeNotificationsCount += nbNotifs;
-          this.subscriptionDiagnostics.notificationsCount += nbNotifs;
-        } else if (notificationData instanceof EventNotificationList) {
-          const nbNotifs = notificationData.events!.length;
-          this.subscriptionDiagnostics.eventNotificationsCount += nbNotifs;
-          this.subscriptionDiagnostics.notificationsCount += nbNotifs;
-        } else {
-          // TODO
+    private _state: SubscriptionState = -1 as SubscriptionState;
+    public set state(value: SubscriptionState) {
+        if (this._state !== value) {
+            this._state = value;
+            this.emit("stateChanged", value);
         }
-
-      });
-
-    assert(notificationMessage.hasOwnProperty("sequenceNumber"));
-    assert(notificationMessage.hasOwnProperty("notificationData"));
-
-    const moreNotifications = (this.hasPendingNotifications);
-
-    // update diagnostics
-    this.subscriptionDiagnostics.publishRequestCount += 1;
-
-    publishEngine.send_notification_message({
-      moreNotifications,
-      notificationData: notificationMessage.notificationData,
-      sequenceNumber: notificationMessage.sequenceNumber,
-      subscriptionId
-    }, false);
-
-    this.messageSent = true;
-
-    this.subscriptionDiagnostics.unacknowledgedMessageCount++;
-
-    this.resetLifeTimeAndKeepAliveCounters();
-
-    if (doDebug) {
-      debugLog("Subscription sending a notificationMessage subscriptionId=", subscriptionId,
-        "sequenceNumber = ", notificationMessage.sequenceNumber.toString());
-      // debugLog(notificationMessage.toString());
+    }
+    public get state(): SubscriptionState {
+        return this._state;
     }
 
-    if (this.state !== SubscriptionState.CLOSED) {
-      assert(notificationMessage.notificationData!.length > 0, "We are not expecting a keep-alive message here");
-      this.state = SubscriptionState.NORMAL;
-      debugLog("subscription " + this.id + chalk.bgYellow(" set to NORMAL"));
-    }
+    public messageSent: boolean;
+    public $session?: ServerSession;
 
-  }
-
-  public process_subscription() {
-
-    assert(this.publishEngine.pendingPublishRequestCount > 0);
-
-    if (!this.publishingEnabled) {
-      // no publish to do, except keep alive
-      this._process_keepAlive();
-      return;
-    }
-
-    if (!this.hasPendingNotifications && this.hasMonitoredItemNotifications) {
-      // collect notification from monitored items
-      this._harvestMonitoredItems();
-    }
-
-    // let process them first
-    if (this.hasPendingNotifications) {
-
-      this._publish_pending_notifications();
-
-      if (this.state === SubscriptionState.NORMAL && this.hasPendingNotifications) {
-
-        // istanbul ignore next
-        if (doDebug) {
-          debugLog("    -> pendingPublishRequestCount > 0 " +
-            "&& normal state => re-trigger tick event immediately ");
+    /**
+     * Byte budget for one NotificationMessage, or 0 when there is no limit to
+     * respect. Taken from the limits the client declared when it opened the
+     * channel - its maxMessageSize, and its maxChunkCount times what one chunk
+     * carries: a response beyond either is refused, which surfaces as a
+     * transport error on a Publish whose service result was Good (FEAT-68).
+     *
+     * Overridable so a test can state a budget without a channel behind it, and
+     * so an application can be stricter than the transport if it wants to.
+     */
+    public maxNotificationMessageSizeOverride = 0;
+    public get maxNotificationMessageSize(): number {
+        if (this.maxNotificationMessageSizeOverride) {
+            return this.maxNotificationMessageSizeOverride;
         }
-
-        // let process an new publish request
-        setImmediate(this._tick.bind(this));
-      }
-
-    } else {
-      this._process_keepAlive();
+        const channel = this.$session?.channel;
+        const negotiated = channel?.getMaxResponseBodySize?.() ?? channel?.getTransportSettings?.()?.maxMessageSize ?? 0;
+        // 0 means "no limit announced" on the wire, and is passed through as such
+        return negotiated > notificationMessageOverhead ? negotiated : 0;
     }
-  }
+    /**
+     * Snapshot of the identity of the Session that owns this Subscription. It is retained when the
+     * Subscription loses its Session (e.g. when it is moved to the orphan publish engine after a
+     * Session timeout) so that a later TransferSubscriptions request can still be validated against
+     * the original owner as required by OPC UA Part 4 §5.13.7.
+     */
+    public $transferSessionIdentity?: ITransferSessionIdentity;
 
-  public _get_future_sequence_number(): number {
-    return this._sequence_number_generator ? this._sequence_number_generator.future() : 0;
-  }
+    public get sessionId(): NodeId {
+        return this.$session ? this.$session.nodeId : NodeId.nullNodeId;
+    }
 
-  private _process_keepAlive() {
+    // ServerCapabilities filter limits (OPC UA Part 5), exposed for EventFilter validation (e.g. on modify)
+    public get maxWhereClauseParameters(): UInt32 | undefined {
+        return this.serverCapabilities.maxWhereClauseParameters;
+    }
+    public get maxSelectClauseParameters(): UInt32 | undefined {
+        return this.serverCapabilities.maxSelectClauseParameters;
+    }
 
-    // xx assert(!self.publishingEnabled || (!self.hasPendingNotifications && !self.hasMonitoredItemNotifications));
+    public get currentLifetimeCount(): number {
+        return this._life_time_counter;
+    }
+    public get currentKeepAliveCount(): number {
+        return this._keep_alive_counter;
+    }
 
-    this.increaseKeepAliveCounter();
+    private _life_time_counter: number;
+    protected _keep_alive_counter = 0;
+    public _pending_notifications: Queue<InternalNotification>;
+    private _sent_notification_messages: NotificationMessage[];
+    private readonly _sequence_number_generator: SequenceNumberGenerator;
+    private readonly monitoredItems: Map<number, MonitoredItem>;
+    private timerId: ReturnType<typeof setTimeout> | null;
+    private _hasUncollectedMonitoredItemNotifications = false;
 
-    if (this.keepAliveCounterHasExpired) {
+    private globalCounter: IGlobalMonitoredItemCounter;
+    private serverCapabilities: ServerCapabilitiesPartial;
 
-      if (this._sendKeepAliveResponse()) {
+    constructor(options: SubscriptionOptions) {
+        super();
+
+        options = options || {};
+
+        Subscription.registry.register(this);
+
+        assert(this.sessionId instanceof NodeId, "expecting a sessionId NodeId");
+
+        this.publishEngine = options.publishEngine;
+
+        this.id = options.id || INVALID_ID;
+
+        this.priority = options.priority || 0;
+
+        this.publishingInterval = _adjust_publishing_interval(options.publishingInterval);
+
+        this.maxKeepAliveCount = _adjust_maxKeepAliveCount(options.maxKeepAliveCount); // , this.publishingInterval);
+
+        this.resetKeepAliveCounter();
+
+        this.lifeTimeCount = _adjust_lifeTimeCount(options.lifeTimeCount || 0, this.maxKeepAliveCount, this.publishingInterval);
+
+        this.maxNotificationsPerPublish = _adjust_maxNotificationsPerPublish(options.maxNotificationsPerPublish);
+
+        this._life_time_counter = 0;
+        this.resetLifeTimeCounter();
+
+        // notification message that are ready to be sent to the client
+        this._pending_notifications = new Queue<InternalNotification>();
+
+        this._sent_notification_messages = [];
+
+        this._sequence_number_generator = new SequenceNumberGenerator();
+
+        // initial state of the subscription
+        this.state = SubscriptionState.CREATING;
+
+        this.publishIntervalCount = 0;
+
+        this.monitoredItems = new Map(); // monitored item map
+
+        this.monitoredItemIdCounter = 0;
+
+        this.publishingEnabled = _adjust_publishingEnable(options.publishingEnabled);
+
+        this.subscriptionDiagnostics = createSubscriptionDiagnostics(this);
+
+        // A boolean value that is set to TRUE to mean that either a NotificationMessage or a keep-alive
+        // Message has been sent on the Subscription. It is a flag that is used to ensure that either a
+        // NotificationMessage or a keep-alive Message is sent out the first time the publishing
+        // timer expires.
+        this.messageSent = false;
+
+        this.timerId = null;
+        this._start_timer({ firstTime: true });
+
+        // c8 ignore next
+        doDebug && debugLog(chalk.green(`creating subscription ${this.id}`));
+
+        this.serverCapabilities = options.serverCapabilities;
+        this.serverCapabilities.maxMonitoredItems =
+            this.serverCapabilities.maxMonitoredItems || Subscription.defaultMaxMonitoredItemCount;
+        this.serverCapabilities.maxMonitoredItemsPerSubscription =
+            this.serverCapabilities.maxMonitoredItemsPerSubscription || Subscription.defaultMaxMonitoredItemCount;
+        this.globalCounter = options.globalCounter;
+        this.#allocateMonitoredItemId = options.monitoredItemIdAllocator ?? getNextMonitoredItemId;
+    }
+
+    readonly #allocateMonitoredItemId: () => number;
+
+    public getSessionId(): NodeId {
+        return this.sessionId;
+    }
+
+    public toString(): string {
+        let str = "Subscription:\n";
+        str += `  subscriptionId          ${this.id}\n`;
+        str += `  sessionId          ${this.getSessionId()?.toString()}\n`;
+
+        str += `  publishingEnabled  ${this.publishingEnabled}\n`;
+        str += `  maxKeepAliveCount  ${this.maxKeepAliveCount}\n`;
+        str += `  publishingInterval ${this.publishingInterval}\n`;
+        str += `  lifeTimeCount      ${this.lifeTimeCount}\n`;
+        str += `  maxKeepAliveCount  ${this.maxKeepAliveCount}\n`;
+        return str;
+    }
+
+    public toJSON(): Record<string, string | number | boolean> {
+        return {
+            id: this.id,
+            sessionId: this.getSessionId() ? this.getSessionId().toString() : NodeId.nullNodeId.toString(),
+            publishingInterval: this.publishingInterval,
+            maxKeepAliveCount: this.maxKeepAliveCount,
+            lifeTimeCount: this.lifeTimeCount,
+            publishingEnabled: this.publishingEnabled,
+            state: this.state !== undefined ? SubscriptionState[this.state] : "unknown",
+            monitoredItemCount: this.monitoredItemCount,
+            pendingNotificationsCount: this.pendingNotificationsCount
+        };
+    }
+
+    public [Symbol.for("nodejs.util.inspect.custom")](): string {
+        return this.toString();
+    }
+
+    /**
+     * modify subscription parameters
+     * @param param
+     */
+    public modify(param: ModifySubscriptionParameters): void {
+        // update diagnostic counter
+        this.subscriptionDiagnostics.modifyCount += 1;
+
+        const publishingInterval_old = this.publishingInterval;
+
+        param.requestedPublishingInterval = param.requestedPublishingInterval || 0;
+        param.requestedMaxKeepAliveCount = param.requestedMaxKeepAliveCount || this.maxKeepAliveCount;
+        param.requestedLifetimeCount = param.requestedLifetimeCount || this.lifeTimeCount;
+
+        this.publishingInterval = _adjust_publishing_interval(param.requestedPublishingInterval);
+        this.maxKeepAliveCount = _adjust_maxKeepAliveCount(param.requestedMaxKeepAliveCount);
+
+        this.lifeTimeCount = _adjust_lifeTimeCount(param.requestedLifetimeCount, this.maxKeepAliveCount, this.publishingInterval);
+
+        this.maxNotificationsPerPublish = _adjust_maxNotificationsPerPublish(param.maxNotificationsPerPublish || 0);
+        this.priority = param.priority || 0;
 
         this.resetLifeTimeAndKeepAliveCounters();
 
-      } else {
-        debugLog("     -> subscription.state === LATE , " +
-          "because keepAlive Response cannot be send due to lack of PublishRequest");
-        this.state = SubscriptionState.LATE;
-      }
-    }
-  }
+        if (publishingInterval_old !== this.publishingInterval) {
+            // todo
+        }
+        this._stop_timer();
 
-  private _stop_timer() {
-    if (this.timerId) {
-      debugLog(chalk.bgWhite.blue("Subscription#_stop_timer subscriptionId="), this.id);
-      clearInterval(this.timerId);
-      this.timerId = null;
-    }
-  }
-
-  private _start_timer() {
-
-    debugLog(chalk.bgWhite.blue("Subscription#_start_timer  subscriptionId="),
-      this.id, " publishingInterval = ", this.publishingInterval);
-
-    assert(this.timerId === null);
-    // from the spec:
-    // When a Subscription is created, the first Message is sent at the end of the first publishing cycle to
-    // inform the Client that the Subscription is operational. A NotificationMessage is sent if there are
-    // Notifications ready to be reported. If there are none, a keep-alive Message is sent instead that
-    // contains a sequence number of 1, indicating that the first NotificationMessage has not yet been sent.
-    // This is the only time a keep-alive Message is sent without waiting for the maximum keep-alive count
-    // to be reached, as specified in (f) above.
-
-    // make sure that a keep-alive Message will be send at the end of the first publishing cycle
-    // if there are no Notifications ready.
-    this._keep_alive_counter = this.maxKeepAliveCount;
-
-    assert(this.publishingInterval >= Subscription.minimumPublishingInterval);
-    this.timerId = setInterval(this._tick.bind(this), this.publishingInterval);
-  }
-
-  // counter
-  private _get_next_sequence_number(): number {
-    return this._sequence_number_generator ? this._sequence_number_generator.next() : 0;
-  }
-
-  /**
-   * @private
-   */
-  private _tick() {
-
-    debugLog("Subscription#_tick  aborted=", this.aborted, "state=", this.state.toString());
-
-    if (this.aborted) {
-      // xx  console.log(" Log aborteds")
-      // xx  // underlying channel has been aborted ...
-      // xx self.publishEngine.cancelPendingPublishRequestBeforeChannelChange();
-      // xx // let's still increase lifetime counter to detect timeout
+        this._start_timer({ firstTime: false });
     }
 
-    if (this.state === SubscriptionState.CLOSED) {
-      console.log("Warning: Subscription#_tick called while subscription is CLOSED");
-      return;
+    /**
+     * set publishing mode
+     * @param publishingEnabled
+     */
+    public setPublishingMode(publishingEnabled: boolean): StatusCode {
+        this.publishingEnabled = !!publishingEnabled;
+        // update diagnostics
+        if (this.publishingEnabled) {
+            this.subscriptionDiagnostics.enableCount += 1;
+        } else {
+            this.subscriptionDiagnostics.disableCount += 1;
+        }
+
+        this.resetLifeTimeCounter();
+
+        if (!publishingEnabled && this.state !== SubscriptionState.CLOSED) {
+            this.state = SubscriptionState.NORMAL;
+        }
+        return StatusCodes.Good;
     }
 
-    this.discardOldSentNotifications();
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog((t(new Date()) + "  " + this._life_time_counter + "/" + this.lifeTimeCount +
-        chalk.cyan("   Subscription#_tick")),
-        "  processing subscriptionId=", this.id,
-        "hasMonitoredItemNotifications = ", this.hasMonitoredItemNotifications,
-        " publishingIntervalCount =", this.publishIntervalCount);
-    }
-    if (this.publishEngine._on_tick) {
-      this.publishEngine._on_tick();
+    /**
+     * @private
+     */
+    public get keepAliveCounterHasExpired(): boolean {
+        return this._keep_alive_counter >= this.maxKeepAliveCount || this.state === SubscriptionState.LATE;
     }
 
-    this.publishIntervalCount += 1;
-
-    this.increaseLifeTimeCounter();
-
-    if (this.lifeTimeHasExpired) {
-
-      /* istanbul ignore next */
-      if (doDebug) {
-        debugLog(
-          chalk.red.bold("Subscription " + this.id + " has expired !!!!! => Terminating"));
-      }
-      /**
-       * notify the subscription owner that the subscription has expired by exceeding its life time.
-       * @event expired
-       *
-       */
-      this.emit("expired");
-
-      // notify new terminated status only when subscription has timeout.
-      debugLog("adding StatusChangeNotification notification message for BadTimeout subscription = ", this.id);
-      this._addNotificationMessage([
-        new StatusChangeNotification({ status: StatusCodes.BadTimeout })
-      ]);
-
-      // kill timer and delete monitored items and transfer pending notification messages
-      this.terminate();
-
-      return;
-
+    /**
+     * Reset the Lifetime Counter Variable to the value specified for the lifetime of a Subscription in
+     * the CreateSubscription Service( 5.13.2).
+     * @private
+     */
+    public resetLifeTimeCounter(): void {
+        this._life_time_counter = 0;
     }
 
-    const publishEngine = this.publishEngine;
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog("Subscription#_tick  self._pending_notifications= ", this._pending_notifications.length);
+    /**
+     * @private
+     */
+    public increaseLifeTimeCounter(): void {
+        this._life_time_counter += 1;
+        if (this._life_time_counter >= this.lifeTimeCount) {
+            this.emit("lifeTimeExpired");
+        }
+        this.emit("lifeTimeCounterChanged", this._life_time_counter);
     }
 
-    if (publishEngine.pendingPublishRequestCount === 0 &&
-      (this.hasPendingNotifications || this.hasMonitoredItemNotifications)) {
-
-      // istanbul ignore next
-      if (doDebug) {
-        debugLog("subscription set to LATE  hasPendingNotifications = ",
-          this.hasPendingNotifications, " hasMonitoredItemNotifications =",
-          this.hasMonitoredItemNotifications);
-      }
-      this.state = SubscriptionState.LATE;
-      return;
+    /**
+     *  True if the subscription life time has expired.
+     *
+     */
+    public get lifeTimeHasExpired(): boolean {
+        assert(this.lifeTimeCount > 0);
+        return this._life_time_counter >= this.lifeTimeCount;
     }
 
-    if (publishEngine.pendingPublishRequestCount > 0) {
-
-      if (this.hasPendingNotifications) {
-        // simply pop pending notification and send it
-        this.process_subscription();
-
-      } else if (this.hasMonitoredItemNotifications) {
-        this.process_subscription();
-
-      } else {
-        this._process_keepAlive();
-      }
-    } else {
-      this._process_keepAlive();
-    }
-  }
-
-  /**
-   * @private
-   */
-  private _sendKeepAliveResponse(): boolean {
-
-    const future_sequence_number = this._get_future_sequence_number();
-
-    debugLog("     -> Subscription#_sendKeepAliveResponse subscriptionId", this.id);
-
-    if (this.publishEngine.send_keep_alive_response(this.id, future_sequence_number)) {
-
-      this.messageSent = true;
-
-      /**
-       * notify the subscription owner that a keepalive message has to be sent.
-       * @event keepalive
-       *
-       */
-      this.emit("keepalive", future_sequence_number);
-      this.state = SubscriptionState.KEEPALIVE;
-
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * Reset the Lifetime Counter Variable to the value specified for the lifetime of a Subscription in
-   * the CreateSubscription Service( 5.13.2).
-   * @private
-   */
-  private resetKeepAliveCounter(): void {
-    this._keep_alive_counter = 0;
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog("     -> subscriptionId", this.id,
-        " Resetting keepAliveCounter = ", this._keep_alive_counter,
-        this.maxKeepAliveCount);
-    }
-  }
-
-  /**
-   * @private
-   */
-  private increaseKeepAliveCounter() {
-    this._keep_alive_counter += 1;
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog("     -> subscriptionId", this.id, " Increasing keepAliveCounter = ",
-        this._keep_alive_counter, this.maxKeepAliveCount);
-    }
-  }
-
-  /**
-   * @private
-   */
-  private _addNotificationMessage(
-    notificationData: Notification[]
-  ) {
-
-    assert(_.isArray(notificationData));
-    assert(notificationData.length === 1 || notificationData.length === 2); // as per spec part 3.
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog(chalk.yellow("Subscription#_addNotificationMessage"),
-        notificationData.toString());
-    }
-    const subscription = this;
-    assert(_.isObject(notificationData[0]));
-
-    assert_validNotificationData(notificationData[0]);
-    if (notificationData.length === 2) {
-      assert_validNotificationData(notificationData[1]);
+    /**
+     * number of milliseconds before this subscription times out (lifeTimeHasExpired === true);
+     */
+    public get timeToExpiration(): number {
+        return (this.lifeTimeCount - this._life_time_counter) * this.publishingInterval;
     }
 
-    const notification_message = new NotificationMessage({
-      notificationData,
-      publishTime: new Date(),
-      sequenceNumber: this._get_next_sequence_number()
-    });
-
-    subscription._pending_notifications.push({
-      notification: notification_message,
-      publishTime: new Date(),
-      sequenceNumber: notification_message.sequenceNumber,
-      start_tick: subscription.publishIntervalCount
-    });
-    debugLog("pending notification to send ", subscription._pending_notifications.length);
-
-  }
-
-  /**
-   * Extract the next Notification that is ready to be sent to the client.
-   * @return the Notification to send._pending_notifications
-   */
-  private _popNotificationToSend(): InternalNotification {
-    assert(this._pending_notifications.length > 0);
-    const notification_message = this._pending_notifications.shift();
-    if (!notification_message) {
-      throw new Error("internal error");
-    }
-    this._sent_notifications.push(notification_message);
-    return notification_message;
-  }
-
-  /**
-   * discardOldSentNotification find all sent notification message that have expired keep-alive
-   * and destroy them.
-   * @private
-   *
-   * Subscriptions maintain a retransmission queue of sent  NotificationMessages.
-   * NotificationMessages are retained in this queue until they are acknowledged or until they have
-   * been in the queue for a minimum of one keep-alive interval.
-   *
-   */
-  private discardOldSentNotifications() {
-
-    // Sessions maintain a retransmission queue of sent NotificationMessages. NotificationMessages
-    // are retained in this queue until they are acknowledged. The Session shall maintain a
-    // retransmission queue size of at least two times the number of Publish requests per Session the
-    // Server supports.  Clients are required to acknowledge NotificationMessages as they are received. In the
-    // case of a retransmission queue overflow, the oldest sent NotificationMessage gets deleted. If a
-    // Subscription is transferred to another Session, the queued NotificationMessages for this
-    // Subscription are moved from the old to the new Session.
-    if (maxNotificationMessagesInQueue <= this._sent_notifications.length) {
-      debugLog("discardOldSentNotifications = ", this._sent_notifications.length);
-      this._sent_notifications.splice(this._sent_notifications.length - maxNotificationMessagesInQueue);
-    }
-    //
-    // var arr = _.filter(self._sent_notifications,function(notification){
-    //   return self.notificationHasExpired(notification);
-    // });
-    // var results = arr.map(function(notification){
-    //    return self.acknowledgeNotification(notification.sequenceNumber);
-    // });
-    // xx return results;
-  }
-
-  /**
-   * @param timestampsToReturn
-   * @param monitoredItemCreateRequest
-   * @param node
-   * @private
-   */
-  private _createMonitoredItemStep2(
-    timestampsToReturn: TimestampsToReturn,
-    monitoredItemCreateRequest: MonitoredItemCreateRequest,
-    node: BaseNode): MonitoredItemCreateResult {
-
-    // note : most of the parameter inconsistencies shall have been handled by the caller
-    // any error here will raise an assert here
-
-    assert(monitoredItemCreateRequest instanceof MonitoredItemCreateRequest);
-    const itemToMonitor = monitoredItemCreateRequest.itemToMonitor;
-
-    // xx check if attribute Id invalid (we only support Value or EventNotifier )
-    // xx assert(itemToMonitor.attributeId !== AttributeIds.INVALID);
-
-    this.monitoredItemIdCounter += 1;
-
-    const monitoredItemId = getNextMonitoredItemId();
-
-    const requestedParameters = monitoredItemCreateRequest.requestedParameters;
-
-    // adjust requestedParameters.samplingInterval
-    requestedParameters.samplingInterval = this.adjustSamplingInterval(requestedParameters.samplingInterval, node);
-
-    // reincorporate monitoredItemId and itemToMonitor into the requestedParameters
-    const options = requestedParameters as any as MonitoredItemOptions;
-
-    options.monitoredItemId = monitoredItemId;
-    options.itemToMonitor = itemToMonitor;
-
-    const monitoredItem = new MonitoredItem(options);
-    monitoredItem.timestampsToReturn = timestampsToReturn;
-    monitoredItem.$subscription = this;
-
-    assert(monitoredItem.monitoredItemId === monitoredItemId);
-    this.monitoredItems[monitoredItemId] = monitoredItem;
-
-    const filterResult = _process_filter(node, requestedParameters.filter);
-
-    const monitoredItemCreateResult = new MonitoredItemCreateResult({
-      filterResult,
-      monitoredItemId,
-      revisedQueueSize: monitoredItem.queueSize,
-      revisedSamplingInterval: monitoredItem.samplingInterval,
-      statusCode: StatusCodes.Good
-    });
-    return monitoredItemCreateResult;
-  }
-
-  /**
-   *
-   * @param monitoredItem
-   * @param monitoredItemCreateRequest
-   * @private
-   */
-  private _createMonitoredItemStep3(
-    monitoredItem: MonitoredItem,
-    monitoredItemCreateRequest: MonitoredItemCreateRequest
-  ): void {
-
-    assert(monitoredItem.monitoringMode === MonitoringMode.Invalid);
-    assert(_.isFunction(monitoredItem.samplingFunc));
-    const monitoringMode = monitoredItemCreateRequest.monitoringMode; // Disabled, Sampling, Reporting
-    monitoredItem.setMonitoringMode(monitoringMode);
-  }
-
-  // collect DataChangeNotification
-  private _collectNotificationData() {
-
-    let notifications = [];
-
-    // reset cache ...
-    this._hasMonitoredItemNotifications = false;
-
-    const all_notifications = new Dequeue();
-
-    // visit all monitored items
-    const keys = Object.keys(this.monitoredItems);
-    const n = keys.length;
-    for (let i = 0; i < n; i++) {
-      const key = keys[i];
-      const monitoredItem = this.monitoredItems[key];
-      notifications = monitoredItem.extractMonitoredItemNotifications();
-      add_all_in(notifications, all_notifications);
+    public get timeToKeepAlive(): number {
+        return (this.maxKeepAliveCount - this._keep_alive_counter) * this.publishingInterval;
     }
 
-    const notificationsMessage = [];
+    /**
+     * Terminates the subscription.
+     * Calling this method will also remove any monitored items.
+     *
+     */
+    public terminate(): void {
+        // c8 ignore next
+        doDebug && debugLog("Subscription#terminate status", SubscriptionState[this.state]);
 
-    while (all_notifications.length > 0) {
+        if (this.state === SubscriptionState.CLOSED) {
+            // todo verify if asserting is required here
+            return;
+        }
 
-      // split into one or multiple dataChangeNotification with no more than
-      //  self.maxNotificationsPerPublish monitoredItems
-      const notifications_chunk = extract_notifications_chunk(all_notifications, this.maxNotificationsPerPublish);
+        // stop timer
+        this._stop_timer();
 
-      // separate data for DataChangeNotification (MonitoredItemNotification) from data for
-      // EventNotificationList(EventFieldList)
-      const dataChangedNotificationData = notifications_chunk.filter(
-        filter_instanceof.bind(null, MonitoredItemNotification));
-      const eventNotificationListData = notifications_chunk.filter(
-        filter_instanceof.bind(null, EventFieldList));
+        // c8 ignore next
+        doDebug && debugLog("terminating Subscription  ", this.id, " with ", this.monitoredItemCount, " monitored items");
 
-      assert(notifications_chunk.length ===
-        dataChangedNotificationData.length + eventNotificationListData.length);
+        // dispose all monitoredItem
+        // one pass over the pending list for the whole set, not one per item
+        for (const status of this.removeMonitoredItems([...this.monitoredItems.keys()])) {
+            assert(status === StatusCodes.Good);
+        }
+        assert(this.monitoredItemCount === 0);
 
-      notifications = [];
+        if (this.$session?._unexposeSubscriptionDiagnostics) {
+            this.$session._unexposeSubscriptionDiagnostics(this);
+        }
+        this.state = SubscriptionState.CLOSED;
 
-      // add dataChangeNotification
-      if (dataChangedNotificationData.length) {
-        const dataChangeNotification = new DataChangeNotification({
-          diagnosticInfos: [],
-          monitoredItems: dataChangedNotificationData
+        /**
+         * notify the subscription owner that the subscription has been terminated.
+         * @event "terminated"
+         */
+        this.emit("terminated");
+        if (this.publishEngine) {
+            this.publishEngine.on_close_subscription(this);
+        }
+    }
+
+    public setTriggering(
+        triggeringItemId: number,
+        linksToAdd: number[] | null,
+        linksToRemove: number[] | null
+    ): { statusCode: StatusCode; addResults: StatusCode[]; removeResults: StatusCode[] } {
+        /** Bad_NothingToDo, Bad_TooManyOperations,Bad_SubscriptionIdInvalid, Bad_MonitoredItemIdInvalid */
+        linksToAdd = linksToAdd || [];
+        linksToRemove = linksToRemove || [];
+
+        if (linksToAdd.length === 0 && linksToRemove.length === 0) {
+            return { statusCode: StatusCodes.BadNothingToDo, addResults: [], removeResults: [] };
+        }
+        const triggeringItem = this.getMonitoredItem(triggeringItemId);
+
+        const monitoredItemsToAdd = linksToAdd.map((id) => this.getMonitoredItem(id));
+        const monitoredItemsToRemove = linksToRemove.map((id) => this.getMonitoredItem(id));
+
+        if (!triggeringItem) {
+            const removeResults1: StatusCode[] = monitoredItemsToRemove.map((m) =>
+                m ? StatusCodes.Good : StatusCodes.BadMonitoredItemIdInvalid
+            );
+            const addResults1: StatusCode[] = monitoredItemsToAdd.map((m) =>
+                m ? StatusCodes.Good : StatusCodes.BadMonitoredItemIdInvalid
+            );
+            return {
+                statusCode: StatusCodes.BadMonitoredItemIdInvalid,
+
+                addResults: addResults1,
+                removeResults: removeResults1
+            };
+        }
+        //
+        // note: it seems that CTT imposed that we do remove before add
+        const removeResults = monitoredItemsToRemove.map((m) =>
+            !m ? StatusCodes.BadMonitoredItemIdInvalid : triggeringItem.removeLinkItem(m.monitoredItemId)
+        );
+        const addResults = monitoredItemsToAdd.map((m) =>
+            !m ? StatusCodes.BadMonitoredItemIdInvalid : triggeringItem.addLinkItem(m.monitoredItemId)
+        );
+
+        const statusCode: StatusCode = StatusCodes.Good;
+
+        // do binding
+
+        return {
+            statusCode,
+
+            addResults,
+            removeResults
+        };
+    }
+    public dispose(): void {
+        // c8 ignore next
+        if (doDebug) {
+            debugLog("Subscription#dispose", this.id, this.monitoredItemCount);
+        }
+
+        assert(this.monitoredItemCount === 0, "MonitoredItems haven't been  deleted first !!!");
+        assert(this.timerId === null, "Subscription timer haven't been terminated");
+
+        if (this.subscriptionDiagnostics) {
+            (this.subscriptionDiagnostics as SubscriptionDiagnosticsDataTypePriv).$subscription = null as unknown as Subscription;
+        }
+
+        this.publishEngine = undefined;
+        this._pending_notifications.clear();
+        this._sent_notification_messages = [];
+
+        this.$session = undefined;
+        this.removeAllListeners();
+
+        Subscription.registry.unregister(this);
+    }
+
+    public get aborted(): boolean {
+        const session = this.$session;
+        if (!session) {
+            return true;
+        }
+        return session.aborted;
+    }
+
+    /**
+     * number of pending notifications
+     */
+    public get pendingNotificationsCount(): number {
+        return this._pending_notifications ? this._pending_notifications.size : 0;
+    }
+
+    /**
+     * is 'true' if there are pending notifications for this subscription. (i.e moreNotifications)
+     */
+    public get hasPendingNotifications(): boolean {
+        return this.pendingNotificationsCount > 0;
+    }
+
+    /**
+     * number of sent notifications
+     */
+    public get sentNotificationMessageCount(): number {
+        return this._sent_notification_messages.length;
+    }
+
+    /**
+     * @internal
+     */
+    public _flushSentNotifications(): NotificationMessage[] {
+        const tmp = this._sent_notification_messages;
+        this._sent_notification_messages = [];
+        return tmp;
+    }
+    /**
+     * number of monitored items handled by this subscription
+     */
+    public get monitoredItemCount(): number {
+        return this.monitoredItems.size;
+    }
+
+    /**
+     * number of disabled monitored items.
+     */
+    public get disabledMonitoredItemCount(): number {
+        let count = 0;
+        for (const monitoredItem of this.monitoredItems.values()) {
+            count += monitoredItem.monitoringMode === MonitoringMode.Disabled ? 1 : 0;
+        }
+        return count;
+    }
+
+    /**
+     * The number of unacknowledged messages saved in the republish queue.
+     */
+    public get unacknowledgedMessageCount(): number {
+        return this.subscriptionDiagnostics.unacknowledgedMessageCount;
+    }
+
+    /**
+     * adjust monitored item sampling interval
+     *  - an samplingInterval ===0 means that we use a event-base model ( no sampling)
+     *  - otherwise the sampling is adjusted
+     * @private
+     */
+    public adjustSamplingInterval(samplingInterval: number, node?: IReadAttributeCapable): number {
+        if (samplingInterval < 0) {
+            // - The value -1 indicates that the default sampling interval defined by the publishing
+            //   interval of the Subscription is requested.
+            // - Any negative number is interpreted as -1.
+            samplingInterval = this.publishingInterval;
+        } else if (samplingInterval === 0) {
+            // c8 ignore next
+            if (!node) throw new Error("Internal Error");
+
+            // OPCUA 1.0.3 Part 4 - 5.12.1.2
+            // The value 0 indicates that the Server should use the fastest practical rate.
+
+            // The fastest supported sampling interval may be equal to 0, which indicates
+            // that the data item is exception-based rather than being sampled at some period.
+            // An exception-based model means that the underlying system does not require
+            // sampling and reports data changes.
+
+            const dataValueSamplingInterval = node.readAttribute(
+                SessionContext.defaultContext,
+                AttributeIds.MinimumSamplingInterval
+            );
+
+            // TODO if attributeId === AttributeIds.Value : sampling interval required here
+            if (dataValueSamplingInterval.statusCode.isGood()) {
+                // node provides a Minimum sampling interval ...
+                samplingInterval = dataValueSamplingInterval.value.value;
+                assert(samplingInterval >= 0 && samplingInterval <= MonitoredItem.maximumSamplingInterval);
+
+                // note : at this stage, a samplingInterval===0 means that the data item is really exception-based
+            }
+        } else if (samplingInterval < MonitoredItem.minimumSamplingInterval) {
+            samplingInterval = MonitoredItem.minimumSamplingInterval;
+        } else if (samplingInterval > MonitoredItem.maximumSamplingInterval) {
+            // If the requested samplingInterval is higher than the
+            // maximum sampling interval supported by the Server, the maximum sampling
+            // interval is returned.
+            samplingInterval = MonitoredItem.maximumSamplingInterval;
+        }
+
+        const node_minimumSamplingInterval =
+            node && (node as UAVariable).minimumSamplingInterval ? (node as UAVariable).minimumSamplingInterval : 0;
+
+        samplingInterval = Math.max(samplingInterval, node_minimumSamplingInterval);
+
+        return samplingInterval;
+    }
+
+    /**
+     * create a monitored item
+     * @param addressSpace - address space
+     * @param timestampsToReturn  - the timestamp to return
+     * @param monitoredItemCreateRequest - the parameters describing the monitored Item to create
+     */
+    public preCreateMonitoredItem(
+        nodeFinder: INodeFinder,
+        timestampsToReturn: TimestampsToReturn,
+        monitoredItemCreateRequest: MonitoredItemCreateRequest,
+        /** the id the item keeps, when it comes from another thread of the server (TransferSubscriptions) */
+        monitoredItemId?: number
+    ): InternalCreateMonitoredItemResult {
+        assert(monitoredItemCreateRequest instanceof MonitoredItemCreateRequest);
+
+        function handle_error(statusCode: StatusCode): InternalCreateMonitoredItemResult {
+            return {
+                createResult: new MonitoredItemCreateResult({ statusCode }),
+                monitoredItemCreateRequest
+            };
+        }
+
+        const itemToMonitor = monitoredItemCreateRequest.itemToMonitor;
+
+        const node = nodeFinder.findNode(itemToMonitor.nodeId) as unknown as UAObject | UAVariable | UAMethod;
+        if (
+            !node ||
+            (node.nodeClass !== NodeClass.Variable && node.nodeClass !== NodeClass.Object && node.nodeClass !== NodeClass.Method)
+        ) {
+            return handle_error(StatusCodes.BadNodeIdUnknown);
+        }
+
+        if (itemToMonitor.attributeId === AttributeIds.Value && !(node.nodeClass === NodeClass.Variable)) {
+            // AttributeIds.Value is only valid for monitoring value of UAVariables.
+            return handle_error(StatusCodes.BadAttributeIdInvalid);
+        }
+
+        if (itemToMonitor.attributeId === AttributeIds.INVALID) {
+            return handle_error(StatusCodes.BadAttributeIdInvalid);
+        }
+
+        if (!itemToMonitor.indexRange.isValid()) {
+            return handle_error(StatusCodes.BadIndexRangeInvalid);
+        }
+
+        // check dataEncoding applies only on Values
+        if (itemToMonitor.dataEncoding.name && itemToMonitor.attributeId !== AttributeIds.Value) {
+            return handle_error(StatusCodes.BadDataEncodingInvalid);
+        }
+
+        // check dataEncoding
+        if (!isValidDataEncoding(itemToMonitor.dataEncoding)) {
+            return handle_error(StatusCodes.BadDataEncodingUnsupported);
+        }
+
+        // The session's read permission is not checked here. It is enforced by the MonitoredItem
+        // on every notification, on both the sampled and the exception-based path (see
+        // MonitoredItem#_on_value_changed_exception_based and _on_sampling_timer). A session's
+        // roles can change while the item is live, so the check must run per delivery, not once
+        // at creation. Refusing creation here would also deny an item whose session gains access
+        // later.
+
+        // filter
+        const requestedParameters = monitoredItemCreateRequest.requestedParameters;
+        const filter = requestedParameters.filter;
+        const statusCodeFilter = validateFilter(filter, itemToMonitor, node, {
+            maxWhereClauseParameters: this.serverCapabilities.maxWhereClauseParameters,
+            maxSelectClauseParameters: this.serverCapabilities.maxSelectClauseParameters
         });
-        notifications.push(dataChangeNotification);
-      }
+        if (statusCodeFilter !== StatusCodes.Good) {
+            return handle_error(statusCodeFilter);
+        }
 
-      // add dataChangeNotification
-      if (eventNotificationListData.length) {
-        const eventNotificationList = new EventNotificationList({
-          events: eventNotificationListData
+        // do we have enough room for new monitored items ?
+        if (this.monitoredItemCount >= this.serverCapabilities.maxMonitoredItemsPerSubscription) {
+            return handle_error(StatusCodes.BadTooManyMonitoredItems);
+        }
+
+        if (this.globalCounter.totalMonitoredItemCount >= this.serverCapabilities.maxMonitoredItems) {
+            return handle_error(StatusCodes.BadTooManyMonitoredItems);
+        }
+
+        const createResult = this._createMonitoredItemStep2(timestampsToReturn, monitoredItemCreateRequest, node, monitoredItemId);
+
+        assert(createResult.statusCode.isGood());
+
+        const monitoredItem = this.getMonitoredItem(createResult.monitoredItemId);
+        // c8 ignore next
+        if (!monitoredItem) {
+            throw new Error("internal error");
+        }
+
+        // TODO: fix old way to set node. !!!!
+        monitoredItem.setNode(node);
+
+        this.emit("monitoredItem", monitoredItem, itemToMonitor);
+
+        return { monitoredItem, monitoredItemCreateRequest, createResult };
+    }
+
+    public async applyOnMonitoredItem(functor: (monitoredItem: MonitoredItem) => Promise<void>): Promise<void> {
+        for (const m of this.monitoredItems.values()) {
+            await functor(m);
+        }
+    }
+
+    public postCreateMonitoredItem(
+        monitoredItem: MonitoredItem,
+        monitoredItemCreateRequest: MonitoredItemCreateRequest,
+        _createResult: MonitoredItemCreateResult
+    ): void {
+        this._createMonitoredItemStep3(monitoredItem, monitoredItemCreateRequest);
+    }
+
+    public async createMonitoredItem(
+        nodeFinder: INodeFinder,
+        timestampsToReturn: TimestampsToReturn,
+        monitoredItemCreateRequest: MonitoredItemCreateRequest
+    ): Promise<MonitoredItemCreateResult> {
+        const { monitoredItem, createResult } = this.preCreateMonitoredItem(
+            nodeFinder,
+            timestampsToReturn,
+            monitoredItemCreateRequest
+        );
+        if (!monitoredItem) {
+            return createResult;
+        }
+        this.postCreateMonitoredItem(monitoredItem, monitoredItemCreateRequest, createResult);
+        return createResult;
+    }
+    /**
+     * get a monitoredItem by Id.
+     * @param monitoredItemId : the id of the monitored item to get.
+     * @return the monitored item matching monitoredItemId
+     */
+    public getMonitoredItem(monitoredItemId: number): MonitoredItem | null {
+        return this.monitoredItems.get(monitoredItemId) || null;
+    }
+
+    /**
+     * remove a monitored Item from the subscription.
+     * @param monitoredItemId : the id of the monitored item to get.
+     */
+    public removeMonitoredItem(monitoredItemId: number): StatusCode {
+        const status = this._detachMonitoredItem(monitoredItemId);
+        if (status === StatusCodes.Good) {
+            this._removePendingNotificationsFor(monitoredItemId);
+        }
+        return status;
+    }
+
+    /**
+     * Remove several monitored items, purging their queued notifications in one
+     * pass over the pending list.
+     *
+     * Removing them one at a time costs O(items x pending): dropping the queued
+     * notifications of a single item walks the whole pending list, and that walk
+     * is repeated for every item. The product is what hurts - it is invisible at
+     * ten items and grows quadratically when a subscription with a large backlog
+     * is torn down wholesale, which is exactly what DeleteMonitoredItems and
+     * terminate() do.
+     */
+    public removeMonitoredItems(monitoredItemIds: number[]): StatusCode[] {
+        const statuses = monitoredItemIds.map((id) => this._detachMonitoredItem(id));
+        const removed = new Set(monitoredItemIds.filter((_id, i) => statuses[i] === StatusCodes.Good));
+        if (removed.size) {
+            const n = this._pending_notifications.filterOut(
+                (e) => e.monitoredItemId !== undefined && removed.has(e.monitoredItemId)
+            );
+            // c8 ignore next
+            doDebug && debugLog(`Removed ${n} notifications for ${removed.size} monitored items`);
+        }
+        return statuses;
+    }
+
+    /** everything removing a monitored item does, except purging its pending notifications */
+    private _detachMonitoredItem(monitoredItemId: number): StatusCode {
+        // c8 ignore next
+        doDebug && debugLog("Removing monitoredIem ", monitoredItemId);
+        const monitoredItem = this.monitoredItems.get(monitoredItemId);
+        if (!monitoredItem) {
+            return StatusCodes.BadMonitoredItemIdInvalid;
+        }
+
+        monitoredItem.terminate();
+
+        /**
+         *
+         * notify that a monitored item has been removed from the subscription
+         * @param monitoredItem {MonitoredItem}
+         */
+        this.emit("removeMonitoredItem", monitoredItem);
+
+        monitoredItem.dispose();
+
+        this.monitoredItems.delete(monitoredItemId);
+        this.globalCounter.totalMonitoredItemCount -= 1;
+
+        return StatusCodes.Good;
+    }
+
+    /**
+     * rue if monitored Item have uncollected Notifications
+     */
+    public get hasUncollectedMonitoredItemNotifications(): boolean {
+        if (this._hasUncollectedMonitoredItemNotifications) {
+            return true;
+        }
+        for (const monitoredItem of this.monitoredItems.values()) {
+            if (monitoredItem.hasMonitoredItemNotifications) {
+                this._hasUncollectedMonitoredItemNotifications = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public get subscriptionId(): number {
+        return this.id;
+    }
+
+    public getMessageForSequenceNumber(sequenceNumber: number): NotificationMessage | null {
+        const notification_message = this._sent_notification_messages.find((e) => e.sequenceNumber === sequenceNumber);
+        return notification_message || null;
+    }
+
+    /**
+     * returns true if the notification has expired
+     * @param notification
+     */
+    public notificationHasExpired(notification: { start_tick: number }): boolean {
+        assert(Object.hasOwn(notification, "start_tick"));
+        assert(Number.isFinite(notification.start_tick + this.maxKeepAliveCount));
+        return notification.start_tick + this.maxKeepAliveCount < this.publishIntervalCount;
+    }
+
+    /**
+     *  returns in an array the sequence numbers of the notifications that have been sent
+     *  and that haven't been acknowledged yet.
+     */
+    /** what another thread of the server needs to carry on this subscription (see continueFrom) */
+    public exportTransferState(): SubscriptionTransferState {
+        return {
+            id: this.id,
+            publishingInterval: this.publishingInterval,
+            lifeTimeCount: this.lifeTimeCount,
+            maxKeepAliveCount: this.maxKeepAliveCount,
+            maxNotificationsPerPublish: this.maxNotificationsPerPublish,
+            publishingEnabled: this.publishingEnabled,
+            priority: this.priority,
+            nextSequenceNumber: this._sequence_number_generator.future(),
+            sentNotificationMessages: [...this._sent_notification_messages],
+            monitoredItems: [...this.monitoredItems.values()].map((monitoredItem) => ({
+                monitoredItemId: monitoredItem.monitoredItemId,
+                timestampsToReturn: monitoredItem.timestampsToReturn,
+                linkedItems: [...monitoredItem.linkedItems],
+                request: new MonitoredItemCreateRequest({
+                    itemToMonitor: monitoredItem.itemToMonitor,
+                    monitoringMode: monitoredItem.monitoringMode,
+                    requestedParameters: {
+                        clientHandle: monitoredItem.clientHandle,
+                        samplingInterval: monitoredItem.samplingInterval,
+                        filter: monitoredItem.filter,
+                        queueSize: monitoredItem.queueSize,
+                        discardOldest: monitoredItem.discardOldest
+                    }
+                })
+            }))
+        };
+    }
+
+    /**
+     * the data changes and events of its items not published yet, taken out of this subscription: they go
+     * with it to the session of another thread, whose first Publish carries them (requeueNotifications)
+     */
+    public takePendingNotifications(): { monitoredItemId: number; notification: QueueItem }[] {
+        this._harvestMonitoredItems();
+        const ofAnItem = (e: InternalNotification) =>
+            e.monitoredItemId !== undefined && !(e.notification instanceof StatusChangeNotification);
+        const taken: { monitoredItemId: number; notification: QueueItem }[] = [];
+        for (const e of this._pending_notifications.values()) {
+            if (ofAnItem(e))
+                taken.push({ monitoredItemId: e.monitoredItemId as number, notification: e.notification as QueueItem });
+        }
+        this._pending_notifications.filterOut(ofAnItem);
+        return taken;
+    }
+
+    /** the notifications another thread took (takePendingNotifications), to publish as if collected here */
+    public requeueNotifications(notifications: { monitoredItemId: number; notification: QueueItem }[]): void {
+        for (const { monitoredItemId, notification } of notifications) this._addNotificationMessage(notification, monitoredItemId);
+    }
+
+    /** a subscription carried over from another thread: its sequence numbers and the messages not acknowledged */
+    public continueFrom(nextSequenceNumber: number, sentNotificationMessages: NotificationMessage[]): void {
+        this._sequence_number_generator._set(nextSequenceNumber);
+        this._sent_notification_messages = [...sentNotificationMessages];
+    }
+
+    public getAvailableSequenceNumbers(): number[] {
+        const availableSequenceNumbers = _getSequenceNumbers(this._sent_notification_messages);
+        return availableSequenceNumbers;
+    }
+
+    /**
+     * acknowledges a notification identified by its sequence number
+     */
+    public acknowledgeNotification(sequenceNumber: number): StatusCode {
+        // c8 ignore next
+        doDebug && debugLog("acknowledgeNotification ", sequenceNumber);
+        let foundIndex = -1;
+        this._sent_notification_messages.forEach((e: NotificationMessage, index: number) => {
+            if (e.sequenceNumber === sequenceNumber) {
+                foundIndex = index;
+            }
         });
 
-        notifications.push(eventNotificationList);
-      }
-
-      assert(notifications.length === 1 || notifications.length === 2);
-      notificationsMessage.push(notifications);
+        if (foundIndex === -1) {
+            // c8 ignore next
+            if (doDebug) {
+                debugLog(chalk.red("acknowledging sequence FAILED !!! "), chalk.cyan(sequenceNumber.toString()));
+            }
+            return StatusCodes.BadSequenceNumberUnknown;
+        } else {
+            // c8 ignore next
+            if (doDebug) {
+                debugLog(chalk.yellow("acknowledging sequence "), chalk.cyan(sequenceNumber.toString()));
+            }
+            this._sent_notification_messages.splice(foundIndex, 1);
+            this.subscriptionDiagnostics.unacknowledgedMessageCount--;
+            return StatusCodes.Good;
+        }
     }
 
-    assert(notificationsMessage instanceof Array);
-    return notificationsMessage;
-  }
-
-  private _harvestMonitoredItems() {
-
-    // Only collect data change notification for the time being
-    const notificationData = this._collectNotificationData();
-    assert(notificationData instanceof Array);
-
-    // istanbul ignore next
-    if (doDebug) {
-      debugLog("Subscription#_harvestMonitoredItems =>", notificationData.length);
+    /**
+     * getMonitoredItems is used to get information about monitored items of a subscription.Its intended
+     * use is defined in Part 4. This method is the implementation of the Standard OPCUA GetMonitoredItems Method.
+     * from spec:
+     * This method can be used to get the  list of monitored items in a subscription if CreateMonitoredItems
+     * failed due to a network interruption and the client does not know if the creation succeeded in the server.
+     *
+     */
+    public getMonitoredItems(): GetMonitoredItemsResult {
+        const monitoredItems = [...this.monitoredItems.keys()];
+        const monitoredItemCount = monitoredItems.length;
+        const result: GetMonitoredItemsResult = {
+            clientHandles: new Uint32Array(monitoredItemCount),
+            serverHandles: new Uint32Array(monitoredItemCount),
+            statusCode: StatusCodes.Good
+        };
+        for (let index = 0; index < monitoredItemCount; index++) {
+            const serverHandle = monitoredItems[index];
+            const monitoredItem = this.getMonitoredItem(serverHandle);
+            // c8 ignore next
+            if (!monitoredItem) {
+                throw new Error("monitoredItem is null");
+            }
+            result.clientHandles[index] = monitoredItem.clientHandle;
+            // TODO:  serverHandle is defined anywhere in the OPCUA Specification 1.02
+            //        I am not sure what shall be reported for serverHandle...
+            //        using monitoredItem.monitoredItemId instead...
+            //        May be a clarification in the OPCUA Spec is required.
+            result.serverHandles[index] = serverHandle;
+        }
+        return result;
     }
-    notificationData.forEach((notificationMessage: any) => {
-      this._addNotificationMessage(notificationMessage);
-    });
-    this._hasMonitoredItemNotifications = false;
 
-  }
+    /**
+     * @private
+     */
+    public async resendInitialValues(): Promise<void> {
+        this._keep_alive_counter = 0;
 
+        try {
+            const promises: Promise<void>[] = [];
+            for (const monitoredItem of this.monitoredItems.values()) {
+                promises.push(
+                    (async () => {
+                        try {
+                            monitoredItem.resendInitialValue();
+                        } catch (err) {
+                            warningLog(
+                                "resendInitialValues:",
+                                monitoredItem.node?.nodeId.toString(),
+                                "error:",
+                                (err as Error).message
+                            );
+                        }
+                    })()
+                );
+            }
+            await Promise.all(promises);
+        } catch (err) {
+            warningLog("resendInitialValues: error:", (err as Error).message);
+        }
+        // make sure data will be sent immediately
+        this._keep_alive_counter = this.maxKeepAliveCount - 1;
+        this.state = SubscriptionState.NORMAL;
+        this._harvestMonitoredItems();
+    }
+
+    /**
+     * @private
+     */
+    public notifyTransfer(): void {
+        // OPCUA UA Spec 1.0.3 : part 3 - page 82 - 5.13.7 TransferSubscriptions:
+        // If the Server transfers the Subscription to the new Session, the Server shall issue
+        // a StatusChangeNotification notificationMessage with the status code
+        // Good_SubscriptionTransferred to the old Session.
+        // c8 ignore next
+        doDebug && debugLog(chalk.red(" Subscription => Notifying Transfer                                  "));
+
+        const notificationData = new StatusChangeNotification({
+            status: StatusCodes.GoodSubscriptionTransferred
+        });
+
+        if (this.publishEngine?.pendingPublishRequestCount) {
+            // the GoodSubscriptionTransferred can be processed immediately
+            this._addNotificationMessage(notificationData);
+            // c8 ignore next
+            doDebug && debugLog(chalk.red("pendingPublishRequestCount"), this.publishEngine?.pendingPublishRequestCount);
+            this._publish_pending_notifications();
+        } else {
+            // c8 ignore next
+            doDebug && debugLog(chalk.red("Cannot  send GoodSubscriptionTransferred => lets create a TransferredSubscription "));
+            // c8 ignore next
+            if (!this.publishEngine) {
+                warningLog("notifyTransfer: publishEngine is not available");
+                return;
+            }
+            const ts = new TransferredSubscription({
+                generator: this._sequence_number_generator,
+                id: this.id,
+                publishEngine: this.publishEngine
+            });
+
+            ts._pending_notification = notificationData;
+            (this.publishEngine as unknown as { _closed_subscriptions: TransferredSubscription[] })._closed_subscriptions.push(ts);
+        }
+    }
+
+    /**
+     *
+     *  the server invokes the resetLifeTimeAndKeepAliveCounters method of the subscription
+     *  when the server  has send a Publish Response, so that the subscription
+     *  can reset its life time counter.
+     *
+     * @private
+     */
+    public resetLifeTimeAndKeepAliveCounters(): void {
+        this.resetLifeTimeCounter();
+        this.resetKeepAliveCounter();
+    }
+
+    private _updateCounters(notificationMessage: NotificationMessage) {
+        for (const notificationData of notificationMessage.notificationData || []) {
+            // update diagnostics
+            if (notificationData instanceof DataChangeNotification) {
+                const nbNotifs = notificationData.monitoredItems?.length || 0;
+                this.subscriptionDiagnostics.dataChangeNotificationsCount += nbNotifs;
+                this.subscriptionDiagnostics.notificationsCount += nbNotifs;
+            } else if (notificationData instanceof EventNotificationList) {
+                const nbNotifs = notificationData.events?.length || 0;
+                this.subscriptionDiagnostics.eventNotificationsCount += nbNotifs;
+                this.subscriptionDiagnostics.notificationsCount += nbNotifs;
+            } else {
+                assert(notificationData instanceof StatusChangeNotification);
+                // TODO
+                // note: :there is no way to count StatusChangeNotifications in opcua yet.
+            }
+        }
+    }
+    /**
+     *  _publish_pending_notifications send a "notification" event:
+     *
+     * @private
+     *
+     * precondition
+     *     - pendingPublishRequestCount > 0
+     */
+    public _publish_pending_notifications(): void {
+        const publishEngine = this.publishEngine;
+        // c8 ignore next
+        if (!publishEngine) {
+            throw new Error("publishEngine is null");
+        }
+        const subscriptionId = this.id;
+        // preconditions
+        assert(publishEngine.pendingPublishRequestCount > 0);
+        assert(this.hasPendingNotifications);
+
+        const notificationMessage = this._popNotificationToSend();
+        if (notificationMessage.notificationData?.length === 0) {
+            return; // nothing to do
+        }
+        const moreNotifications = this.hasPendingNotifications;
+
+        this.emit("notification", notificationMessage);
+        // Update counters ....
+        this._updateCounters(notificationMessage);
+
+        assert(Object.hasOwn(notificationMessage, "sequenceNumber"));
+        assert(Object.hasOwn(notificationMessage, "notificationData"));
+        // update diagnostics
+        this.subscriptionDiagnostics.publishRequestCount += 1;
+
+        const response = new PublishResponse({
+            moreNotifications,
+            notificationMessage: {
+                notificationData: notificationMessage.notificationData,
+                sequenceNumber: this._get_next_sequence_number()
+            },
+            subscriptionId
+        });
+
+        this._sent_notification_messages.push(response.notificationMessage);
+
+        // get available sequence number;
+        const availableSequenceNumbers = this.getAvailableSequenceNumbers();
+        assert(
+            !response.notificationMessage ||
+                availableSequenceNumbers[availableSequenceNumbers.length - 1] === response.notificationMessage.sequenceNumber
+        );
+        response.availableSequenceNumbers = availableSequenceNumbers;
+
+        publishEngine._send_response(this, response);
+
+        this.messageSent = true;
+
+        this.subscriptionDiagnostics.unacknowledgedMessageCount++;
+
+        this.resetLifeTimeAndKeepAliveCounters();
+
+        // c8 ignore next
+        if (doDebug) {
+            debugLog(
+                "Subscription sending a notificationMessage subscriptionId=",
+                subscriptionId,
+                "sequenceNumber = ",
+                notificationMessage.sequenceNumber.toString(),
+                notificationMessage.notificationData?.map((x) => x?.constructor.name).join(" ")
+            );
+            // debugLog(notificationMessage.toString());
+        }
+
+        if (this.state !== SubscriptionState.CLOSED) {
+            assert((notificationMessage.notificationData?.length || 0) > 0, "We are not expecting a keep-alive message here");
+            this.state = SubscriptionState.NORMAL;
+            // c8 ignore next
+            doDebug && debugLog(`subscription ${this.id}${chalk.bgYellow(" set to NORMAL")}`);
+        }
+    }
+
+    public process_subscription(): void {
+        assert((this.publishEngine?.pendingPublishRequestCount || 0) > 0);
+
+        if (!this.publishingEnabled) {
+            // no publish to do, except keep alive
+            // c8 ignore next
+            doDebug && debugLog("    -> no publish to do, except keep alive");
+            this._process_keepAlive();
+            return;
+        }
+
+        if (!this.hasPendingNotifications && this.hasUncollectedMonitoredItemNotifications) {
+            // collect notification from monitored items
+            this._harvestMonitoredItems();
+        }
+
+        // let process them first
+        if (this.hasPendingNotifications) {
+            this._publish_pending_notifications();
+
+            if (this.state !== SubscriptionState.CLOSED) {
+                // c8 ignore next
+                if (doDebug) {
+                    debugLog("    -> message sent => flush what is left with the next queued PublishRequest");
+                }
+                setImmediate(this._flushRemainingNotifications.bind(this));
+            }
+        } else {
+            this._process_keepAlive();
+        }
+    }
+
+    /**
+     * Whatever did not fit in the message just sent (moreNotifications), or was queued by a
+     * monitored item meanwhile, goes out with the next queued PublishRequest without waiting for
+     * the publishing timer; with no request queued the subscription is LATE so the next Publish
+     * serves it on arrival.
+     *
+     * This used to be a full _tick, which also counted a publishing cycle: publishIntervalCount,
+     * the lifetime counter and, through _process_keepAlive, the keep-alive counter all moved on,
+     * so a subscription owed its keep-alive one cycle after a data message instead of
+     * maxKeepAliveCount cycles (Part 4 5.13.1.1: the keep-alive counter counts *publishing
+     * cycles* with nothing to report). With maxKeepAliveCount at its minimum of 2, that
+     * keep-alive fell due at the very next tick and, being overdue, was served ahead of a
+     * sibling that had never been served (FEAT-37: CTT Subscription Publish Min 05 003
+     * queues exactly five Publish requests for five subscriptions, so the stolen request left
+     * one subscription without any response).
+     */
+    private _flushRemainingNotifications() {
+        if (this.state === SubscriptionState.CLOSED || !this.publishingEnabled) {
+            return;
+        }
+        if (!this.hasPendingNotifications && !this.hasUncollectedMonitoredItemNotifications) {
+            return;
+        }
+        const publishEngine = this.publishEngine;
+        if (!publishEngine) {
+            return;
+        }
+        if (publishEngine.pendingPublishRequestCount === 0) {
+            // c8 ignore next
+            doDebug && debugLog(`subscription ${this.id} set to LATE: more notifications, no PublishRequest`);
+            this.state = SubscriptionState.LATE;
+            return;
+        }
+        if (publishEngine.feedReadySubscriptions) {
+            publishEngine.feedReadySubscriptions();
+        } else {
+            this.process_subscription();
+        }
+    }
+
+    private _process_keepAlive() {
+        // Still inside the very first publishing cycle: nothing may be sent yet.
+        // OPC 10000-4 5.13.1 has the first Message go out "at the end of the first
+        // publishing cycle", and _start_timer pre-loads the keep-alive counter to
+        // maxKeepAliveCount - 1 precisely so the first *tick* emits it. A
+        // PublishRequest arriving before that tick reaches here through
+        // process_subscription and would find the counter already at its limit,
+        // sending the keep-alive immediately: CTT Subscription Basic 018 asks for
+        // the first Publish response after 1 RevisedPublishingInterval and measured
+        // 19 ms. publishIntervalCount is 0 until the first tick.
+        if (this.publishIntervalCount === 0) {
+            return;
+        }
+        this.increaseKeepAliveCounter();
+
+        if (this.keepAliveCounterHasExpired) {
+            // c8 ignore next
+            doDebug && debugLog(`     ->  _process_keepAlive => keepAliveCounterHasExpired`);
+            if (this._sendKeepAliveResponse()) {
+                this.resetLifeTimeAndKeepAliveCounters();
+            } else {
+                // c8 ignore next
+                doDebug &&
+                    debugLog(
+                        "     -> subscription.state === LATE , " +
+                            "because keepAlive Response cannot be send due to lack of PublishRequest"
+                    );
+                if (this.messageSent || this.keepAliveCounterHasExpired) {
+                    this.state = SubscriptionState.LATE;
+                }
+            }
+        }
+    }
+
+    private _stop_timer() {
+        if (this.timerId) {
+            // c8 ignore next
+            doDebug && debugLog(chalk.bgWhite.blue("Subscription#_stop_timer subscriptionId="), this.id);
+            clearInterval(this.timerId);
+            this.timerId = null;
+        }
+    }
+
+    private _start_timer({ firstTime }: { firstTime: boolean }) {
+        // c8 ignore next
+        doDebug &&
+            debugLog(
+                chalk.bgWhite.blue("Subscription#_start_timer  subscriptionId="),
+                this.id,
+                " publishingInterval = ",
+                this.publishingInterval
+            );
+
+        assert(this.timerId === null);
+        // from the spec:
+        // When a Subscription is created, the first Message is sent at the end of the first publishing cycle to
+        // inform the Client that the Subscription is operational. A NotificationMessage is sent if there are
+        // Notifications ready to be reported. If there are none, a keep-alive Message is sent instead that
+        // contains a sequence number of 1, indicating that the first NotificationMessage has not yet been sent.
+        // This is the only time a keep-alive Message is sent without waiting for the maximum keep-alive count
+        // to be reached, as specified in (f) above.
+
+        // make sure that a keep-alive Message will be send at the end of the first publishing cycle
+        // if there are no Notifications ready.
+        this._keep_alive_counter = this.maxKeepAliveCount - 1;
+
+        if (firstTime) {
+            assert(this.messageSent === false);
+            assert(this.state === SubscriptionState.CREATING);
+        }
+
+        assert(this.publishingInterval >= Subscription.minimumPublishingInterval);
+        this.timerId = setInterval(this._tick.bind(this), this.publishingInterval);
+    }
+
+    private _get_future_sequence_number(): number {
+        return this._sequence_number_generator ? this._sequence_number_generator.future() : 0;
+    }
+    public get futureSequenceNumber(): number {
+        return this._get_future_sequence_number();
+    }
+    // counter
+    private _get_next_sequence_number(): number {
+        return this._sequence_number_generator ? this._sequence_number_generator.next() : 0;
+    }
+    public get nextSequenceNumber(): number {
+        return this._get_next_sequence_number();
+    }
+
+    /**
+     * @private
+     */
+    private _tick() {
+        // c8 ignore next
+        if (doDebug) {
+            debugLog(`Subscription#_tick id ${this.id} aborted=${this.aborted} state=${SubscriptionState[this.state]}`);
+        }
+        if (this.state === SubscriptionState.CLOSED) {
+            warningLog(`Warning: Subscription#_tick id ${this.id}  called while subscription is CLOSED`);
+            return;
+        }
+
+        this.discardOldSentNotifications();
+
+        // c8 ignore next
+        if (doDebug) {
+            debugLog(
+                `${t(new Date())}  ${this._life_time_counter}/${this.lifeTimeCount}${chalk.cyan("   Subscription#_tick")}`,
+                "  processing subscriptionId=",
+                this.id,
+                "hasUncollectedMonitoredItemNotifications = ",
+                this.hasUncollectedMonitoredItemNotifications,
+                " publishingIntervalCount =",
+                this.publishIntervalCount
+            );
+        }
+
+        // give a chance to the publish engine to cancel timed out publish requests
+        this.publishEngine?._on_tick();
+
+        this.publishIntervalCount += 1;
+
+        if (this.state === SubscriptionState.LATE) {
+            this.increaseLifeTimeCounter();
+        }
+
+        if (this.lifeTimeHasExpired) {
+            /* c8 ignore next */
+            doDebug && debugLog(chalk.red.bold(`Subscription ${this.id} has expired !!!!! => Terminating`));
+
+            /**
+             * notify the subscription owner that the subscription has expired by exceeding its life time.
+             * @event expired
+             *
+             */
+            this.emit("expired");
+
+            // notify new terminated status only when subscription has timeout.
+            doDebug && debugLog("adding StatusChangeNotification notification message for BadTimeout subscription = ", this.id);
+            this._addNotificationMessage(new StatusChangeNotification({ status: StatusCodes.BadTimeout }));
+
+            // kill timer and delete monitored items and transfer pending notification messages
+            this.terminate();
+
+            return;
+        }
+
+        const publishEngine = this.publishEngine;
+        if (!publishEngine) {
+            throw new Error("publishEngine is null");
+        }
+
+        // c8 ignore next
+        doDebug && debugLog("Subscription#_tick  self._pending_notifications= ", this._pending_notifications.size);
+
+        // A disabled subscription holds its notifications back (SetPublishingMode, Part 4 5.13.4)
+        // and owes nothing but its keep-alive, under its own id: what its monitored items have
+        // queued must neither make it LATE nor send it to the engine's arbitration, which only
+        // serves subscriptions that may publish (FEAT-35: CTT Subscription Basic 014/044/046/048).
+        const hasNotificationsToPublish =
+            this.publishingEnabled && (this.hasPendingNotifications || this.hasUncollectedMonitoredItemNotifications);
+
+        if (publishEngine.pendingPublishRequestCount === 0 && hasNotificationsToPublish) {
+            // c8 ignore next
+            doDebug &&
+                debugLog(
+                    "subscription set to LATE  hasPendingNotifications = ",
+                    this.hasPendingNotifications,
+                    " hasUncollectedMonitoredItemNotifications =",
+                    this.hasUncollectedMonitoredItemNotifications
+                );
+
+            this.state = SubscriptionState.LATE;
+            return;
+        }
+
+        if (publishEngine.pendingPublishRequestCount > 0) {
+            if (hasNotificationsToPublish) {
+                // A sibling subscription on this same session may deserve the next queued
+                // PublishRequest more (higher priority, or waited longer at equal priority).
+                // Let the engine arbitrate across every ready subscription it owns instead of
+                // this one serving itself just because its own timer fired first (FEAT-24).
+                // Fall back to self-service for lightweight engine doubles (unit tests) that
+                // only ever attach a single subscription.
+                if (publishEngine.feedReadySubscriptions) {
+                    publishEngine.feedReadySubscriptions();
+                } else {
+                    this.process_subscription();
+                }
+            } else {
+                this._process_keepAlive();
+            }
+        } else {
+            if (this.state !== SubscriptionState.LATE) {
+                this._process_keepAlive();
+            } else {
+                this.resetKeepAliveCounter();
+            }
+        }
+    }
+
+    /**
+     * @private
+     */
+    private _sendKeepAliveResponse(): boolean {
+        const future_sequence_number = this._get_future_sequence_number();
+
+        if (this.publishEngine?.send_keep_alive_response(this.id, future_sequence_number)) {
+            this.messageSent = true;
+            // c8 ignore next
+            doDebug &&
+                debugLog(
+                    `    -> Subscription#_sendKeepAliveResponse subscriptionId ${this.id} future_sequence_number ${future_sequence_number}`
+                );
+            /**
+             * notify the subscription owner that a keepalive message has to be sent.
+             * @event keepalive
+             *
+             */
+            this.emit("keepalive", future_sequence_number);
+            this.state = SubscriptionState.KEEPALIVE;
+
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Reset the Lifetime Counter Variable to the value specified for the lifetime of a Subscription in
+     * the CreateSubscription Service( 5.13.2).
+     * @private
+     */
+    private resetKeepAliveCounter(): void {
+        this._keep_alive_counter = 0;
+
+        // c8 ignore next
+        doDebug &&
+            debugLog(
+                "     -> subscriptionId",
+                this.id,
+                " Resetting keepAliveCounter = ",
+                this._keep_alive_counter,
+                this.maxKeepAliveCount
+            );
+    }
+
+    /**
+     * @private
+     */
+    private increaseKeepAliveCounter() {
+        this._keep_alive_counter += 1;
+
+        // c8 ignore next
+        doDebug &&
+            debugLog(
+                "     -> subscriptionId",
+                this.id,
+                " Increasing keepAliveCounter = ",
+                this._keep_alive_counter,
+                this.maxKeepAliveCount
+            );
+    }
+
+    /**
+     * @private
+     */
+    private _addNotificationMessage(notificationData: QueueItem | StatusChangeNotification, monitoredItemId?: number) {
+        // c8 ignore next
+        doDebug && debugLog(chalk.yellow("Subscription#_addNotificationMessage"), notificationData.toString());
+
+        const { notification, size } = this._degradeIfUndeliverable(notificationData);
+        this._pending_notifications.push({
+            monitoredItemId,
+            notification,
+            size,
+            publishTime: new Date(),
+            start_tick: this.publishIntervalCount
+        });
+    }
+
+    /**
+     * A value larger than the whole message budget can never reach this client:
+     * it will not fit even alone in a message. Sending it anyway makes the
+     * transport tear the channel down, taking every other subscription on that
+     * channel with it, and dropping it silently leaves the client waiting for a
+     * value that will never come.
+     *
+     * So the notification is kept and only its payload is replaced: same
+     * clientHandle, same timestamps, a status of BadResponseTooLarge - "the
+     * response message size exceeds limits set by the client or server", which
+     * is exactly what happened - and no value. The client learns which item
+     * failed, the subscription lives, and the item recovers by itself when its
+     * value next fits, the status change being a change like any other.
+     */
+    private _degradeIfUndeliverable(notificationData: QueueItem | StatusChangeNotification): {
+        notification: QueueItem | StatusChangeNotification;
+        size: number | undefined;
+    } {
+        const budget = this.maxNotificationMessageSize;
+        if (!budget || !(notificationData instanceof MonitoredItemNotification)) {
+            return { notification: notificationData, size: undefined };
+        }
+        // Measured once, here, and carried on the queue entry: binaryStoreSize
+        // walks the whole structure, and the batching loop needs the same number
+        // later. Cheap per notification - a traversal, no copying - but it is the
+        // hottest path in the server and there is no reason to walk twice.
+        const size = notificationData.binaryStoreSize();
+        // compared against an empty message, not the remaining room: a value that
+        // would have fitted alone must be deferred, never degraded
+        if (size + notificationMessageOverhead <= budget) {
+            return { notification: notificationData, size };
+        }
+        warningLog(
+            `a value for monitored item clientHandle=${notificationData.clientHandle} is ${size} bytes,` +
+                ` more than this channel can carry (${budget}); reporting BadResponseTooLarge instead`
+        );
+        const degraded = new MonitoredItemNotification({
+            clientHandle: notificationData.clientHandle,
+            value: new DataValue({
+                statusCode: StatusCodes.BadResponseTooLarge,
+                sourceTimestamp: notificationData.value?.sourceTimestamp,
+                serverTimestamp: notificationData.value?.serverTimestamp
+            })
+        });
+        return { notification: degraded, size: degraded.binaryStoreSize() };
+    }
+
+    /**
+     * @internal
+     * @param monitoredItemId
+     */
+    private _removePendingNotificationsFor(monitoredItemId: number) {
+        const nbRemovedNotification = this._pending_notifications.filterOut((e) => e.monitoredItemId === monitoredItemId);
+        doDebug && debugLog(`Removed ${nbRemovedNotification} notifications`);
+    }
+    /**
+     * Extract the next Notification that is ready to be sent to the client.
+     * @return the Notification to send._pending_notifications
+     */
+    private _popNotificationToSend(): NotificationMessage {
+        assert(this._pending_notifications.size > 0);
+
+        const notificationMessage = new NotificationMessage({
+            sequenceNumber: 0xffffffff,
+            notificationData: [],
+            publishTime: new Date()
+        }); //
+
+        const dataChangeNotifications: DataChangeNotification = new DataChangeNotification({
+            monitoredItems: []
+        });
+        const eventNotificationList: EventNotificationList = new EventNotificationList({
+            events: []
+        });
+
+        let statusChangeNotification: StatusChangeNotification | undefined;
+
+        let i = 0;
+        let hasEventFieldList = 0;
+        let hasMonitoredItemNotification = 0;
+        const m = this.maxNotificationsPerPublish;
+        // The count is only half the bound. What a client actually refuses is a
+        // message longer than the maxMessageSize it declared in its Hello, and a
+        // count cannot express that: a Boolean notification and one carrying a
+        // 64 kB ByteString differ by four orders of magnitude, so no constant is
+        // right for both. Bytes are therefore accumulated too, and whichever
+        // limit is reached first ends the message; the rest stays queued and
+        // goes out on the next publish under moreNotifications.
+        const budget = this.maxNotificationMessageSize;
+        let bytes = budget ? notificationMessageOverhead : 0;
+        while (i < m && this._pending_notifications.size > 0) {
+            if (hasEventFieldList || hasMonitoredItemNotification) {
+                const notification1 = this._pending_notifications.first()?.notification;
+                if (notification1 instanceof StatusChangeNotification) {
+                    break;
+                }
+            }
+            if (budget) {
+                const entry = this._pending_notifications.first();
+                const next = entry?.notification;
+                // measured at capture; recomputed only if this entry predates a
+                // channel that announced a limit, when none was measured then
+                const size = next && !(next instanceof StatusChangeNotification) ? (entry?.size ?? next.binaryStoreSize()) : 0;
+                // `i > 0` is what guarantees progress: the first notification of
+                // a message is always taken, however heavy it is, so an outsized
+                // value leads the next message rather than being deferred for
+                // ever behind an empty one.
+                if (i > 0 && bytes + size > budget) {
+                    break;
+                }
+                bytes += size;
+            }
+            const notification = this._pending_notifications.shift()?.notification;
+            if (notification instanceof MonitoredItemNotification) {
+                assert(notification.clientHandle !== 4294967295);
+                dataChangeNotifications.monitoredItems?.push(notification);
+                hasMonitoredItemNotification = 1;
+            } else if (notification instanceof EventFieldList) {
+                eventNotificationList.events?.push(notification);
+                hasEventFieldList = 1;
+            } else if (notification instanceof StatusChangeNotification) {
+                // to do
+                statusChangeNotification = notification;
+                break;
+            }
+            i += 1;
+        }
+
+        if (dataChangeNotifications.monitoredItems?.length) {
+            notificationMessage.notificationData?.push(dataChangeNotifications);
+        }
+        if (eventNotificationList.events?.length) {
+            notificationMessage.notificationData?.push(eventNotificationList);
+        }
+        if (statusChangeNotification) {
+            notificationMessage.notificationData?.push(statusChangeNotification);
+        }
+        return notificationMessage;
+    }
+
+    /**
+     * discardOldSentNotification find all sent notification message that have expired keep-alive
+     * and destroy them.
+     * @private
+     *
+     * Subscriptions maintain a retransmission queue of sent  NotificationMessages.
+     * NotificationMessages are retained in this queue until they are acknowledged or until they have
+     * been in the queue for a minimum of one keep-alive interval.
+     *
+     */
+    private discardOldSentNotifications() {
+        // Sessions maintain a retransmission queue of sent NotificationMessages. NotificationMessages
+        // are retained in this queue until they are acknowledged. The Session shall maintain a
+        // retransmission queue size of at least two times the number of Publish requests per Session the
+        // Server supports.  Clients are required to acknowledge NotificationMessages as they are received. In the
+        // case of a retransmission queue overflow, the oldest sent NotificationMessage gets deleted. If a
+        // Subscription is transferred to another Session, the queued NotificationMessages for this
+        // Subscription are moved from the old to the new Session.
+        if (maxNotificationMessagesInQueue < this._sent_notification_messages.length) {
+            doDebug && debugLog("discardOldSentNotifications = ", this._sent_notification_messages.length);
+            this._sent_notification_messages.splice(0, this._sent_notification_messages.length - maxNotificationMessagesInQueue);
+        }
+    }
+
+    /**
+     * @param timestampsToReturn
+     * @param monitoredItemCreateRequest
+     * @param node
+     * @private
+     */
+    private _createMonitoredItemStep2(
+        timestampsToReturn: TimestampsToReturn,
+        monitoredItemCreateRequest: MonitoredItemCreateRequest,
+        node: BaseNode,
+        givenMonitoredItemId?: number
+    ): MonitoredItemCreateResult {
+        // note : most of the parameter inconsistencies shall have been handled by the caller
+        // any error here will raise an assert here
+
+        assert(monitoredItemCreateRequest instanceof MonitoredItemCreateRequest);
+        const itemToMonitor = monitoredItemCreateRequest.itemToMonitor;
+
+        // xx check if attribute Id invalid (we only support Value or EventNotifier )
+        // xx assert(itemToMonitor.attributeId !== AttributeIds.INVALID);
+
+        this.monitoredItemIdCounter += 1;
+
+        const monitoredItemId = givenMonitoredItemId ?? this.#allocateMonitoredItemId();
+
+        const requestedParameters = monitoredItemCreateRequest.requestedParameters;
+
+        // adjust requestedParameters.samplingInterval
+        requestedParameters.samplingInterval = this.adjustSamplingInterval(requestedParameters.samplingInterval, node);
+
+        // reincorporate monitoredItemId and itemToMonitor into the requestedParameters
+        const options = requestedParameters as unknown as MonitoredItemOptions;
+
+        options.monitoredItemId = monitoredItemId;
+        options.itemToMonitor = itemToMonitor;
+        options.minSupportedSampleRate = this.serverCapabilities.minSupportedSampleRate;
+
+        const monitoredItem = new MonitoredItem(options);
+        monitoredItem.timestampsToReturn = timestampsToReturn;
+        monitoredItem.$subscription = this;
+
+        assert(monitoredItem.monitoredItemId === monitoredItemId);
+
+        this.monitoredItems.set(monitoredItemId, monitoredItem);
+        this.globalCounter.totalMonitoredItemCount += 1;
+
+        assert(monitoredItem.clientHandle !== 4294967295);
+
+        const filterResult = _process_filter(node, requestedParameters.filter);
+
+        const monitoredItemCreateResult = new MonitoredItemCreateResult({
+            filterResult,
+            monitoredItemId,
+            revisedQueueSize: monitoredItem.queueSize,
+            revisedSamplingInterval: monitoredItem.samplingInterval,
+            statusCode: StatusCodes.Good
+        });
+
+        // this.emit("monitoredItem", monitoredItem, itemToMonitor);
+        return monitoredItemCreateResult;
+    }
+
+    /**
+     *
+     * @param monitoredItem
+     * @param monitoredItemCreateRequest
+     * @private
+     */
+    public _createMonitoredItemStep3(
+        monitoredItem: MonitoredItem | null,
+        monitoredItemCreateRequest: MonitoredItemCreateRequest
+    ): void {
+        if (!monitoredItem) {
+            return;
+        }
+        assert(monitoredItem.monitoringMode === MonitoringMode.Invalid);
+        assert(typeof monitoredItem.samplingFunc === "function", " expecting a sampling function here");
+        const monitoringMode = monitoredItemCreateRequest.monitoringMode; // Disabled, Sampling, Reporting
+        monitoredItem.setMonitoringMode(monitoringMode);
+    }
+
+    public _harvestMonitoredItems() {
+        for (const monitoredItem of this.monitoredItems.values()) {
+            const notifications_chunks = monitoredItem.extractMonitoredItemNotifications();
+            for (const chunk of notifications_chunks) {
+                this._addNotificationMessage(chunk, monitoredItem.monitoredItemId);
+            }
+        }
+        this._hasUncollectedMonitoredItemNotifications = false;
+    }
 }
 
-/**
- * extract up to maxNotificationsPerPublish notifications
- * @param the full array of monitored items
- * @param maxNotificationsPerPublish  the maximum number of notification to extract
- * @return an extract of array of monitored item matching at most maxNotificationsPerPublish
- * @private
- */
-function extract_notifications_chunk(
-  monitoredItems: MonitoredItem[],
-  maxNotificationsPerPublish: number
-): MonitoredItem[] {
-
-  let n = maxNotificationsPerPublish === 0 ?
-    monitoredItems.length :
-    Math.min(monitoredItems.length, maxNotificationsPerPublish);
-
-  const chunk_monitoredItems: MonitoredItem[] = [];
-  while (n) {
-    chunk_monitoredItems.push(monitoredItems.shift() as MonitoredItem);
-    n--;
-  }
-  return chunk_monitoredItems;
-}
-
-function add_all_in(notifications: any, allNotifications: any[]): void {
-  for (const n of notifications) {
-    allNotifications.push(n);
-  }
-}
-
-function filter_instanceof(Class: any, e: any): boolean {
-  return (e instanceof Class);
-}
-
-assert(Subscription.maximumPublishingInterval < 2147483647,
-  "maximumPublishingInterval cannot exceed (2**31-1) ms ");
+assert(Subscription.maximumPublishingInterval < 2147483647, "maximumPublishingInterval cannot exceed (2**31-1) ms ");

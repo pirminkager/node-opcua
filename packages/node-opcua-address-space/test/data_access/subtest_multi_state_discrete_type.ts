@@ -1,95 +1,200 @@
-import * as should from "should";
+import { DataValue, DataValueT } from "node-opcua-data-value";
+import { getCurrentClock } from "node-opcua-date-time";
+import { type CallbackT, type StatusCode, StatusCodes } from "node-opcua-status-code";
+import { DataType, Variant } from "node-opcua-variant";
+import should from "should";
+import sinon from "sinon";
 
-import { DataValue } from "node-opcua-data-value";
-import { StatusCodes } from "node-opcua-status-code";
-import { Variant } from "node-opcua-variant";
-import { DataType } from "node-opcua-variant";
-import { AddressSpace, Namespace, SessionContext, UAMultiStateDiscrete } from "../..";
+import { type AddressSpace, SessionContext, type UAMultiStateDiscreteEx } from "../../dist/api/index.js";
 
-export function subtest_multi_state_discrete_type(maintest: any) {
-
+export function subtest_multi_state_discrete_type(mainTest: { addressSpace: AddressSpace }): void {
     describe("MultiStateDiscreteType", () => {
-
         let addressSpace: AddressSpace;
         before(() => {
-            addressSpace = maintest.addressSpace;
-            should(addressSpace).be.instanceof(AddressSpace);
+            addressSpace = mainTest.addressSpace;
+            // AddressSpace is published as an interface and a factory, with no constructor to
+            // check against, so this asserts that there is one rather than which class it is
+            should.exist(addressSpace);
         });
 
         it("MultiStateDiscreteType should not be abstract", () => {
-
             const multiStateDiscreteType = addressSpace.findVariableType("MultiStateDiscreteType")!;
             multiStateDiscreteType.isAbstract.should.eql(false);
-
         });
 
         it("should add a MultiStateDiscreteType variable", () => {
-
             const namespace = addressSpace.getOwnNamespace();
 
             const objectsFolder = addressSpace.findNode("ObjectsFolder")!;
             objectsFolder.browseName.toString().should.eql("Objects");
 
-            const prop = namespace.addMultiStateDiscrete({
+            const multiStateDiscreteVariable = namespace.addMultiStateDiscrete<number, DataType.UInt32>({
                 browseName: "MyMultiStateVariable",
                 enumStrings: ["Red", "Orange", "Green"],
                 organizedBy: objectsFolder,
                 value: 1 // Orange
             });
-            prop.browseName.toString().should.eql("1:MyMultiStateVariable");
+            multiStateDiscreteVariable.browseName.toString().should.eql("1:MyMultiStateVariable");
 
-            prop.valueRank.should.eql(-2);
+            multiStateDiscreteVariable.valueRank.should.eql(-2);
 
-            prop.getPropertyByName("EnumStrings")!.readValue().value.toString()
-                .should.eql(
-                    "Variant(Array<LocalizedText>, l= 3, value=[locale=null text=Red,locale=null text=Orange,locale=null text=Green])");
+            should(multiStateDiscreteVariable.getPropertyByName("EnumStrings")?.readValue().value.toString()).eql(
+                "Variant(Array<LocalizedText>, l= 3, value=[locale=null text=Red,locale=null text=Orange,locale=null text=Green])"
+            );
 
-            prop.enumStrings.readValue().value.dataType.should.eql(DataType.LocalizedText);
+            multiStateDiscreteVariable.enumStrings.readValue().value.dataType.should.eql(DataType.LocalizedText);
 
-            prop.readValue().value.toString().should.eql("Variant(Scalar<UInt32>, value: 1)");
-            prop.readValue().value.dataType.should.eql(DataType.UInt32);
+            multiStateDiscreteVariable.readValue().value.toString().should.eql("Variant(Scalar<UInt32>, value: 1)");
+            multiStateDiscreteVariable.readValue().value.dataType.should.eql(DataType.UInt32);
+        });
+
+        it("ZZ3 should create a MultiStateDiscreteType with value getter/setter", async () => {
+            const namespace = addressSpace.getOwnNamespace();
+
+            let _theValue = 0; // Red
+
+            const timestamped_get_raw = (callback: CallbackT<DataValue>) => {
+                // using getCurrentClock will guaranty that clock value is different each time
+                const clock = getCurrentClock();
+                setTimeout(() => {
+                    const myDataValue = new DataValue({
+                        serverPicoseconds: clock.picoseconds,
+                        serverTimestamp: clock.timestamp,
+                        sourcePicoseconds: clock.picoseconds,
+                        sourceTimestamp: clock.timestamp,
+                        statusCode: StatusCodes.Good,
+                        value: { dataType: DataType.UInt32, value: _theValue }
+                    });
+                    callback(null, myDataValue);
+                }, 10); //simulate some delay
+            };
+            const timestamped_set_raw = (dataValue: DataValue, callback: CallbackT<StatusCode>) => {
+                if (dataValue.value.dataType !== DataType.UInt32) {
+                    return callback(new Error("Invalid DataType"));
+                }
+                setTimeout(() => {
+                    _theValue = dataValue.value.value;
+                    callback(null, StatusCodes.Good);
+                }, 10);
+            };
+            const timestamped_set = sinon.spy(timestamped_set_raw);
+            const timestamped_get = sinon.spy(timestamped_get_raw);
+
+            const multiStateDiscreteVariable = namespace.addMultiStateDiscrete({
+                browseName: "MultiStateDiscreteVariableWithGetterAndSetter",
+                organizedBy: addressSpace.rootFolder.objects,
+                enumStrings: ["Red", "Orange", "Green"],
+                minimumSamplingInterval: 1000,
+                value: {
+                    timestamped_get,
+                    timestamped_set
+                }
+            });
+
+            // because we use getter and setter, we need to call at least readValueAsync once
+            // to get the initial value....
+            const _dv0 = await multiStateDiscreteVariable.readValueAsync(SessionContext.defaultContext);
+
+            multiStateDiscreteVariable.getValue().should.eql(0);
+            multiStateDiscreteVariable.readValue().statusCode.should.eql(StatusCodes.Good);
+            multiStateDiscreteVariable.getValueAsString().should.eql("Red");
+            // ----------------
+
+            _theValue = 2;
+            const _dv1 = await multiStateDiscreteVariable.readValueAsync(SessionContext.defaultContext);
+            multiStateDiscreteVariable.getValueAsString().should.eql("Green");
+            //
+            _theValue = 1;
+            await multiStateDiscreteVariable.readValueAsync(SessionContext.defaultContext);
+            multiStateDiscreteVariable.getValueAsString().should.eql("Orange");
+            //
+
+            // external write
+            const clock = getCurrentClock();
+            await multiStateDiscreteVariable.writeValue(
+                SessionContext.defaultContext,
+                new DataValue({
+                    serverPicoseconds: clock.picoseconds,
+                    serverTimestamp: clock.timestamp,
+                    sourcePicoseconds: clock.picoseconds,
+                    sourceTimestamp: clock.timestamp,
+                    statusCode: StatusCodes.Good,
+                    value: { dataType: DataType.UInt32, value: 2 }
+                })
+            );
+
+            multiStateDiscreteVariable.getValueAsString().should.eql("Green");
+            timestamped_set.callCount.should.eql(1);
+            timestamped_get.callCount.should.eql(3);
+
+            /// now trying with invalid values to see how
+            const sc1 = await multiStateDiscreteVariable.writeValue(
+                SessionContext.defaultContext,
+                new DataValue({
+                    serverPicoseconds: clock.picoseconds,
+                    serverTimestamp: clock.timestamp,
+                    sourcePicoseconds: clock.picoseconds,
+                    sourceTimestamp: clock.timestamp,
+                    statusCode: StatusCodes.Good,
+                    value: { dataType: DataType.UInt32, value: 0xaaaaaa }
+                })
+            );
+            multiStateDiscreteVariable.getValueAsString().should.eql("Green");
+            sc1.should.not.eql(StatusCodes.Good);
+            sc1.should.eql(StatusCodes.BadOutOfRange);
         });
 
         describe("edge case tests", () => {
-
-            let multiState: UAMultiStateDiscrete;
+            let multiStateDiscreteVariable: UAMultiStateDiscreteEx<number, DataType.UInt32>;
             before(() => {
                 const namespace = addressSpace.getOwnNamespace();
 
                 const objectsFolder = addressSpace.rootFolder.objects;
 
-                multiState = namespace.addMultiStateDiscrete({
+                multiStateDiscreteVariable = namespace.addMultiStateDiscrete({
                     browseName: "MyMultiStateVariable3",
                     enumStrings: ["Red", "Orange", "Green"],
                     organizedBy: objectsFolder,
                     value: 1 // Orange
                 });
-
             });
 
             it("writing a value exceeding EnumString length shall return BadOutOfRange", async () => {
-                const dataValue = new DataValue({
-                    value: new Variant({ dataType: DataType.UInt32, value: 100 })// out of range
+                const dataValue = new DataValueT<number, DataType.UInt32>({
+                    value: new Variant({ dataType: DataType.UInt32, value: 100 }) // out of range
                 });
-                const statusCode = await multiState.writeValue(SessionContext.defaultContext, dataValue);
+                const statusCode = await multiStateDiscreteVariable.writeValue(SessionContext.defaultContext, dataValue);
                 statusCode.should.eql(StatusCodes.BadOutOfRange);
             });
 
             it("writing a value within EnumString length shall return Good", async () => {
-                const dataValue = new DataValue({
-                    value: new Variant({ dataType: DataType.UInt32, value: 2 })// OK
+                const dataValue = new DataValueT<number, DataType.UInt32>({
+                    value: { dataType: DataType.UInt32, value: 2 } // OK
                 });
-                const statusCode = await multiState.writeValue(SessionContext.defaultContext, dataValue);
+                const statusCode = await multiStateDiscreteVariable.writeValue(SessionContext.defaultContext, dataValue);
                 statusCode.should.eql(StatusCodes.Good);
             });
             it("writing a value which has not the correct type shall return BadTypeMismatch", async () => {
-                const dataValue = new DataValue({
-                    value: new Variant({
-                        dataType: DataType.String, value: "2"
-                    })// OK
+                const dataValue = new DataValueT<string, DataType.String>({
+                    value: {
+                        dataType: DataType.String,
+                        value: "2"
+                    } // OK
                 });
-                const statusCode = await multiState.writeValue(SessionContext.defaultContext, dataValue);
+                const statusCode = await multiStateDiscreteVariable.writeValue(
+                    SessionContext.defaultContext,
+                    dataValue as unknown as DataValueT<number, DataType.UInt32> /* to force wrong value to be sent */
+                );
                 statusCode.should.eql(StatusCodes.BadTypeMismatch);
+            });
+
+            it("using setValue", () => {
+                multiStateDiscreteVariable.setValue("Green");
+                multiStateDiscreteVariable.getValue().should.eql(2);
+                multiStateDiscreteVariable.getValueAsString().should.eql("Green");
+                multiStateDiscreteVariable.setValue("Red");
+                multiStateDiscreteVariable.getValue().should.eql(0);
+                multiStateDiscreteVariable.getValueAsString().should.eql("Red");
             });
         });
     });

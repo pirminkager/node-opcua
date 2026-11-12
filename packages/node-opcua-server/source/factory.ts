@@ -1,23 +1,25 @@
 /**
  * @module node-opcua-server
  */
-import * as _ from "underscore";
 
 import { assert } from "node-opcua-assert";
 import { ExtensionObject } from "node-opcua-extension-object";
-import { constructObject } from "node-opcua-factory";
-import { ExpandedNodeId } from "node-opcua-nodeid";
+import { getStandardDataTypeFactory } from "node-opcua-factory";
+import type { ExpandedNodeId } from "node-opcua-nodeid";
 
+// "any non-nullish object" - Factory only stores the engine reference, it never accesses any
+// property on it (see the assert below)
+export type EngineForFactory = object;
 export class Factory {
-    public engine: any;
+    public engine: EngineForFactory;
 
-    constructor(engine: any) {
-        assert(_.isObject(engine));
+    constructor(engine: EngineForFactory) {
+        assert(engine !== null && typeof engine === "object");
         this.engine = engine;
     }
 
     public constructObject(id: ExpandedNodeId): ExtensionObject {
-        const obj = constructObject(id);
+        const obj = getStandardDataTypeFactory().constructObject(id);
         if (!(obj instanceof ExtensionObject)) {
             throw new Error("Internal Error constructObject");
         }

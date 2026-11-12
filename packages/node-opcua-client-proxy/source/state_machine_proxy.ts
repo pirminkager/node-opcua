@@ -2,18 +2,16 @@
  * @module node-opcua-client-proxy
  */
 import { assert } from "node-opcua-assert";
-import { makeProxyState, ProxyState } from "./proxy_state";
-import { makeProxyTransition, ProxyTransition } from "./proxy_transition";
+import { makeProxyState, ProxyState } from "./proxy_state.js";
+import { makeProxyTransition, type ProxyNode, type ProxyTransition } from "./proxy_transition.js";
 
 export class ProxyStateMachineType {
-
     public initialState: ProxyState | undefined;
     public states: ProxyState[];
     public transitions: ProxyTransition[];
 
-    constructor(obj: any) {
-
-        const localInitialState = obj.$components.filter((component: any) => {
+    constructor(obj: ProxyNode) {
+        const localInitialState = obj.$components.filter((component: ProxyNode) => {
             if (!component.typeDefinition) {
                 return false;
             }
@@ -27,19 +25,23 @@ export class ProxyStateMachineType {
             this.initialState = undefined;
         }
 
-        this.states = obj.$components.filter((component: any) => {
-            if (!component.typeDefinition) {
-                return false;
-            }
-            return component.typeDefinition.toString() === "StateType";
-        }).map(makeProxyState);
+        this.states = obj.$components
+            .filter((component: ProxyNode) => {
+                if (!component.typeDefinition) {
+                    return false;
+                }
+                return component.typeDefinition.toString() === "StateType";
+            })
+            .map(makeProxyState);
 
-        this.transitions = obj.$components.filter((component: any) => {
-            if (!component.typeDefinition) {
-                return false;
-            }
-            return component.typeDefinition.toString() === "TransitionType";
-        }).map(makeProxyTransition);
+        this.transitions = obj.$components
+            .filter((component: ProxyNode) => {
+                if (!component.typeDefinition) {
+                    return false;
+                }
+                return component.typeDefinition.toString() === "TransitionType";
+            })
+            .map(makeProxyTransition);
     }
 
     // var initialStateTypeId = makeRefId("InitialStateType");

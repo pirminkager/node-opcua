@@ -1,23 +1,24 @@
 {
     "name": "node-opcua-object-registry",
-    "version": "2.6.0-alpha.1",
-    "description": "pure nodejs OPCUA SDK - module -object-registry",
+    "type": "module",
+    "version": "2.186.7",
+    "description": "pure nodejs OPCUA SDK - module object-registry",
     "main": "./dist/index.js",
     "scripts": {
         "build": "tsc -b",
-        "clean": "node -e \"require('rimraf').sync('dist');\"",
-        "test": "mocha test"
+        "lint": "biome check --no-errors-on-unmatched .",
+        "format": "biome check --write --no-errors-on-unmatched .",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
     },
     "author": "Etienne Rossignon",
     "license": "MIT",
-    "dependencies": {
-        "node-opcua-assert": "^2.6.0-alpha.1",
-        "node-opcua-debug": "^2.6.0-alpha.1",
-        "underscore": "^1.10.2"
+    "engines": {
+        "node": ">=22.13.0"
     },
-    "devDependencies": {
-        "colors": "^1.4.0",
-        "should": "^13.2.3"
+    "dependencies": {
+        "node-opcua-debug": "2.186.7"
     },
     "repository": {
         "type": "git",
@@ -32,5 +33,9 @@
         "internet of things"
     ],
     "homepage": "http://node-opcua.github.io/",
-    "gitHead": "e4d73afdfcccb3491423149d9b9785888f4ebb3c"
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

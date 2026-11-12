@@ -2,13 +2,9 @@
  * @module node-opcua-enum
  *
  */
-// tslint:disable:no-bitwise
-// tslint:disable:max-classes-per-file
 
 /**
  * Represents an Item of an Enum.
- *
- * @class Enum
  */
 export class EnumItem {
     public key: string;
@@ -26,11 +22,11 @@ export class EnumItem {
 
     /**
      * Checks if the EnumItem is the same as the passing object.
-     * @method is
+     *
      * @param  {EnumItem | String | Number} item The object to check with.
      * @return {Boolean}                          The check result.
      */
-    public is(item: any): boolean {
+    public is(item: EnumItem | string | number): boolean {
         if (item instanceof EnumItem) {
             return this.value === item.value;
         } else if (typeof item === "string") {
@@ -42,7 +38,7 @@ export class EnumItem {
 
     /**
      * Checks if the flagged EnumItem has the passing object.
-     * @method has
+     *
      * @param  {EnumItem | String |Number} value The object to check with.
      * @return {Boolean}                            The check result.
      */
@@ -58,7 +54,7 @@ export class EnumItem {
 
     /**
      * Returns String representation of this EnumItem.
-     * @method toString
+     *
      * @return {String} String representation of this EnumItem.
      */
     public toString(): string {
@@ -67,17 +63,15 @@ export class EnumItem {
 
     /**
      * Returns JSON object representation of this EnumItem.
-     * @method toJSON
      * @return {String} JSON object representation of this EnumItem.
      */
 
-    public toJSON(): any {
+    public toJSON(): string {
         return this.key;
     }
 
     /**
      * Returns the value to compare with.
-     * @method valueOf
      * @return {String} The value to compare with.
      */
 
@@ -86,14 +80,41 @@ export class EnumItem {
     }
 }
 
+function powerOfTwo(n: number): boolean {
+    return !!(n && !(n & (n - 1)));
+}
 // check if enum is flaggable
 function checkIsFlaggable(enums: EnumItem[]): boolean {
     for (const e of enums) {
-        if (!(e.value !== 0 && !(e.value & e.value - 1))) {
+        const value = +e.value;
+        if (Number.isNaN(value)) {
+            continue; // skipping none number value
+        }
+        if (value !== 0 && value !== 1 && !powerOfTwo(value)) {
             return false;
         }
     }
     return true;
+}
+
+export interface _TypescriptEnum {
+    [key: string | number]: number | string;
+}
+
+/** Anything {@link Enum.get} accepts: an EnumItem, its name, or its numeric value. */
+export type EnumItemLike = EnumItem | string | number;
+
+export function adaptTypescriptEnum(map: _TypescriptEnum | string[]) {
+    if (Array.isArray(map)) {
+        let mm: _TypescriptEnum | null = null;
+        // create map as flaggable enum
+        mm = {};
+        for (let i = 0; i < map.length; i++) {
+            mm[map[i]] = 1 << i;
+        }
+        return mm;
+    }
+    return map as _TypescriptEnum;
 }
 
 /**
@@ -102,35 +123,32 @@ function checkIsFlaggable(enums: EnumItem[]): boolean {
  * Represents an Enum with enum items.
  * @param {Array || Object}  map     This are the enum items.
  */
-export class Enum {
+// The Enum constructor dynamically attaches each EnumItem under both its string key and its
+// numeric value (pThis[key] = kv; pThis[val] = kv), so lookups by either can go through a plain
+// property access. This type captures that dynamic bag shape for the casts below.
+type IndexedEnum = Enum & Record<string | number, EnumItem>;
 
+export class Enum {
     private readonly enumItems: EnumItem[];
     private readonly _isFlaggable: boolean;
 
-    constructor(map: any) {
-
+    constructor(map: _TypescriptEnum | string[]) {
         this.enumItems = [];
-        let mm: any = null;
+        let mm: _TypescriptEnum | null = null;
         let isFlaggable = null;
         if (Array.isArray(map)) {
-            // create map as flaggable enum
-            mm = {};
-            for (let i = 0; i < map.length; i++) {
-                mm[map[i]] = 1 << i;
-            }
+            mm = adaptTypescriptEnum(map);
             isFlaggable = true;
         } else {
             mm = map;
         }
 
-        for (const key of Object.keys(mm)) {
-            const val = mm[key];
-            if (undefined === val) {
+        for (const [key, val] of Object.entries(mm)) {
+            if (typeof val !== "number") {
                 continue;
             }
             const kv = new EnumItem(key, val);
-
-            const pThis = this as any;
+            const pThis = this as unknown as IndexedEnum;
             pThis[key] = kv;
             pThis[val] = kv;
 
@@ -143,15 +161,17 @@ export class Enum {
         this._isFlaggable = isFlaggable;
     }
 
+    public get isFlaggable(): boolean {
+        return this._isFlaggable;
+    }
     /**
      * Returns the appropriate EnumItem.
-     * @method get
+
      * @param  key The object to get with.
      * @return the get result.
      */
-    public get(key: EnumItem | string | number): (EnumItem | null) {
-
-        const pThis = this as any;
+    public get(key: EnumItemLike): EnumItem | null {
+        const pThis = this as unknown as IndexedEnum;
         if (key instanceof EnumItem) {
             if (!pThis[key.key]) {
                 throw new Error("Invalid key");
@@ -183,9 +203,8 @@ export class Enum {
         return this.enumItems.join(" , ");
     }
 
-    private _getByString(key: string): (EnumItem | null) {
-
-        const pThis = this as any;
+    private _getByString(key: string): EnumItem | null {
+        const pThis = this as unknown as IndexedEnum;
         const parts = key.split(" | ");
 
         let val = 0;
@@ -210,28 +229,30 @@ export class Enum {
         return kv;
     }
 
-    private _getByNum(key: number): (EnumItem | null) {
-
+    private _getByNum(key: number): EnumItem | null {
         if (key === 0) {
             return null;
         }
-        const pThis = this as any;
+        const pThis = this as unknown as IndexedEnum;
 
-        let name;
+        let name: string | undefined;
         let c = 1;
-        for (let i = 0; c < key; i++) {
+        for (let _i = 0; c < key; _i++) {
             if ((c & key) === c) {
                 const item = pThis[c];
                 if (undefined === item) {
                     return null;
                 }
                 if (name) {
-                    name = name + " | " + item.key;
+                    name = `${name} | ${item.key}`;
                 } else {
                     name = item.key;
                 }
             }
             c *= 2;
+        }
+        if (name === undefined) {
+            throw new Error(`internal error: no matching flag found for key ${key}`);
         }
         const kv = new EnumItem(name, key);
         // add in cache for later
@@ -239,5 +260,4 @@ export class Enum {
         pThis[key] = kv;
         return kv;
     }
-
 }

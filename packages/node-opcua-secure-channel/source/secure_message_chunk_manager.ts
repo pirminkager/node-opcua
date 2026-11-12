@@ -1,24 +1,20 @@
 /**
  * @module node-opcua-secure-channel
  */
-// tslint:disable:max-line-length
-import { EventEmitter } from "events";
+import { EventEmitter } from "node:events";
 import { assert } from "node-opcua-assert";
-import { UInt16 } from "node-opcua-basic-types";
 import { BinaryStream } from "node-opcua-binary-stream";
 import {
     ChunkManager,
-    EncryptBufferFunc,
-    IChunkManagerOptions,
+    type EncryptBufferFunc,
+    type IChunkManagerOptions,
+    type Mode,
     SequenceHeader,
-    SignBufferFunc
+    type SignBufferAsyncFunc,
+    type SignBufferFunc
 } from "node-opcua-chunkmanager";
-import {
-    AsymmetricAlgorithmSecurityHeader,
-    SymmetricAlgorithmSecurityHeader,
-} from "node-opcua-service-secure-channel";
-import * as _ from "underscore";
-import { SequenceNumberGenerator } from "./sequence_number_generator";
+import { AsymmetricAlgorithmSecurityHeader, SymmetricAlgorithmSecurityHeader } from "node-opcua-service-secure-channel";
+import type { SequenceNumberGenerator } from "./sequence_number_generator.js";
 
 export type SecurityHeader = AsymmetricAlgorithmSecurityHeader | SymmetricAlgorithmSecurityHeader;
 
@@ -29,7 +25,7 @@ export function chooseSecurityHeader(msgType: string): SecurityHeader {
 export type VerifyBufferFunc = (chunk: Buffer) => boolean;
 
 export interface SecureMessageChunkManagerOptions {
-    chunkSize?: number;
+    chunkSize: number;
     channelId?: number;
     requestId: number;
     signatureLength: number;
@@ -38,98 +34,103 @@ export interface SecureMessageChunkManagerOptions {
     cipherBlockSize: number;
     encryptBufferFunc?: EncryptBufferFunc;
     signBufferFunc?: SignBufferFunc;
+    /** asynchronous signing (remote HSM/KMS key) — finish with {@link SecureMessageChunkManager.endAsync}. */
+    signBufferAsyncFunc?: SignBufferAsyncFunc;
     verifyBufferFunc?: VerifyBufferFunc;
-
 }
 
+/**
+ * A ChunkManager that writes the message, security and sequence headers of each chunk.
+ *
+ * Deprecated: use {@link SecureChunkWriter}, which writes the same bytes, for every message type
+ * (OpenSecureChannel and asynchronous signing included), with one call and no event (ADR 0001).
+ * MessageChunker no longer uses this class; to be removed in the next major version.
+ */
 export class SecureMessageChunkManager extends EventEmitter {
-
-    private aborted: boolean;
-    private readonly chunkSize: UInt16;
+    #aborted: boolean;
     private readonly msgType: string;
     private readonly channelId: number;
-    private readonly sequenceNumberGenerator: SequenceNumberGenerator;
-    private readonly securityHeader: SecurityHeader;
-    private sequenceHeader: SequenceHeader;
-    private readonly headerSize: number;
-    private readonly chunkManager: ChunkManager;
-    private readonly sequenceHeaderSize: number;
+    readonly #sequenceNumberGenerator: SequenceNumberGenerator;
+    readonly #securityHeader: SecurityHeader;
+    readonly #sequenceHeader: SequenceHeader;
+    readonly #chunkManager: ChunkManager;
 
-    constructor(msgType: string, options: SecureMessageChunkManagerOptions, securityHeader: SecurityHeader | null, sequenceNumberGenerator: SequenceNumberGenerator) {
+    constructor(
+        mode: Mode,
+        msgType: string,
+        channelId: number,
+        options: SecureMessageChunkManagerOptions,
+        securityHeader: SecurityHeader,
+        sequenceNumberGenerator: SequenceNumberGenerator
+    ) {
         super();
-        this.aborted = false;
-        this.sequenceHeaderSize = 0;
-        msgType = msgType || "OPN";
+        this.#aborted = false;
 
-        this.securityHeader = securityHeader || chooseSecurityHeader(msgType);
-        assert(_.isObject(this.securityHeader));
+        this.msgType = msgType || "OPN";
+        this.channelId = channelId || 0;
+
+        this.#securityHeader = securityHeader;
+        this.#sequenceNumberGenerator = sequenceNumberGenerator;
 
         // the maximum size of a message chunk:
         // Note: OPCUA requires that chunkSize is at least 8192
-        this.chunkSize = options.chunkSize || 1024 * 128;
-
-        this.msgType = msgType;
-
-        options.channelId = options.channelId || 0;
-        assert(_.isFinite(options.channelId));
-        this.channelId = options.channelId;
+        options.chunkSize = options.chunkSize || 8192;
+        if (options.chunkSize <= 8192) {
+            // debugLog("Warning: chunkSize is too small !!!!", options.chunkSize);
+        }
 
         const requestId = options.requestId;
-
-        this.sequenceNumberGenerator = sequenceNumberGenerator;
-
         assert(requestId > 0, "expecting a valid request ID");
+        this.#sequenceHeader = new SequenceHeader({ requestId, sequenceNumber: -1 });
 
-        this.sequenceHeader = new SequenceHeader({requestId, sequenceNumber: -1});
-
-        const securityHeaderSize = this.securityHeader.binaryStoreSize();
-        const sequenceHeaderSize = this.sequenceHeader.binaryStoreSize();
+        const securityHeaderSize = this.#securityHeader.binaryStoreSize();
+        const sequenceHeaderSize = this.#sequenceHeader.binaryStoreSize();
         assert(sequenceHeaderSize === 8);
-
-        this.sequenceHeaderSize = sequenceHeaderSize;
-        this.headerSize = 12 + securityHeaderSize;
+        const headerSize = 12 + securityHeaderSize;
 
         const params: IChunkManagerOptions = {
-            chunkSize: this.chunkSize,
-
-            headerSize: this.headerSize,
+            chunkSize: options.chunkSize,
+            headerSize: headerSize,
             writeHeaderFunc: (buffer: Buffer, isLast: boolean, totalLength: number) => {
                 let finalC = isLast ? "F" : "C";
-                finalC = this.aborted ? "A" : finalC;
+                finalC = this.#aborted ? "A" : finalC;
                 this.write_header(finalC, buffer, totalLength);
             },
 
             sequenceHeaderSize,
-            writeSequenceHeaderFunc: (buffer: Buffer) => {
-                // assert(buffer.length === this.sequenceHeaderSize);
-                this.writeSequenceHeader(buffer);
-            },
+            writeSequenceHeaderFunc: (buffer) => this.writeSequenceHeader(buffer),
 
             // ---------------------------------------- Signing stuff
             signBufferFunc: options.signBufferFunc,
+            signBufferAsyncFunc: options.signBufferAsyncFunc,
             signatureLength: options.signatureLength,
 
             // ---------------------------------------- Encrypting stuff
             cipherBlockSize: options.cipherBlockSize,
             encryptBufferFunc: options.encryptBufferFunc,
-            plainBlockSize: options.plainBlockSize,
+            plainBlockSize: options.plainBlockSize
         };
 
-        this.chunkManager = new ChunkManager(params);
+        this.#chunkManager = new ChunkManager(mode, params);
 
-        this.chunkManager.on("chunk", (chunk: Buffer, isLast: boolean) => {
+        this.#chunkManager.on("chunk", (chunk: Buffer, isLast: boolean) => {
             /**
              * @event chunk
              */
-            this.emit("chunk", chunk, isLast || this.aborted);
+            this.emit("chunk", chunk, isLast || this.#aborted);
         });
     }
 
-    public write_header(finalC: string, buffer: Buffer, length: number): void {
-        assert(buffer.length > 12);
-        assert(finalC.length === 1);
-        assert(buffer instanceof Buffer);
+    public evaluateTotalLengthAndChunks(bodySize: number): { totalLength: number; chunkCount: number } {
+        return this.#chunkManager.evaluateTotalLengthAndChunks(bodySize);
+    }
 
+    /** the body bytes one chunk carries, once headers, signature and padding are paid for */
+    public get maxBodySize(): number {
+        return this.#chunkManager.maxBodySize;
+    }
+
+    public write_header(finalC: string, buffer: Buffer, length: number): void {
         const stream = new BinaryStream(buffer);
 
         // message header --------------------------
@@ -151,30 +152,38 @@ export class SecureMessageChunkManager extends EventEmitter {
         assert(stream.length === 12);
 
         // write Security Header -----------------
-        this.securityHeader.encode(stream);
-        assert(stream.length === this.headerSize);
+        this.#securityHeader.encode(stream);
     }
 
-    public writeSequenceHeader(buffer: Buffer) {
+    public writeSequenceHeader(buffer: Buffer): void {
         const stream = new BinaryStream(buffer);
         // write Sequence Header -----------------
-        this.sequenceHeader.sequenceNumber = this.sequenceNumberGenerator.next();
-        this.sequenceHeader.encode(stream);
-        assert(stream.length === 8);
+        this.#sequenceHeader.sequenceNumber = this.#sequenceNumberGenerator.next();
+        this.#sequenceHeader.encode(stream);
     }
 
-    public write(buffer: Buffer, length?: number) {
+    public write(buffer: Buffer, length?: number): void {
         length = length || buffer.length;
-        this.chunkManager.write(buffer, length);
+        this.#chunkManager.write(buffer, length);
     }
 
-    public abort() {
-        this.aborted = true;
+    public abort(): void {
+        this.#aborted = true;
         this.end();
     }
 
-    public end() {
-        this.chunkManager.end();
+    public end(): void {
+        this.#chunkManager.end();
+        this.emit("finished");
+    }
+
+    /**
+     * `end()` for the asynchronous signing mode: "finished" is emitted only
+     * once every chunk has been signed and emitted; rejects with the first
+     * signing error.
+     */
+    public async endAsync(): Promise<void> {
+        await this.#chunkManager.endAsync();
         this.emit("finished");
     }
 }

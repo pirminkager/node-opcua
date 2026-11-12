@@ -1,46 +1,36 @@
-// tslint:disable:no-console
-import * as mocha from "mocha";
 import { checkDebugFlag, make_debugLog } from "node-opcua-debug";
-import { should } from "should";
+import should from "should";
 import {
-    ParserLike,
-    ReaderStateParserLike,
-    Xml2JsonPojo,
+    json_parser,
+    type ParserLike,
+    type ReaderStateParserLike,
     startPojo,
     Xml2Json,
-    XmlAttributes,
-    json_parser
-} from "..";
+    Xml2JsonPojo,
+    type XmlAttributes
+} from "../dist/source/index.js";
 
-const doDebug = checkDebugFlag(__filename);
-const debugLog = make_debugLog(__filename);
+const _doDebug = checkDebugFlag("TEST");
+const _debugLog = make_debugLog("TEST");
 const _should = should;
 
 describe("It should parse XML doc into json (deprecated)", () => {
-
     it("should parse a simple xml file to json", async () => {
-
         const parser = new Xml2JsonPojo();
 
-        const json = await parser.parseString(
-            "<Machine>" +
-            "<DisplayName>&lt;HelloWorld&gt;</DisplayName>" +
-            "</Machine>");
+        const json = parser.parseString("<Machine>" + "<DisplayName>&lt;HelloWorld&gt;</DisplayName>" + "</Machine>");
 
-        json.should.eql(
-            {
-                machine: {
-                    displayName: "<HelloWorld>"
-                }
-            });
-
+        json.should.eql({
+            machine: {
+                displayName: "<HelloWorld>"
+            }
+        });
     });
 
     it("should parse a xml file containing an array to json", async () => {
-
         const parser = new Xml2JsonPojo();
 
-        const json = await parser.parseString(
+        const json = parser.parseString(
             `
 <Plant>
 <ListOfMachines>
@@ -50,24 +40,22 @@ describe("It should parse XML doc into json (deprecated)", () => {
 <Machine><DisplayName>Machine4</DisplayName></Machine>
 </ListOfMachines>
 </Plant>
-`);
+`
+        );
 
-        json.should.eql(
-            {
-                plant: {
-                    machines: [
-                        { displayName: "Machine1" },
-                        { displayName: "Machine2" },
-                        { displayName: "Machine3" },
-                        { displayName: "Machine4" }
-                    ]
-                }
-            });
-
+        json.should.eql({
+            plant: {
+                machines: [
+                    { displayName: "Machine1" },
+                    { displayName: "Machine2" },
+                    { displayName: "Machine3" },
+                    { displayName: "Machine4" }
+                ]
+            }
+        });
     });
 
     it("should mix both type of parser", async () => {
-
         const expectedPojo = {
             address: "Paris",
             foo: { bar: "FooBar" },
@@ -76,11 +64,9 @@ describe("It should parse XML doc into json (deprecated)", () => {
         };
 
         const parser = new Xml2Json({
-
             parser: {
-
                 person: {
-                    init(name: string, attrs: XmlAttributes) {
+                    init(_name: string, attrs: XmlAttributes) {
                         this.parent.root.obj = {};
                         this.obj = this.parent.root.obj;
                         this.obj.name = attrs.name;
@@ -89,21 +75,19 @@ describe("It should parse XML doc into json (deprecated)", () => {
                     finish() {
                         this.obj.should.eql(expectedPojo);
                     },
-                    startElement(this: any, elementName: string, attrs: XmlAttributes) {
+                    startElement(elementName: string, attrs: XmlAttributes) {
                         if (!this.parser[elementName]) {
-
-                            startPojo(this, elementName, attrs, (name: string, pojo: any) => {
+                            startPojo(this, elementName, attrs, (name: string, pojo: unknown) => {
                                 this.obj[name] = pojo;
-
                             });
                         }
                     },
-                    endElement(this: any, elementName: string) {
+                    endElement(_elementName: string) {
                         //  console.log("xxx elementName ", elementName);
                     },
                     parser: {
                         address: {
-                            finish(this: any) {
+                            finish() {
                                 this.parent.obj.address = this.text;
                             }
                         }
@@ -112,7 +96,7 @@ describe("It should parse XML doc into json (deprecated)", () => {
             }
         });
 
-        const obj = await parser.parseString(
+        const _obj = parser.parseString(
             `<employees>
              <person name='John'>F
                <address>Paris</address>
@@ -121,20 +105,19 @@ describe("It should parse XML doc into json (deprecated)", () => {
                     <bar>FooBar</bar>
                </foo>
              </person>
-          </employees>`);
+          </employees>`
+        );
 
-        (parser as any).obj.should.eql(expectedPojo);
+        (parser as unknown as { obj: Record<string, unknown> }).obj.should.eql(expectedPojo);
         // obj.should.eql(expectedPojo);
-
     });
 
     it("loading more complex xml data", async () => {
-
         const _extensionObject_inner_parser: ParserLike = {
             TypeId: {
                 parser: {
                     Identifier: {
-                        finish(this: any) {
+                        finish() {
                             const self = this.parent.parent;
                             self.typeDefinitionId = this.text.trim();
                         }
@@ -143,25 +126,23 @@ describe("It should parse XML doc into json (deprecated)", () => {
             },
 
             Body: {
-
                 parser: {
                     Structure1: json_parser,
                     Structure2: json_parser
                 },
 
-                startElement(this: any, elementName: string, attrs: any) {
-                    const self = this.parent;
-                    self.extensionObject = null;
+                startElement(_elementName: string, _attrs: XmlAttributes) {
+                    this.parent.extensionObject = null;
                 },
 
-                finish(this: any) {
-                    const self = this.parent;
-                    switch (self.typeDefinitionId.toString()) {
+                finish() {
+                    const parent = this.parent;
+                    switch (parent.typeDefinitionId.toString()) {
                         case "i=1": // Structure1
-                            self.extensionObject = self.parser.Body.parser.EnumValueType.enumValueType;
+                            parent.extensionObject = parent.parser.Body.parser.EnumValueType.enumValueType;
                             break;
                         case "i=2": // Structure2
-                            self.extensionObject = self.parser.Body.parser.Argument.argument;
+                            parent.extensionObject = parent.parser.Body.parser.Argument.argument;
                             break;
                         default: {
                             break;
@@ -172,11 +153,12 @@ describe("It should parse XML doc into json (deprecated)", () => {
         };
         const extensionObject_parser: ParserLike = {
             ExtensionObject: {
-                init(this: any) {
+                init() {
                     this.typeDefinitionId = {};
                     this.extensionObject = null;
                 },
-                finish(this: any) {
+                finish() {
+                    /** */
                 },
                 parser: _extensionObject_inner_parser
             }
@@ -185,29 +167,28 @@ describe("It should parse XML doc into json (deprecated)", () => {
         let startElementCount = 0;
         let endElementCount = 0;
         const reader: ReaderStateParserLike = {
-            init(this: any, elementName: string) {
+            init(_elementName: string) {
                 this.obj = {};
             },
-            finish(this: any) {
+            finish() {
                 this.parent.result = this.obj;
             },
             parser: {
                 ListOfExtensionObject: {
-                    init(this: any) {
+                    init() {
                         this.listData = [];
                     },
                     parser: extensionObject_parser,
-                    finish(this: any) {
+                    finish() {
                         this.parent.obj.value = {
                             value: this.listData
                         };
-
                     },
-                    startElement(this: any, elementName: string) {
-                        this.listData = this,
-                            startElementCount++;
+                    startElement(_elementName: string) {
+                        this.listData = this;
+                        startElementCount++;
                     },
-                    endElement(this: any, elementName: string) {
+                    endElement(_elementName: string) {
                         endElementCount++;
                     }
                 }
@@ -216,7 +197,7 @@ describe("It should parse XML doc into json (deprecated)", () => {
 
         const parser = new Xml2Json(reader);
 
-        const result = await parser.parseString(
+        const _result = parser.parseString(
             `<Stuff>
 <ListOfExtensionObject>
     <ExtensionObject>

@@ -1,0 +1,115 @@
+name: Lerna Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      dist-tag:
+        description: 'dist-tag'
+        required: true
+        default: 'latest'
+        type: choice
+        options:
+          - latest
+          - next
+          - rc
+          - beta
+          - alpha
+          - 0.0.0-hack
+
+# Serialize publishes: never run two at once, and never cancel an in-flight
+# one (partial publishes are hard to recover from).
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  id-token: write  # OIDC token for provenance + npm trusted publishing
+  contents: read   # actions/checkout
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # lerna inspects history to decide what's publishable
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'pnpm'
+
+      - name: check pnpm version
+        run: pnpm --version
+
+      - name: Install dependencies
+        # --ignore-scripts: skip esbuild's transitive postinstall so pnpm 11
+        # doesn't fail with ERR_PNPM_IGNORED_BUILDS. Build runs explicitly below.
+        run: pnpm recursive install --no-frozen-lockfile --ignore-scripts
+
+      - name: Build
+        # build:all = generate:types + tsc. Needed because _generated_opcua_types.ts
+        # is gitignored; the lean `build` (tsc only) doesn't produce it. Nodeset
+        # generation is deliberately NOT part of it: that output is committed,
+        # and regenerating here would restamp versions lerna is about to set.
+        run: pnpm run build:all
+
+      - name: Publish
+        # --concurrency 1: avoids OIDC token request collisions with provenance.
+        # node-opcua-versions is marked private in the repository, so this pass skips it.
+        #
+        # Retried: when Rekor (Sigstore's transparency log) stores a provenance entry but
+        # answers after npm's 5 s timeout, npm uploads it again and gets "409 an
+        # equivalent entry already exists" (TLOG_CREATE_ENTRY_ERROR), which fails the
+        # publish. Retrying is safe: from-package only publishes the versions missing
+        # from the registry, and a new attempt signs anew.
+        # A failed publish leaves the manifests lerna rewrote (it writes "gitHead" into
+        # every package.json still to publish and restores them only on success), so the
+        # next attempt would stop on EUNCOMMIT: the loop shows that diff, then reverts it.
+        run: |
+          for attempt in 1 2 3; do
+            npx lerna publish from-package \
+              --yes \
+              --dist-tag "$DIST_TAG" \
+              --concurrency 1 && exit 0
+            echo "::warning::lerna publish failed (attempt $attempt of 3)"
+            git status --porcelain
+            git diff -- '*package.json'
+            git diff --name-only -z -- '*package.json' | xargs -0 -r git checkout --
+            [ "$attempt" = 3 ] || sleep 60
+          done
+          exit 1
+        env:
+          NPM_CONFIG_PROVENANCE: true
+          DIST_TAG: ${{ github.event.inputs.dist-tag }}
+
+      - name: Publish node-opcua-versions last
+        # The release matrix goes out after every other package of the release: its
+        # presence on the registry is the signal that the release is complete, which is
+        # what protects `node-opcua-versions bump` from reading a half-published release.
+        # --include-private lifts the private flag for this one package, for this pass:
+        # lerna keeps a private package only when its exact name is listed (or "*",
+        # which must never be used here), so the test, fixture and playground packages
+        # that are private stay unpublished. Retried as the step above, for the same reason.
+        run: |
+          for attempt in 1 2 3; do
+            npx lerna publish from-package \
+              --yes \
+              --include-private node-opcua-versions \
+              --dist-tag "$DIST_TAG" \
+              --concurrency 1 && exit 0
+            echo "::warning::lerna publish failed (attempt $attempt of 3)"
+            git status --porcelain
+            git diff -- '*package.json'
+            git diff --name-only -z -- '*package.json' | xargs -0 -r git checkout --
+            [ "$attempt" = 3 ] || sleep 60
+          done
+          exit 1
+        env:
+          NPM_CONFIG_PROVENANCE: true
+          DIST_TAG: ${{ github.event.inputs.dist-tag }}

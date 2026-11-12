@@ -1,0 +1,79 @@
+/**
+ * @module node-opcua-address-space
+ */
+import type { IAddressSpace } from "node-opcua-address-space-base";
+import { type StoreAddressSpace, type StoreAddressSpaceOptions, StoreServices } from "node-opcua-address-space-store";
+import { AddressSpaceImpl } from "../impl/address_space.js";
+import type { IHistorizerFactory } from "./address_space_ts.js";
+import type { Namespace } from "./namespace.js";
+import type { UARootFolder } from "./ua_root_folder.js";
+
+/** the published names of the compact address space and its options */
+export type CompactAddressSpace = StoreAddressSpace;
+export type CompactAddressSpaceOptions = StoreAddressSpaceOptions;
+/** the Read, Write, Browse and TranslateBrowsePaths services on a compact address space */
+export const CompactAddressSpaceServices = StoreServices;
+export type CompactAddressSpaceServices = StoreServices;
+
+/**
+ * The address space: the set of nodes a server exposes, and the namespaces they live in.
+ *
+ * Obtain one with {@link AddressSpace.create}. This is the published shape of it; the class
+ * behind it carries a great deal more, none of which is API.
+ */
+export interface AddressSpace extends IAddressSpace {
+    getOwnNamespace(): Namespace;
+    registerNamespace(namespaceUri: string): Namespace;
+    rootFolder: UARootFolder;
+
+    /**
+     * Give browse names created at runtime the treatment of the names a nodeset declares:
+     * `parent.<name>` then resolves through one getter shared by every node instead of an accessor
+     * installed on each parent. Nodes created before the call are covered too.
+     *
+     * Only worth it when many nodes carry the same browse name; a name used once costs the same
+     * either way.
+     */
+    registerChildAccessorNames(browseNames: string[]): void;
+}
+
+/**
+ * The static side of {@link AddressSpace}.
+ *
+ * Naming it separately is what keeps the implementation out of the published API: the value
+ * exported below is the real class, but it is seen through this, so only `create` and
+ * `historizerFactory` are reachable.
+ */
+export interface AddressSpaceConstructor {
+    /** build an empty address space */
+    create(): AddressSpace;
+
+    /**
+     * build an empty compact address space: the nodes in typed columns, node objects built
+     * on demand. Cheaper by far for a large model, and not yet an {@link AddressSpace}: it
+     * answers finds, browses, attribute and value reads, bindings and writes, and a server
+     * cannot be built on it yet.
+     */
+    createCompact(options?: CompactAddressSpaceOptions): CompactAddressSpace;
+
+    /**
+     * How historized variables get their historian. Assigning here replaces the default that
+     * the historical-access code installs on first use.
+     */
+    historizerFactory?: IHistorizerFactory;
+}
+
+/**
+ * An interface and a variable may share a name, so `AddressSpace` is both the type you
+ * annotate with and the value you call `create()` on, while the implementation class stays
+ * unexported and undocumented.
+ *
+ * This was a conversion for a while, and it no longer needs to be: the compiler now agrees
+ * that AddressSpaceImpl provides the published shape. It could not before, because
+ * `getOwnNamespace()` returned a `NamespacePrivate` that extended `INamespace` rather than
+ * the published `Namespace`, hiding the alarm-and-condition, data-access and machine-state
+ * methods NamespaceImpl really has; and correcting that ran into the data-access classes not
+ * statically satisfying their own `Ex` interfaces. Both are fixed, so the annotation is
+ * checked rather than asserted.
+ */
+export const AddressSpace: AddressSpaceConstructor = AddressSpaceImpl;

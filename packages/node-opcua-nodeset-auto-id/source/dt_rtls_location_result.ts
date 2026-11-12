@@ -1,0 +1,33 @@
+import type { UAString } from "node-opcua-basic-types";
+import type { ExtensionObject } from "node-opcua-extension-object";
+
+import type { DTLocation } from "./dt_location.js";
+import type { DTRotation } from "./dt_rotation.js";
+import type { DTScanData } from "./dt_scan_data.js";
+import type { DTScanResult } from "./dt_scan_result.js";
+
+// ----- this file has been automatically generated - do not edit
+
+/**
+ * |           |                                                            |
+ * |-----------|------------------------------------------------------------|
+ * | namespace |http://opcfoundation.org/UA/AutoID/                         |
+ * | nodeClass |DataType                                                    |
+ * | name      |RtlsLocationResult                                          |
+ * | isAbstract|false                                                       |
+ */
+export interface DTRtlsLocationResult extends DTScanResult {
+  /** Defines the format of the ScanData as string.*/
+  codeType: UAString; // String ns=3;i=3031
+  /** Holds the information about the detected objects e.g. the detected transponders.*/
+  scanData: DTScanData; // ExtensionObject ns=3;i=3020
+  /** Timestamp of the ScanResult creation.*/
+  timestamp: Date; // DateTime ns=0;i=294
+  /** Returns the location of the object detection.*/
+  location?: DTLocation; // ExtensionObject ns=3;i=3008
+  speed: number; // Double ns=0;i=11
+  heading: number; // Double ns=0;i=11
+  rotation: DTRotation; // ExtensionObject ns=3;i=3029
+  receiveTime: Date; // DateTime ns=0;i=294
+}
+export interface UDTRtlsLocationResult extends ExtensionObject, DTRtlsLocationResult {};

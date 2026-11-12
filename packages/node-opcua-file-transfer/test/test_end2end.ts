@@ -1,0 +1,80 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { type NodeId, OPCUAClient, OPCUAServer, type TransportSettings, type UAFile } from "node-opcua";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import should from "should";
+
+import { ClientFile, getFileData, installFileType, OpenFileMode, readOPCUAFile, writeOPCUAFile } from "../dist/index.js";
+
+const port = 2000;
+
+describe("FileType: Testing with very large file end-to-end", function (this: Mocha.Context) {
+    this.timeout(100000);
+
+    let server: OPCUAServer;
+
+    let nodeId: NodeId;
+    let opcuaFile: UAFile;
+    before(async () => {
+        server = new OPCUAServer({
+            port
+        });
+
+        await server.start();
+        const addressSpace = server.engine.addressSpace!;
+        const _namespace = addressSpace.getOwnNamespace();
+
+        const filename = path.join(os.tmpdir(), "largeFileServerSide.bin");
+
+        const fileType = addressSpace.findObjectType("FileType")!;
+        // install file 1
+        opcuaFile = fileType.instantiate({
+            browseName: "FileTransferObj",
+            organizedBy: addressSpace.rootFolder.objects.server
+        }) as UAFile;
+        installFileType(opcuaFile, { filename, fileSystem: fs });
+
+        nodeId = opcuaFile.nodeId;
+    });
+    after(async () => {
+        await server.shutdown();
+    });
+
+    it("should write and read a very large file", async () => {
+        if (!nodeId) return;
+
+        const endpointUrl = server.getEndpointUrl();
+
+        const veryLargeBuffer = Buffer.alloc(32 * 1024 * 1024);
+        const filename = path.join(os.tmpdir(), "largeFile.bin");
+        await fs.promises.writeFile(filename, veryLargeBuffer, "binary");
+        console.log("large file created: at", filename, veryLargeBuffer.length);
+
+        const transportSettings: TransportSettings = {
+            maxMessageSize: 1024 * 1024 * 8
+        };
+        const client = OPCUAClient.create({ transportSettings });
+
+        await client.withSessionAsync(endpointUrl, async (session) => {
+            console.log(client.toString());
+            console.log("transport setting: ", session.toString());
+
+            const clientFile = new ClientFile(session, nodeId);
+            await writeOPCUAFile(clientFile, filename, { chunkSize: 4294967295 });
+            const bufferBack = await readOPCUAFile(clientFile);
+
+            bufferBack.length.should.eql(veryLargeBuffer.length);
+        });
+    });
+
+    it("should release the file handles when the session closes before the client calls Close", async () => {
+        const client = OPCUAClient.create({});
+        await client.withSessionAsync(server.getEndpointUrl(), async (session) => {
+            await new ClientFile(session, nodeId).open(OpenFileMode.Read);
+            await new ClientFile(session, nodeId).open(OpenFileMode.Read);
+            should(getFileData(opcuaFile).openCount).eql(2);
+        });
+        should(getFileData(opcuaFile).openCount).eql(0);
+    });
+});

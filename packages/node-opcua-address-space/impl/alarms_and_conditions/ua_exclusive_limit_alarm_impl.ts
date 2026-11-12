@@ -1,0 +1,127 @@
+import type { UAEventType, UAObject } from "node-opcua-address-space-base";
+import { assert } from "node-opcua-assert";
+import type { NodeId } from "node-opcua-nodeid";
+import type { VariantOptions } from "node-opcua-variant";
+import type { InstantiateLimitAlarmOptions } from "../../api/interfaces/alarms_and_conditions/instantiate_limit_alarm_options.js";
+import type { UAExclusiveLimitAlarmEx } from "../../api/interfaces/alarms_and_conditions/ua_exclusive_limit_alarm_ex.js";
+import type { UAExclusiveLimitStateMachineEx } from "../../api/interfaces/state_machine/ua_exclusive_limit_state_machine_type_ex.js";
+import type { NamespacePrivate } from "../namespace_private.js";
+import { promoteToStateMachine } from "../state_machine/finite_state_machine.js";
+import { UALimitAlarmImpl, UALimitAlarmImplBase } from "./ua_limit_alarm_impl.js";
+
+const validState = ["HighHigh", "High", "Low", "LowLow", null];
+
+/** @internal */
+export class UAExclusiveLimitAlarmImplBase extends UALimitAlarmImpl implements UAExclusiveLimitAlarmEx {
+    /** installed as a child node by the address space, not assigned here - hence `declare` */
+    declare public readonly limitState: UAExclusiveLimitStateMachineEx;
+
+    /***
+     *
+     * @param namespace {INamespace}
+     * @param type
+     * @param options
+     * @param data
+     * @return {UAExclusiveLimitAlarm}
+     */
+    public static instantiate(
+        namespace: NamespacePrivate,
+        type: UAEventType | string | NodeId,
+        options: InstantiateLimitAlarmOptions,
+        data?: Record<string, VariantOptions>
+    ): UAExclusiveLimitAlarmImpl {
+        const addressSpace = namespace.addressSpace;
+
+        const exclusiveAlarmType = addressSpace.findEventType(type);
+
+        /* c8 ignore next */
+        if (!exclusiveAlarmType) {
+            throw new Error(` cannot find Alarm Condition Type for ${type}`);
+        }
+
+        const exclusiveLimitAlarmType = addressSpace.findEventType("ExclusiveLimitAlarmType");
+        /* c8 ignore next */
+        if (!exclusiveLimitAlarmType) {
+            throw new Error("cannot find ExclusiveLimitAlarmType");
+        }
+
+        const node = UALimitAlarmImplBase.instantiate(namespace, type, options, data);
+        Object.setPrototypeOf(node, UAExclusiveLimitAlarmImplBase.prototype);
+        const alarm = node as unknown as UAExclusiveLimitAlarmImplBase;
+        assert(alarm instanceof UAExclusiveLimitAlarmImpl);
+        assert(alarm instanceof UALimitAlarmImpl);
+
+        return _initialize_exclusive_limit_alarm_node(alarm);
+    }
+    public signalNewCondition(stateName: string | null, isActive: boolean, value: string): void {
+        assert(stateName === null || typeof isActive === "boolean");
+        assert(validState.indexOf(stateName) >= 0, `must have a valid state : ${stateName}`);
+
+        const _oldState = this.limitState.getCurrentState();
+        const _oldActive = this.activeState.getValue();
+
+        if (stateName) {
+            this.limitState.setState(stateName);
+        } else {
+            assert(stateName === null);
+            this.limitState.setState(stateName);
+        }
+        super.signalNewCondition(stateName, isActive, value);
+    }
+
+    public setStateBasedOnInputValue(value: number): void {
+        assert(Number.isFinite(value));
+        let isActive = false;
+
+        let state = null;
+
+        const oldState = this.limitState.getCurrentState();
+
+        if (this.highHighLimit && this.getHighHighLimit() < value) {
+            state = "HighHigh";
+            isActive = true;
+        } else if (this.highLimit && this.getHighLimit() < value) {
+            state = "High";
+            isActive = true;
+        } else if (this.lowLowLimit && this.getLowLowLimit() > value) {
+            state = "LowLow";
+            isActive = true;
+        } else if (this.lowLimit && this.getLowLimit() > value) {
+            state = "Low";
+            isActive = true;
+        }
+
+        if (state !== oldState) {
+            this.signalNewCondition(state, isActive, value.toFixed(3));
+        }
+    }
+}
+
+/** @internal */
+export type UAExclusiveLimitAlarmImpl = UAExclusiveLimitAlarmImplBase;
+/** @internal */
+export const UAExclusiveLimitAlarmImpl = UAExclusiveLimitAlarmImplBase;
+
+/**
+ * The exclusive limit alarm half of the wiring, everything that follows the limit alarm
+ * initialization: the LimitState state machine, then a first evaluation of the input.
+ *
+ * Shared by {@link UAExclusiveLimitAlarmImplBase.instantiate} and by `promoteToLimitAlarm`. The
+ * caller has already given the node its final prototype.
+ *
+ * @internal
+ */
+export function _initialize_exclusive_limit_alarm_node(alarm: UAExclusiveLimitAlarmImpl): UAExclusiveLimitAlarmImpl {
+    assert(alarm instanceof UAExclusiveLimitAlarmImpl);
+
+    // ---------------- install LimitState StateMachine
+    assert(alarm.limitState, "limitState is mandatory");
+    promoteToStateMachine(alarm.limitState as unknown as UAObject);
+
+    // start with a inactive state
+    alarm.activeState.setValue(false);
+
+    alarm.updateState();
+
+    return alarm;
+}

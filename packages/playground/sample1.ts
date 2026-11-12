@@ -1,16 +1,16 @@
 // compile with  tsc --lib es2018 sample1.ts
 // tslint:disable:no-console
-import * as chalk from "chalk";
+import chalk from "chalk";
 
 import {
+    type Argument,
     AttributeIds,
-    ConnectionStrategyOptions,
+    type ConnectionStrategyOptions,
     MessageSecurityMode,
     OPCUAClient,
-    OPCUAClientOptions,
+    type OPCUAClientOptions,
     SecurityPolicy,
-    UserTokenType,
-    Variant
+    UserTokenType
 } from "node-opcua-client";
 
 const connectionStrategy: ConnectionStrategyOptions = {
@@ -29,7 +29,6 @@ const client = OPCUAClient.create(options);
 
 (async () => {
     try {
-
         console.log(" about to connect");
         await client.connect("opc.tcp://opcuademo.sterfive.com:26543");
         console.log("connected");
@@ -39,20 +38,20 @@ const client = OPCUAClient.create(options);
         });
 
         const session = await client.createSession({
-            password: "password1",
+            password: (() => "password1")(),
             type: UserTokenType.UserName,
-            userName: "user1",
+            userName: "user1"
         });
 
         const a = await session.getArgumentDefinition("ns=0;i=12886");
 
-        console.log(a.inputArguments.map((x: Variant) => x.toString()).join(" "));
+        console.log(a.inputArguments.map((x: Argument) => x.toString()).join(" "));
 
         const result = await session.browse({
             nodeId: "i=2558"
         });
 
-        for (const reference of result.references!) {
+        for (const reference of result.references || []) {
             console.log(reference.toString());
         }
         const registeredNodes = await session.registerNodes(["ns=1;s=FanSpeed", "ns=1;s=PumpSpeed"]);
@@ -70,7 +69,6 @@ const client = OPCUAClient.create(options);
         console.log(`PumpSpeed ${value2.toString()}`);
 
         await client.disconnect();
-
     } catch (e) {
         // Deal with the fact the chain failed
 

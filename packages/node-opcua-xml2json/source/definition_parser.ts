@@ -1,48 +1,103 @@
-// <Definition Name="SomeName">
-//   <Field Name="Running" Value="0" dataType: [ValueRank="1"]>
+//<Definition Name="SomeName">
+//    <Field Name="Running" Value="0" dataType: [ValueRank="1"] [AllowSubtype="true"]>
 //      [<Description>text</Description>]
 //   <Field>
 // </Definition>
 import assert from "node-opcua-assert";
-import {
-    ReaderStateParserLike,
-    XmlAttributes
-} from "./xml2json";
+import type { IReaderState, ReaderStateParserLike, Xml2Json, XmlAttributes } from "./xml2json.js";
 
 // <Definition Name="SomeName">
-//   <Field Name="Running" Value="0" dataType: [ValueRank="1"]>
+//        <Field Name="Running" Value="0" dataType: [ValueRank="1"]>
 //      [<Description>text</Description>]
 //   <Field>
 // </Definition>
 //
 // Or
 //
-//  (IsOptionSet)
-//
-//
+type UAString = string | null;
+type NodeIdLike = string | null;
+type Int32 = number;
+type UInt32 = number;
+type UABoolean = boolean;
+type LocalizedTextLike = string | null;
+
+export interface EnumFieldOptions {
+    name?: UAString;
+    value?: Int32;
+    description?: LocalizedTextLike | null;
+}
+export interface StructureFieldOptions {
+    name?: UAString;
+    description?: LocalizedTextLike | null;
+    dataType?: NodeIdLike | null;
+    valueRank?: Int32;
+    arrayDimensions?: UInt32[] | null;
+    maxStringLength?: UInt32;
+    isOptional?: UABoolean;
+
+    // additional attributes
+    symbolicName?: UAString;
+    allowSubTypes?: UABoolean;
+}
+type FieldOptions = EnumFieldOptions & StructureFieldOptions;
+
+interface AA extends ReaderStateParserLike {
+    parent: {
+        definitionFields: StructureFieldOptions[];
+        nFields: number;
+        definitionName: string;
+        /** the <Definition> flags, put on the parent so that whoever owns the node can read them */
+        definitionIsUnion?: boolean;
+        definitionIsOptionSet?: boolean;
+    };
+    array: StructureFieldOptions[];
+    isUnion: boolean;
+    isOptionSet: boolean;
+}
+interface FieldParser {
+    description?: LocalizedTextLike | null;
+    parent: AA;
+    attrs: Record<string, string>;
+}
+interface DescriptionParser {
+    parent: FieldParser;
+    text: string;
+}
 export const _definitionParser: ReaderStateParserLike = {
-    init(this: any, name: string, attrs: XmlAttributes) {
-        assert(!this.parent.definitionFields || this.parent.definitionFields.length === 0);
+    init(this: AA, _name: string, attrs: XmlAttributes, _parent: IReaderState, _engine: Xml2Json) {
+        assert(!this.parent.nFields || this.parent.definitionFields.length === 0);
         this.parent.definitionFields = [];
         this.parent.definitionName = attrs.SymbolicName || attrs.Name;
         this.array = this.parent.definitionFields;
+        this.isUnion = attrs.IsUnion === "true";
+        // IsOptionSet says the DataType is a bit mask whose fields are bit positions rather than
+        // an enumeration whose fields are values. Dropping it turned every OptionSet into an
+        // ordinary enumeration, and the node that came back could not be told from one
+        this.isOptionSet = attrs.IsOptionSet === "true";
+        this.parent.definitionIsUnion = this.isUnion;
+        this.parent.definitionIsOptionSet = this.isOptionSet;
     },
     parser: {
         Field: {
-            init(this: any) {
+            init(this: FieldParser) {
                 this.description = undefined;
             },
             parser: {
                 Description: {
-                    finish(this: any) {
+                    finish(this: DescriptionParser) {
                         this.parent.description = this.text;
                     }
                 }
             },
-            finish(this: any) {
-                const obj: any = {
-                    name: this.attrs.Name,
+            finish(this: FieldParser) {
+                const obj: FieldOptions = {
+                    name: this.attrs.Name
                 };
+                if (this.attrs.AllowSubTypes !== undefined) {
+                    obj.allowSubTypes = this.attrs.AllowSubTypes === "true";
+                } else {
+                    obj.allowSubTypes = false;
+                }
                 if (this.attrs.DataType !== undefined) {
                     obj.dataType = this.attrs.DataType;
                 }
@@ -53,13 +108,17 @@ export const _definitionParser: ReaderStateParserLike = {
                     obj.value = parseInt(this.attrs.Value, 10);
                 }
                 if (this.attrs.ValueRank !== undefined) {
-                    obj.valueRank = parseInt(this.attrs.ValueRank || "-1", 10);
+                    obj.valueRank = parseInt(this.attrs.ValueRank, 10);
+                } else {
+                    // when not specified valueRank means Scalar and Scalar is -1
+                    obj.valueRank = -1;
                 }
                 if (this.attrs.ArrayDimensions !== undefined) {
-                    obj.arrayDimensions = this.attrs.ArrayDimensions;
+                    obj.arrayDimensions = this.attrs.ArrayDimensions.split(",").map((e: string) => parseInt(e, 10));
                 }
+
                 if (this.attrs.IsOptional !== undefined) {
-                    obj.isOptional = this.attrs.IsOptional ? true : false;
+                    obj.isOptional = this.attrs.IsOptional === "true";
                 }
                 if (this.attrs.SymbolicName !== undefined) {
                     obj.symbolicName = this.attrs.SymbolicName;
@@ -69,11 +128,12 @@ export const _definitionParser: ReaderStateParserLike = {
         }
     }
 };
+
 export const definitionReaderStateParser: ReaderStateParserLike = {
     parser: {
         Definition: _definitionParser
     },
-    endElement(this: any) {
+    endElement(this) {
         this._pojo = {
             name: this.definitionName,
 

@@ -1,24 +1,19 @@
-import * as should from "should";
-
 import { NodeClass } from "node-opcua-data-model";
-import { Variant } from "node-opcua-variant";
-
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import { SubscriptionDiagnosticsDataType } from "node-opcua-types";
+import { Variant } from "node-opcua-variant";
+import should from "should";
 import {
+    type AddressSpace,
     addElement,
-    AddressSpace,
     createExtObjArrayNode,
+    type DTSubscriptionDiagnostics,
     removeElement,
-    SubscriptionDiagnosticsVariable,
-    UADataType,
-    UAVariable
-} from "..";
-import { getMiniAddressSpace } from "../";
+    type UASubscriptionDiagnostics
+} from "../dist/api/index.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("Extension Object Array Node (or Complex Variable)", () => {
-
     let addressSpace: AddressSpace;
     before(async () => {
         addressSpace = await getMiniAddressSpace();
@@ -28,7 +23,6 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
     });
 
     it("should create a Variable that exposes an array of ExtensionObject of a specific type", async () => {
-
         // given a address space
         // give a DataType
 
@@ -41,11 +35,12 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
             variableType: "SubscriptionDiagnosticsType"
         });
 
-        addressSpace.findNode(arr.dataType)!.nodeClass.should.eql(NodeClass.DataType);
+        should(addressSpace.findNode(arr.dataType)?.nodeClass).eql(NodeClass.DataType);
 
         const expectedType = addressSpace.findVariableType("SubscriptionDiagnosticsArrayType")!;
-        arr.typeDefinition.toString().should.eql(expectedType.nodeId.toString(),
-            "should have typeDefinition SubscriptionDiagnosticsArrayType");
+        arr.typeDefinition
+            .toString()
+            .should.eql(expectedType.nodeId.toString(), "should have typeDefinition SubscriptionDiagnosticsArrayType");
 
         const dv = arr.readValue();
         should(dv.value.value).eql([]);
@@ -58,7 +53,7 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
         const options = {
             subscriptionId: counter
         };
-        const elementNode = addElement(options, arr) as SubscriptionDiagnosticsVariable;
+        const elementNode = addElement(options, arr) as UASubscriptionDiagnostics<DTSubscriptionDiagnostics>;
 
         arr.readValue().value.value.length.should.eql(1, "expecting a new element in array");
 
@@ -85,11 +80,9 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
 
         elementNode.maxLifetimeCount.readValue().value.value.should.eql(12345);
         elementNode.readValue().value.value.maxLifetimeCount.should.eql(12345);
-
     });
 
     it("should be possible to add more than one element in the Extension Object variable node", () => {
-
         const rootFolder = addressSpace.rootFolder;
 
         const arr = createExtObjArrayNode(rootFolder, {
@@ -108,10 +101,8 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
         elVar3.browseName.toString().should.eql("1:1002");
 
         arr.readValue().value.value.length.should.eql(3, "expecting 3 elements in array");
-
     });
     it("should be possible to remove some element in the Extension Object variable node", () => {
-
         const rootFolder = addressSpace.rootFolder;
 
         const arr = createExtObjArrayNode(rootFolder, {
@@ -127,10 +118,10 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
         const elVar4 = addElement({ subscriptionId: 1003 }, arr);
         arr.readValue().value.value.length.should.eql(4, "expecting 4 elements in array");
 
-        arr.getComponentByName("1000")!.should.eql(elVar1);
-        arr.getComponentByName("1001")!.should.eql(elVar2);
-        arr.getComponentByName("1002")!.should.eql(elVar3);
-        arr.getComponentByName("1003")!.should.eql(elVar4);
+        should(arr.getComponentByName("1000")).eql(elVar1);
+        should(arr.getComponentByName("1001")).eql(elVar2);
+        should(arr.getComponentByName("1002")).eql(elVar3);
+        should(arr.getComponentByName("1003")).eql(elVar4);
 
         removeElement(arr, elVar1);
         arr.readValue().value.value.length.should.eql(3, "expecting 3 elements in array");
@@ -148,11 +139,9 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
 
         should.not.exist(arr.getComponentByName("1002"));
         should.not.exist(arr.getComponentByName("1000"));
-
     });
 
     it("should be possible to add an element in  the Extension array that already exists ", () => {
-
         const rootFolder = addressSpace.rootFolder;
 
         const arr = createExtObjArrayNode(rootFolder, {
@@ -170,7 +159,7 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
         const item1 = subscriptionDiagnosticsType.instantiate({
             browseName: "testing",
             componentOf: addressSpace.rootFolder
-        }) as SubscriptionDiagnosticsVariable;
+        }) as UASubscriptionDiagnostics<DTSubscriptionDiagnostics>;
 
         should.exist(item1.$extensionObject, "item1 must expose an extension object");
         should.exist(item1.$extensionObject.enableCount, "item1 must expose an extension object");
@@ -194,7 +183,6 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
     });
 
     it("should be possible to add the same extension object into two array Variables", () => {
-
         const rootFolder = addressSpace.rootFolder;
 
         // Given 2 SubscriptionDiagnosticArray ( A & B)
@@ -202,7 +190,7 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
             browseName: "SubscriptionDiagnosticArray_A",
             complexVariableType: "SubscriptionDiagnosticsArrayType",
             indexPropertyName: "subscriptionId",
-            variableType: "SubscriptionDiagnosticsType",
+            variableType: "SubscriptionDiagnosticsType"
         });
         arrA.readValue().value.value.length.should.eql(0);
 
@@ -210,7 +198,7 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
             browseName: "SubscriptionDiagnosticArray_B",
             complexVariableType: "SubscriptionDiagnosticsArrayType",
             indexPropertyName: "subscriptionId",
-            variableType: "SubscriptionDiagnosticsType",
+            variableType: "SubscriptionDiagnosticsType"
         });
         arrB.readValue().value.value.length.should.eql(0);
 
@@ -220,15 +208,15 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
 
         const extObj = new SubscriptionDiagnosticsDataType({
             enableCount: 7,
-            subscriptionId: 1123455,
+            subscriptionId: 1123455
         });
 
-        const browseName = arrA.$$getElementBrowseName(extObj);
+        const browseName = arrA.$$getElementBrowseName(extObj, 0);
 
         const item1 = subscriptionDiagnosticsType.instantiate({
             browseName,
             extensionObject: extObj
-        }) as SubscriptionDiagnosticsVariable;
+        }) as UASubscriptionDiagnostics<DTSubscriptionDiagnostics>;
 
         should.exist(item1.$extensionObject, "item1 must expose an extension object");
         should.exist(item1.$extensionObject.enableCount, "item1 must expose an extension object");
@@ -263,14 +251,14 @@ describe("Extension Object Array Node (or Complex Variable)", () => {
         // ---------------------------------------------------------------------
         elemA.should.eql(elemB);
 
-        arrA.getComponentByName("1123455")!.browseName.toString().should.eql("1:1123455");
-        arrB.getComponentByName("1123455")!.browseName.toString().should.eql("1:1123455");
+        should(arrA.getComponentByName("1123455")?.browseName.toString()).eql("1:1123455");
+        should(arrB.getComponentByName("1123455")?.browseName.toString()).eql("1:1123455");
 
         removeElement(arrA, elemA);
         arrA.readValue().value.value.length.should.eql(0);
         arrB.readValue().value.value.length.should.eql(1);
         should.not.exist(arrA.getComponentByName("1123455"));
-        arrB.getComponentByName("1123455")!.browseName.toString().should.eql("1:1123455");
+        should(arrB.getComponentByName("1123455")?.browseName.toString()).eql("1:1123455");
 
         removeElement(arrB, elemB);
         arrA.readValue().value.value.length.should.eql(0);

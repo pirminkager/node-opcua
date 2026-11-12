@@ -1,0 +1,238 @@
+import path from "node:path";
+import sinon from "sinon";
+import "should";
+import { readCertificateChain } from "node-opcua-crypto";
+import { exploreCertificate } from "node-opcua-crypto/web";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { NodeId } from "node-opcua-nodeid";
+import { nodesets } from "node-opcua-nodesets";
+import { samplesCertificateFolder } from "node-opcua-test-helpers";
+import { AddressSpace, instantiateCertificateExpirationAlarm, type UACertificateExpirationAlarmEx } from "../../dist/api/index.js";
+import { generateAddressSpace } from "../../distNodeJS/index.js";
+
+export const OneDayDuration = 1000 * 60 * 60 * 24;
+export const TwoWeeksDuration = OneDayDuration * 2 * 7;
+
+describe("Test Certificate alarm", function (this: Mocha.Suite) {
+    let clock: sinon.SinonFakeTimers | undefined;
+    function getExpiryDate(certificateBuffer: Buffer): Date {
+        const info = exploreCertificate(certificateBuffer);
+        return info.tbsCertificate.validity.notAfter;
+    }
+
+    beforeEach(() => {
+        clock = sinon.useFakeTimers({
+            now: new Date(),
+            shouldAdvanceTime: true,
+            shouldClearNativeTimers: true
+        });
+        getExpiryDate(ok).getTime().should.be.greaterThan(Date.now());
+        getExpiryDate(out_of_date).getTime().should.be.lessThan(Date.now());
+    });
+    afterEach(() => {
+        if (clock) {
+            clock.restore();
+            clock = undefined;
+        }
+    });
+
+    let addressSpace: AddressSpace;
+    this.timeout(Math.max(this.timeout(), 100000));
+
+    const demo = samplesCertificateFolder;
+    let _not_active_yet: Buffer;
+    let out_of_date: Buffer;
+    let _revoked: Buffer;
+    let ok: Buffer;
+
+    before(async () => {
+        _not_active_yet = readCertificateChain(path.join(demo, "client_cert_1024_not_active_yet.pem"))[0];
+        out_of_date = readCertificateChain(path.join(demo, "client_cert_1024_outofdate.pem"))[0];
+        _revoked = readCertificateChain(path.join(demo, "client_cert_1024_revoked.pem"))[0];
+        ok = readCertificateChain(path.join(demo, "client_cert_1024.pem"))[0];
+
+        addressSpace = AddressSpace.create();
+        const ownNamespace = addressSpace.registerNamespace("PRIVATE_NAMESPACE");
+        ownNamespace.index.should.eql(1);
+        const xml_file = nodesets.standard;
+        await generateAddressSpace(addressSpace, xml_file);
+        addressSpace.installAlarmsAndConditionsService();
+    });
+
+    after(() => {
+        addressSpace.shutdown();
+        addressSpace.dispose();
+    });
+
+    it("should activate certificate Expiry alarm appropriately", () => {
+        const namespace = addressSpace.getOwnNamespace();
+        const certificate1: UACertificateExpirationAlarmEx = instantiateCertificateExpirationAlarm(
+            namespace,
+            "CertificateExpirationAlarmType",
+            {
+                browseName: "CertificateExpiry",
+                conditionName: "Expiry",
+                inputNode: NodeId.nullNodeId,
+                normalState: NodeId.nullNodeId,
+                conditionSource: null,
+                organizedBy: addressSpace.rootFolder.objects,
+                conditionOf: addressSpace.rootFolder.objects
+            }
+        );
+
+        const raiseEventSpy = sinon.spy();
+        addressSpace.rootFolder.objects.server.on("event", raiseEventSpy);
+
+        raiseEventSpy.resetHistory();
+        certificate1.setCertificate(ok);
+        certificate1.activeState.getValue().should.eql(false);
+        raiseEventSpy.getCall(0).args[0].message.value.text.should.match(/is OK/);
+        raiseEventSpy.getCall(0).args[0].severity.value.should.be.eql(0);
+
+        raiseEventSpy.resetHistory();
+        certificate1.setCertificate(out_of_date);
+        certificate1.activeState.getValue().should.eql(true);
+        raiseEventSpy.callCount.should.eql(1);
+        raiseEventSpy.getCall(0).args[0].message.value.text.should.match(/has expired/);
+        raiseEventSpy.getCall(0).args[0].severity.value.should.be.greaterThan(100);
+        certificate1.currentBranch().getRetain().should.eql(true);
+
+        raiseEventSpy.resetHistory();
+        certificate1.setCertificate(ok);
+        certificate1.activeState.getValue().should.eql(false);
+        raiseEventSpy.getCall(0).args[0].message.value.text.should.match(/is OK/);
+        raiseEventSpy.getCall(0).args[0].severity.value.should.be.eql(0);
+
+        const expiryDate = certificate1.getExpirationDate() as Date;
+        expiryDate.getTime().should.be.greaterThan(Date.now());
+
+        const _timeBeforeExpiration = expiryDate.getTime() - Date.now();
+
+        // console.log("timeBeforeExpiration = ", timeBeforeExpiration / 1000, timeBeforeExpiration / (1000 * 60));
+
+        certificate1.setExpirationLimit(TwoWeeksDuration);
+
+        clock?.setSystemTime(expiryDate.getTime() - 2 * TwoWeeksDuration);
+        certificate1.update();
+        certificate1.activeState.getValue().should.eql(false);
+
+        clock?.setSystemTime(expiryDate.getTime() - TwoWeeksDuration + 1);
+        certificate1.update();
+        certificate1.activeState.getValue().should.eql(true);
+        certificate1.currentBranch().getRetain().should.eql(true);
+        certificate1.currentBranch().getSeverity().should.eql(100);
+
+        clock?.setSystemTime(expiryDate.getTime() - TwoWeeksDuration / 2.0);
+        certificate1.update();
+        certificate1.activeState.getValue().should.eql(true);
+        certificate1.currentBranch().getRetain().should.eql(true);
+        certificate1.currentBranch().getSeverity().should.eql(150);
+
+        clock?.setSystemTime(expiryDate.getTime() - 1);
+        certificate1.update();
+        certificate1.activeState.getValue().should.eql(true);
+        certificate1.currentBranch().getRetain().should.eql(true);
+        certificate1.currentBranch().getSeverity().should.eql(199);
+    });
+
+    it("FEAT-24 should stay silent when a re-evaluation finds the certificate in the same state", () => {
+        // push certificate management re-evaluates the alarm every minute and the alarm itself
+        // every half hour: a server left running used to raise a "certificate is OK!" event on the
+        // Server object at each check, which CTT Subscription Minimum 02 020 picks up as an
+        // event nobody asked for.
+        const namespace = addressSpace.getOwnNamespace();
+        const certificate1: UACertificateExpirationAlarmEx = instantiateCertificateExpirationAlarm(
+            namespace,
+            "CertificateExpirationAlarmType",
+            {
+                browseName: "CertificateExpirySilent",
+                conditionName: "ExpirySilent",
+                inputNode: NodeId.nullNodeId,
+                normalState: NodeId.nullNodeId,
+                conditionSource: null,
+                organizedBy: addressSpace.rootFolder.objects,
+                conditionOf: addressSpace.rootFolder.objects
+            }
+        );
+        const raiseEventSpy = sinon.spy();
+        addressSpace.rootFolder.objects.server.on("event", raiseEventSpy);
+        try {
+            // the first verdict is news
+            certificate1.setCertificate(ok);
+            raiseEventSpy.callCount.should.eql(1);
+            raiseEventSpy.getCall(0).args[0].message.value.text.should.match(/is OK/);
+
+            // the same verdict again, however it is reached, is not
+            certificate1.update();
+            certificate1.update();
+            certificate1.setCertificate(ok);
+            raiseEventSpy.callCount.should.eql(1);
+
+            // a change of verdict is news again, once
+            certificate1.setCertificate(out_of_date);
+            raiseEventSpy.callCount.should.eql(2);
+            raiseEventSpy.getCall(1).args[0].message.value.text.should.match(/has expired/);
+            certificate1.update();
+            raiseEventSpy.callCount.should.eql(2);
+
+            certificate1.setCertificate(ok);
+            raiseEventSpy.callCount.should.eql(3);
+            raiseEventSpy.getCall(2).args[0].message.value.text.should.match(/is OK/);
+        } finally {
+            addressSpace.rootFolder.objects.server.removeListener("event", raiseEventSpy);
+        }
+    });
+
+    it("should update the alarm on a regular basis", () => {
+        const namespace = addressSpace.getOwnNamespace();
+        const certificate1: UACertificateExpirationAlarmEx = instantiateCertificateExpirationAlarm(
+            namespace,
+            "CertificateExpirationAlarmType",
+            {
+                browseName: "CertificateExpiry",
+                conditionName: "Expiry",
+                inputNode: NodeId.nullNodeId,
+                normalState: NodeId.nullNodeId,
+                conditionSource: null,
+                organizedBy: addressSpace.rootFolder.objects,
+                conditionOf: addressSpace.rootFolder.objects
+            }
+        );
+
+        const raiseEventSpy = sinon.spy();
+        addressSpace.rootFolder.objects.server.on("event", raiseEventSpy);
+
+        raiseEventSpy.resetHistory();
+        certificate1.setCertificate(ok);
+        certificate1.activeState.getValue().should.eql(false);
+
+        raiseEventSpy.getCall(0).args[0].message.value.text.should.match(/is OK/);
+        raiseEventSpy.getCall(0).args[0].severity.value.should.be.eql(0);
+
+        const expiryDate = certificate1.getExpirationDate() as Date;
+        expiryDate.getTime().should.be.greaterThan(Date.now());
+
+        const _timeBeforeExpiration = expiryDate.getTime() - Date.now();
+
+        // console.log("timeBeforeExpiration = ", timeBeforeExpiration / 1000, timeBeforeExpiration / (1000 * 60));
+
+        certificate1.setExpirationLimit(TwoWeeksDuration);
+
+        clock?.setSystemTime(expiryDate.getTime() - TwoWeeksDuration - 1);
+        certificate1.update();
+        certificate1.activeState.getValue().should.eql(false);
+
+        // now advance timer , it should at least update alarm twice a day
+        raiseEventSpy.resetHistory();
+
+        clock?.tick(OneDayDuration);
+        raiseEventSpy.callCount.should.be.greaterThan(2);
+        const severity1 = certificate1.currentBranch().getSeverity();
+        severity1.should.be.greaterThan(100);
+
+        clock?.tick(OneDayDuration);
+        raiseEventSpy.callCount.should.be.greaterThan(4);
+        const severity2 = certificate1.currentBranch().getSeverity();
+        severity2.should.be.greaterThan(severity1 + 3);
+    });
+});

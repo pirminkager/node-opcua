@@ -1,20 +1,18 @@
-    /**
+/**
  * @module node-opcua-client-proxy
  */
-// tslint:disable:no-shadowed-variable
-import {
-    ObjectTypeIds, ReferenceTypeIds
-} from "node-opcua-constants";
-import { makeNodeId, NodeId } from "node-opcua-nodeid";
+import { ObjectTypeIds, ReferenceTypeIds } from "node-opcua-constants";
+import { makeNodeId, type NodeId } from "node-opcua-nodeid";
 
 export function makeRefId(referenceTypeName: string): NodeId {
+    const nodeId = makeNodeId(
+        (ReferenceTypeIds as unknown as Record<string, number>)[referenceTypeName] ||
+            (ObjectTypeIds as unknown as Record<string, number>)[referenceTypeName]
+    );
 
-    const nodeId = makeNodeId((ReferenceTypeIds as any)[referenceTypeName]
-        || (ObjectTypeIds as any)[referenceTypeName]);
-
-    // istanbul ignore next
+    /* c8 ignore next */
     if (nodeId.isEmpty()) {
-        throw new Error("makeRefId: cannot find ReferenceTypeName + " + referenceTypeName);
+        throw new Error(`makeRefId: cannot find ReferenceTypeName + ${referenceTypeName}`);
     }
     return nodeId;
 }

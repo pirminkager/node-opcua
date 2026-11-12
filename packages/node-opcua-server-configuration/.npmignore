@@ -1,2 +1,6 @@
 temp/
 test/
+*.tsbuildinfo
+pnpm-lock.yaml
+tslint.*
+.mocharc.*

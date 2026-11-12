@@ -1,22 +1,17 @@
 /**
  * @module node-opcua-date-time
  */
-import { assert } from "node-opcua-assert";
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
-import {
-    bn_dateToHundredNanoSecondFrom1601,
-    bn_hundredNanoSecondFrom1601ToDate,
-    DateWithPicoseconds
-} from "./date_time";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
+import { bn_dateToHundredNanoSecondFrom1601, bn_hundredNanoSecondFrom1601ToDate, getMinOPCUADate } from "./date_time.js";
 
 //  Date(year, month [, day, hours, minutes, seconds, ms])
-export function isValidDateTime(value: any) {
+export function isValidDateTime(value: unknown) {
     return value instanceof Date;
 }
 
 /**
  * return a random integer value in the range of  min inclusive and  max exclusive
- * @method getRandomInt
+
  * @param min
  * @param max
  * @return {*}
@@ -29,10 +24,7 @@ function getRandomInt(min: number, max: number) {
 
 export function randomDateTime() {
     const r = getRandomInt;
-    return new Date(
-        1900 + r(0, 200), r(0, 11), r(0, 28),
-        r(0, 24), r(0, 59), r(0, 59), r(0, 1000));
-
+    return new Date(1900 + r(0, 200), r(0, 11), r(0, 28), r(0, 24), r(0, 59), r(0, 59), r(0, 1000));
 }
 
 /**
@@ -42,16 +34,11 @@ export function randomDateTime() {
  * @param stream {BinaryStream}
  */
 export function encodeHighAccuracyDateTime(date: Date | null, picoseconds: number, stream: OutputBinaryStream) {
-
     if (date === null) {
         stream.writeUInt32(0);
         stream.writeUInt32(picoseconds % 100000);
         return;
     }
-    if (!(date instanceof Date)) {
-        throw new Error("Expecting a Date : but got a " + typeof(date) + " " + (date as any).toString());
-    }
-    assert(date instanceof Date);
     const hl = bn_dateToHundredNanoSecondFrom1601(date, picoseconds);
     const hi = hl[0];
     const lo = hl[1];
@@ -60,8 +47,16 @@ export function encodeHighAccuracyDateTime(date: Date | null, picoseconds: numbe
     stream.writeInteger(hi);
 }
 
+/**
+ * A javascript Date holds milliseconds; an OPC UA DateTime counts 100 ns ticks. The
+ * remainder travels as a `picoseconds` property hung on the Date (the convention the
+ * Variant clone and the historical-access nodes already use), so a value written with
+ * sub-millisecond precision reads back identical (CTT Attribute Write Values 003).
+ */
+type DateWithPicoseconds = Date & { picoseconds?: number };
+
 export function encodeDateTime(date: Date | null, stream: OutputBinaryStream) {
-    encodeHighAccuracyDateTime(date, 0, stream);
+    encodeHighAccuracyDateTime(date, (date as DateWithPicoseconds | null)?.picoseconds ?? 0, stream);
 }
 
 /**
@@ -69,14 +64,23 @@ export function encodeDateTime(date: Date | null, stream: OutputBinaryStream) {
  * @param stream
  * @returns {Date}
  */
-export function decodeDateTime(stream: BinaryStream): DateWithPicoseconds {
+export function decodeDateTime(stream: BinaryStream, _value?: Date | null): Date {
+    const [date, picoseconds] = decodeHighAccuracyDateTime(stream, _value);
+    if (picoseconds) {
+        (date as DateWithPicoseconds).picoseconds = picoseconds;
+    }
+    return date;
+}
+export function decodeHighAccuracyDateTime(stream: BinaryStream, _value?: Date | null): [Date, number] {
     const lo = stream.readInteger();
     const hi = stream.readInteger();
-    return bn_hundredNanoSecondFrom1601ToDate(hi, lo);
+    return bn_hundredNanoSecondFrom1601ToDate(hi, lo, 0, _value);
 }
-export const decodeHighAccuracyDateTime = decodeDateTime;
 
-export function coerceDateTime(value: any): Date {
+export function coerceDateTime(value: string | number | Date | null | undefined): Date {
+    if (!value) {
+        return getMinOPCUADate();
+    }
     if (value instanceof Date) {
         return value;
     }

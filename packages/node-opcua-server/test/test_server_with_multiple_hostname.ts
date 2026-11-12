@@ -1,19 +1,31 @@
+import "should";
+import { getFullyQualifiedDomainName } from "node-opcua-hostname";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import { nodesets } from "node-opcua-nodesets";
-import { OPCUAServer } from "..";
+import { SecurityPolicy } from "node-opcua-secure-channel";
+import { OPCUAServer } from "../source/index.js";
+import { createServerCertificateManager } from "./create_server_certificate_manager.js";
 
-// tslint:disable:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
+const port = 2011;
+
 describe("OPCUAServerEndpoint#addEndpointDescription multiple hostname", () => {
-
     it("should be possible to create endpoints on multiple host names", async () => {
-        
+        const serverCertificateManager = await createServerCertificateManager(port);
+
         // Given a server with two host names
         const server = new OPCUAServer({
-            port: 2011,
-
-            nodeset_filename: [ nodesets.standard ],
-
-            alternateHostname: [ "1.2.3.4" , "MyName"]
+            port,
+            serverCertificateManager,
+            nodeset_filename: [nodesets.standard],
+            alternateHostname: ["1.2.3.4", "MyName"],
+            securityPolicies: [
+                SecurityPolicy.None,
+                SecurityPolicy.Basic256Sha256,
+                SecurityPolicy.Basic256,
+                SecurityPolicy.Basic128Rsa15,
+                SecurityPolicy.Aes256_Sha256_RsaPss
+                //  SecurityPolicy.Aes128_Sha256_RsaOaep
+            ]
         });
 
         await server.start();
@@ -24,18 +36,95 @@ describe("OPCUAServerEndpoint#addEndpointDescription multiple hostname", () => {
 
         for (const e of server.endpoints) {
             for (const ed of e.endpointDescriptions()) {
-                // console.log("", ed.endpointUrl);
-                if (ed.endpointUrl!.match(/1\.2\.3\.4/)) {
+                if (ed.endpointUrl?.match(/1\.2\.3\.4/)) {
                     matching1234Count++;
                 }
-                if (ed.endpointUrl!.match(/MyName/)) {
+                if (ed.endpointUrl?.match(/MyName/)) {
                     matchingMyName++;
                 }
             }
         }
 
-        matching1234Count.should.eql(7, "we should have 7 endpoints matches the IP address");
-        matchingMyName.should.eql(7, "we should have 7 endpoints matches the Hostname");
+        matching1234Count.should.eql(9, "we should have 9 endpoints matches the IP address");
+        matchingMyName.should.eql(9, "we should have 9 endpoints matches the Hostname");
+
+        await server.shutdown();
+
+        server.dispose();
+    });
+});
+describe("OPCUAServerEndpoint#addEndpointDescription default hostname", () => {
+    it("should default to using the machine hostname as the hostname", async () => {
+        // Given a server with no explicit hostname
+
+        const serverCertificateManager = await createServerCertificateManager(port);
+        const server = new OPCUAServer({
+            port,
+            serverCertificateManager,
+            nodeset_filename: [nodesets.standard],
+            securityPolicies: [
+                SecurityPolicy.None,
+                SecurityPolicy.Basic256Sha256,
+                SecurityPolicy.Basic256
+                // SecurityPolicy.Basic128Rsa15,
+                // SecurityPolicy.Aes256_Sha256_RsaPss
+                // SecurityPolicy.Aes128_Sha256_RsaOaep
+            ]
+        });
+
+        await server.start();
+
+        const defaultHostname = getFullyQualifiedDomainName();
+        const defaultHostnameRegex = RegExp(defaultHostname);
+
+        // When we count the exposed endpoint
+        let matchingDefault = 0;
+
+        for (const e of server.endpoints) {
+            for (const ed of e.endpointDescriptions()) {
+                if (ed.endpointUrl?.match(defaultHostnameRegex)) {
+                    matchingDefault++;
+                }
+            }
+        }
+
+        matchingDefault.should.eql(5, "we should have 5 endpoints matching the machine hostname");
+
+        await server.shutdown();
+
+        server.dispose();
+    });
+});
+
+describe("OPCUAServerEndpoint#addEndpointDescription custom hostname", () => {
+    it("should be possible to create endpoints on multiple host names", async () => {
+        const myHostname = "my.test.website";
+
+        const serverCertificateManager = await createServerCertificateManager(port);
+
+        // Given a server with two host names
+        const server = new OPCUAServer({
+            hostname: myHostname,
+            port,
+
+            serverCertificateManager,
+            nodeset_filename: [nodesets.standard]
+        });
+
+        await server.start();
+
+        // When we count the exposed endpoint
+        let matchingHostname = 0;
+
+        for (const e of server.endpoints) {
+            for (const ed of e.endpointDescriptions()) {
+                if (ed.endpointUrl?.match(/my.test.website/)) {
+                    matchingHostname++;
+                }
+            }
+        }
+
+        matchingHostname.should.eql(7, "we should have 7 endpoints matches the custom hostname");
 
         await server.shutdown();
 

@@ -1,28 +1,28 @@
-"use strict";
-import * as should from "should";
-
 import { standardUnits } from "node-opcua-data-access";
 import { DataValue } from "node-opcua-data-value";
 import { StatusCodes } from "node-opcua-status-code";
-import { Variant } from "node-opcua-variant";
-import { DataType } from "node-opcua-variant";
+import { DataType, Variant } from "node-opcua-variant";
+import should from "should";
 
-import { AddressSpace, Namespace, SessionContext } from "../..";
+import { type AddressSpace, type Namespace, SessionContext } from "../../dist/api/index.js";
 
-export function subtest_data_item_PercentDeadband(maintest: any) {
+interface MainTest {
+    addressSpace: AddressSpace;
+}
 
+export function subtest_data_item_PercentDeadband(maintest: MainTest): void {
     describe("PercentDeadband", () => {
-
         let addressSpace: AddressSpace;
         let namespace: Namespace;
         before(() => {
             addressSpace = maintest.addressSpace;
             namespace = addressSpace.getOwnNamespace();
-            should(addressSpace).be.instanceof(AddressSpace);
+            // AddressSpace is published as an interface and a factory, with no constructor to
+            // check against, so this asserts that there is one rather than which class it is
+            should.exist(addressSpace);
         });
 
         it("should provide a mechanism to operate PercentDeadband ", async () => {
-
             const objectsFolder = addressSpace.findNode("ObjectsFolder")!;
 
             const analogItem = namespace.addAnalogDataItem({
@@ -41,8 +41,6 @@ export function subtest_data_item_PercentDeadband(maintest: any) {
 
             const statusCode = await analogItem.writeValue(SessionContext.defaultContext, dataValue);
             statusCode.should.eql(StatusCodes.BadOutOfRange);
-
         });
     });
-
 }

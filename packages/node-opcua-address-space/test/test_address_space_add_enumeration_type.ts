@@ -1,18 +1,14 @@
-import { BrowseDirection } from "node-opcua-data-model";
+import { BrowseDirection, NodeClassMask } from "node-opcua-data-model";
 import { DataValue } from "node-opcua-data-value";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import { BrowseDescription } from "node-opcua-service-browse";
 import { StatusCodes } from "node-opcua-status-code";
-import { DataType, Variant } from "node-opcua-variant";
-import * as should from "should";
+import { DataType } from "node-opcua-variant";
+import should from "should";
+import { type AddressSpace, type Namespace, SessionContext } from "../dist/api/index.js";
+import { getMiniAddressSpace } from "../testHelpers.js";
 
-import { getMiniAddressSpace } from "../";
-
-import { AddressSpace, BaseNode, Namespace, SessionContext } from "..";
-
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("AddressSpace : testing add enumeration type", () => {
-
     let addressSpace: AddressSpace;
     let namespace: Namespace;
 
@@ -26,28 +22,29 @@ describe("AddressSpace : testing add enumeration type", () => {
     });
 
     it("should add a new Enumeration type into an address space - Form 1", () => {
-
         const myEnumType = namespace.addEnumerationType({
             browseName: "MyEnumType2",
             enumeration: ["RUNNING", "BLOCKED", "IDLE", "UNDER MAINTENANCE"]
         });
 
+        namespace.index.should.eql(1);
+
         myEnumType.browseName.toString().should.eql("1:MyEnumType2");
 
-        const enumerationType = addressSpace.findDataType("Enumeration")!;
+        const enumerationType = addressSpace.findDataType("Enumeration");
 
         // verify that myEnumType can be found in the HasSubtype references enumeration Type
 
         const browseDescription = new BrowseDescription({
             browseDirection: BrowseDirection.Forward,
             referenceTypeId: null,
-            resultMask: 0x3F
+            nodeClassMask: NodeClassMask.DataType,
+            resultMask: 0x3f
         });
-        const r = enumerationType.browseNode(browseDescription);
-        const names = r.map((x: any) => x.browseName.toString());
+        const r = enumerationType?.browseNode(browseDescription) || [];
+        const names = r.map((x) => x.browseName.toString());
 
-        names.filter((x: string) => x === "1:MyEnumType2").length
-            .should.eql(1, "MyEnumType2 should be find in enum");
+        names.filter((x: string) => x === "1:MyEnumType2").length.should.eql(1, "MyEnumType2 should be found in enum");
 
         // now instantiate a variable that have this type.
         const e = namespace.addVariable({
@@ -92,13 +89,11 @@ describe("AddressSpace : testing add enumeration type", () => {
         }).throwError();
 
         should(() => {
-            (e as any).writeEnumValue({ value: "invalid type" });
+            e.writeEnumValue({ value: "invalid type" } as unknown as string);
         }).throwError();
-
     });
 
     it("should add a new Enumeration type into an address space - Form 2", () => {
-
         const myEnumType = namespace.addEnumerationType({
             browseName: "MyEnumType3",
             enumeration: [
@@ -118,19 +113,18 @@ describe("AddressSpace : testing add enumeration type", () => {
         const browseDescription = new BrowseDescription({
             browseDirection: BrowseDirection.Forward,
             referenceTypeId: null,
-            resultMask: 0x3F
+            resultMask: 0x3f
         });
         const r = enumerationType.browseNode(browseDescription);
-        const names = r.map((x: any) => x.browseName.toString());
+        const names = r.map((x) => x.browseName.toString());
 
-        names.filter((x: string) => x === "1:MyEnumType3").length
-            .should.eql(1, "MyEnumType3 should be find in enum");
+        names.filter((x: string) => x === "1:MyEnumType3").length.should.eql(1, "MyEnumType3 should be find in enum");
 
         // now instantiate a variable that have this type.
         const e = namespace.addVariable({
             browseName: "RunningState",
             dataType: myEnumType,
-            propertyOf: addressSpace.rootFolder.objects.server.vendorServerInfo,
+            propertyOf: addressSpace.rootFolder.objects.server.vendorServerInfo
         });
 
         e.setValueFromSource({ dataType: DataType.Int32, value: 1 });
@@ -170,13 +164,11 @@ describe("AddressSpace : testing add enumeration type", () => {
         }).throwError();
 
         should(() => {
-            (e as any).writeEnumValue({ value: "invalid type" });
+            e.writeEnumValue({ value: "invalid type" } as unknown as string);
         }).throwError();
-
     });
 
     it("should add a writable new Enumeration type into an address space  #552 ", async () => {
-
         const myEnumType = namespace.addEnumerationType({
             browseName: "MyEnumType4",
             enumeration: ["RUNNING", "BLOCKED", "IDLE", "UNDER MAINTENANCE"]
@@ -186,24 +178,21 @@ describe("AddressSpace : testing add enumeration type", () => {
         const e = namespace.addVariable({
             browseName: "RunningState",
             dataType: myEnumType,
-            propertyOf: addressSpace.rootFolder.objects.server.vendorServerInfo,
-        });
-        e.bindVariable({
-            get: () => (e as any)._dataValue.value,
-            set: (variant: Variant) => {
-                e.writeEnumValue(variant.value);
-                return StatusCodes.Good;
-            }
+            propertyOf: addressSpace.rootFolder.objects.server.vendorServerInfo
         });
 
         // simulate a write
-        const statusCode = await e.writeValue(SessionContext.defaultContext,
+        const statusCode = await e.writeValue(
+            SessionContext.defaultContext,
             new DataValue({
                 value: {
-                    dataType: DataType.UInt32,
+                    dataType: DataType.Int32,
                     value: 2
                 }
-            }));
+            })
+        );
         should(statusCode).eql(StatusCodes.Good);
+
+        e.readEnumValue().should.eql({ name: "IDLE", value: 2 });
     });
 });

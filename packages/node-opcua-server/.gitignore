@@ -1,6 +1,5 @@
 certificates
-tsconfig.json
 tsconfig.tsbuildinfo
 tslint.*
 .mocharc.yaml
-test/
+

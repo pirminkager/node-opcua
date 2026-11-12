@@ -1,44 +1,41 @@
-import * as should from "should";
-
-import { AxisInformation, AxisScaleEnumeration, standardUnits } from "node-opcua-data-access";
+import { AxisScaleEnumeration, standardUnits } from "node-opcua-data-access";
 import { coerceLocalizedText } from "node-opcua-data-model";
 import { resolveNodeId } from "node-opcua-nodeid";
-import { AxisInformationOptions } from "node-opcua-types";
-import { Variant } from "node-opcua-variant";
-import { DataType } from "node-opcua-variant";
-import { VariantArrayType } from "node-opcua-variant";
-import { AddressSpace, Folder, Namespace } from "../..";
+import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
+import should from "should";
 
-export function subtest_Y_array_item_type(maintest: any) {
+import type { AddressSpace, Namespace, UAFolder } from "../../dist/api/index.js";
 
+interface MainTest {
+    addressSpace: AddressSpace;
+}
+
+export function subtest_Y_array_item_type(maintest: MainTest): void {
     describe("YArrayItemType", () => {
-
         let addressSpace: AddressSpace;
         let namespace: Namespace;
 
         before(() => {
             addressSpace = maintest.addressSpace;
             namespace = addressSpace.getOwnNamespace();
-            should(addressSpace).be.instanceof(AddressSpace);
+            // AddressSpace is published as an interface and a factory, with no constructor to
+            // check against, so this asserts that there is one rather than which class it is
+            should.exist(addressSpace);
         });
 
-        let objectsFolder: Folder;
+        let objectsFolder: UAFolder;
         before(() => {
-            objectsFolder = addressSpace.findNode("ObjectsFolder")! as Folder;
+            objectsFolder = addressSpace.findNode("ObjectsFolder")! as UAFolder;
             objectsFolder.browseName.toString().should.eql("Objects");
         });
 
         it("YArrayItemType should not be abstract", () => {
-
             const YArrayItemType = addressSpace.findVariableType("YArrayItemType")!;
             YArrayItemType.isAbstract.should.eql(false);
-
         });
 
         it("should add a YArrayItem", () => {
-
             const yArrayItem = namespace.addYArrayItem({
-
                 organizedBy: objectsFolder,
 
                 browseName: "MyYArrayItem",
@@ -55,8 +52,10 @@ export function subtest_Y_array_item_type(maintest: any) {
                     axisSteps: [0, 25, 50, 75, 100],
                     engineeringUnits: standardUnits.second,
                     euRange: { low: -10, high: 100 },
-                    title: coerceLocalizedText("the X axis legend"),
+                    title: coerceLocalizedText("the X axis legend")
                 },
+
+                dataType: DataType.Float,
 
                 value: new Variant({
                     arrayType: VariantArrayType.Array,
@@ -75,31 +74,28 @@ export function subtest_Y_array_item_type(maintest: any) {
             yArrayItem.readValue().value.value[2].should.eql(3);
             yArrayItem.readValue().value.value[3].should.eql(2);
 
-            yArrayItem.hasOwnProperty("instrumentRange").should.eql(false, "optional instrument Range not expected");
+            should(yArrayItem.instrumentRange).eql(undefined, "optional instrument Range not expected");
 
             yArrayItem.euRange.readValue().value.value.low.should.eql(100);
             yArrayItem.euRange.readValue().value.value.high.should.eql(200);
 
-            yArrayItem.title.readValue().value.value.text!.should.eql("My Little YArray Item");
+            should(yArrayItem.title.readValue().value.value.text).eql("My Little YArray Item");
 
             // access xAxisDefinition from extension object
-            const x = yArrayItem.xAxisDefinition.readValue().value.value as AxisInformation;
+            const x = yArrayItem.xAxisDefinition.readValue().value.value;
 
             x.engineeringUnits.should.eql(standardUnits.second);
-            x.title!.text!.should.eql("the X axis legend");
+            should(x.title?.text).eql("the X axis legend");
             x.euRange.low.should.eql(-10);
             x.euRange.high.should.eql(100);
 
             // xx console.log("xxxx ",yArrayItem.xAxisDefinition.toString())
             // xx yArrayItem.xAxisDefinition.euRange.readValue().value.value.should.eql(standardUnits.second);
             // xx yArrayItem.xAxisDefinition.engineeringUnits.readValue().value.value.should.eql(standardUnits.second);
-
         });
 
         it("should add a YArrayItem with optional instrument range", () => {
-
             const prop = namespace.addYArrayItem({
-
                 organizedBy: objectsFolder,
 
                 title: "SomeTitle",
@@ -117,7 +113,7 @@ export function subtest_Y_array_item_type(maintest: any) {
                     axisSteps: [0, 25, 50, 75, 100],
                     engineeringUnits: standardUnits.second,
                     euRange: { low: 0, high: 100 },
-                    title: coerceLocalizedText("the X axis legend"),
+                    title: coerceLocalizedText("the X axis legend")
                 },
 
                 value: new Variant({
@@ -131,9 +127,8 @@ export function subtest_Y_array_item_type(maintest: any) {
 
             prop.dataType.should.eql(resolveNodeId("Float"));
 
-            prop.instrumentRange.readValue().value.value.low.should.eql(-100);
-            prop.instrumentRange.readValue().value.value.high.should.eql(200);
-
+            should(prop.instrumentRange?.readValue().value.value.low).eql(-100);
+            should(prop.instrumentRange?.readValue().value.value.high).eql(200);
         });
     });
 }

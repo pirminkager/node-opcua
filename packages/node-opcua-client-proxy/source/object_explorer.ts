@@ -1,40 +1,42 @@
 /**
  * @module node-opcua-client-proxy
  */
-import * as async from "async";
-import * as _ from "underscore";
 
 import { assert } from "node-opcua-assert";
-import { Callback, ErrorCallback } from "node-opcua-status-code";
+import { DataTypeIds } from "node-opcua-constants";
 import { AttributeIds, BrowseDirection, makeNodeClassMask, makeResultMask } from "node-opcua-data-model";
-import { DataValue } from "node-opcua-data-value";
-import { NodeId } from "node-opcua-nodeid";
-import { IBasicSession } from "node-opcua-pseudo-session";
-import { BrowseResult, ReferenceDescription } from "node-opcua-service-browse";
-import { CallMethodRequest, CallMethodResult } from "node-opcua-service-call";
-import { StatusCodes } from "node-opcua-status-code";
-import { lowerFirstLetter } from "node-opcua-utils";
+import { make_debugLog } from "node-opcua-debug";
+import type { NodeId } from "node-opcua-nodeid";
+import type { IBasicSessionBrowseAsyncSimple, IBasicSessionReadAsyncSimple } from "node-opcua-pseudo-session";
+import type { ReferenceDescription } from "node-opcua-service-browse";
+import { type Argument, CallMethodRequest } from "node-opcua-service-call";
+import { lowerFirstLetter, setOwnProperty } from "node-opcua-utils";
 import { DataType, Variant, VariantArrayType } from "node-opcua-variant";
-import { makeRefId } from "./proxy";
-import { UAProxyManager } from "./proxy_manager";
-import { ProxyVariable } from "./proxy_variable";
+
+import { makeRefId } from "./proxy.js";
+import type { ArgumentEx, MethodDescription, ProxyBaseNode } from "./proxy_base_node.js";
+import type { UAProxyManager } from "./proxy_manager.js";
+import { ProxyVariable } from "./proxy_variable.js";
+
+const doDebug = false;
+const debugLog = make_debugLog("Proxy");
+
+// ProxyBaseNode plus the dynamically-named child properties (obj[browseName] = childNode)
+// that add_component/add_property/addFolderElement/add_method install as they walk the
+// address space; there is no way to know those names statically.
+type ProxyNodeUnderConstruction = ProxyBaseNode & { [dynamicChildName: string]: unknown };
 
 export interface ObjectExplorerOptions {
     proxyManager: UAProxyManager;
     name: string;
     nodeId: NodeId;
-    parent: any;
+    parent: ProxyNodeUnderConstruction;
 }
 
 const resultMask = makeResultMask("ReferenceType | IsForward | BrowseName | NodeClass | TypeDefinition");
 
-
-function convertNodeIdToDataType(dataTypeId: NodeId): DataType {
-    return (dataTypeId as any)._dataType as DataType;
-}
-
 /**
- * @method convertNodeIdToDataTypeAsync
+
  *
  * @param session
  * @param dataTypeId
@@ -55,359 +57,288 @@ function convertNodeIdToDataType(dataTypeId: NodeId): DataType {
  *      });
  *
  * see also AddressSpace#findCorrespondingBasicDataType
+ *
+ * for an enumeration dataType will be DataType.Int32
  */
-function convertNodeIdToDataTypeAsync(
-    session: IBasicSession,
-    dataTypeId: NodeId,
-    callback: Callback<DataType>
-) {
-
+async function convertNodeIdToDataTypeAsync(
+    session: IBasicSessionReadAsyncSimple & IBasicSessionBrowseAsyncSimple,
+    dataTypeId: NodeId
+): Promise<DataType> {
     const nodeToRead = {
         attributeId: AttributeIds.BrowseName,
-        nodeId: dataTypeId,
+        nodeId: dataTypeId
     };
+    const dataValue = await session.read(nodeToRead);
+    let dataType: DataType;
+    /* c8 ignore next */
+    if (dataValue.statusCode.isNotGood()) {
+        dataType = DataType.Null;
+        return dataType;
+    }
 
-    session.read(nodeToRead, (err: Error | null, dataValue?: DataValue) => {
+    const dataTypeName = dataValue.value.value;
 
-        // istanbul ignore next
-        if (err) {
-            setImmediate(() => {
-                callback(err);
-            });
-            return;
-        }
+    if (dataTypeId.namespace === 0 && dataTypeId.value === DataTypeIds.Enumeration) {
+        dataType = DataType.Int32;
+        return dataType;
+    }
 
-        dataValue = dataValue!;
+    if (dataTypeId.namespace === 0 && DataType[dataTypeId.value as number]) {
+        dataType = (DataType as unknown as Record<number, DataType>)[dataTypeId.value as number];
+        return dataType;
+    }
 
-        let dataType: DataType;
-        // istanbul ignore next
-        if (dataValue.statusCode !== StatusCodes.Good) {
-            dataType = DataType.Null;
-            setImmediate(() => {
-                callback(null, dataType);
-            });
-            return;
-        }
+    /// example => Duration (i=290) => Double (i=11)
+    // read subTypeOf
+    const nodeToBrowse = {
+        browseDirection: BrowseDirection.Inverse,
+        includeSubtypes: false,
+        nodeId: dataTypeId,
+        // BrowseDescription
+        referenceTypeId: makeRefId("HasSubtype"),
+        // xx nodeClassMask: makeNodeClassMask("ObjectType"),
+        resultMask
+    };
+    const browseResult = await session.browse(nodeToBrowse);
 
-        const dataTypeName = dataValue.value.value;
+    const references = browseResult?.references;
 
-        if (dataTypeId.namespace === 0 && DataType[dataTypeId.value as number]) {
-            dataType = (DataType as any)[dataTypeId.value as number] as DataType;
-            setImmediate(() => {
-                callback(null, dataType);
-            });
-            return;
-        }
-
-        /// example => Duration (i=290) => Double (i=11)
-        // read subTypeOf
-        const nodeToBrowse = {
-            browseDirection: BrowseDirection.Inverse,
-            includeSubtypes: false,
-            nodeId: dataTypeId,
-            // BrowseDescription
-            referenceTypeId: makeRefId("HasSubtype"),
-            // xx nodeClassMask: makeNodeClassMask("ObjectType"),
-            resultMask
-        };
-        // tslint:disable:no-shadowed-variable
-        session.browse(nodeToBrowse, (err: Error | null, browseResult?: BrowseResult) => {
-            // istanbul ignore next
-            if (err) {
-                return callback(err);
-            }
-
-            const references = browseResult!.references;
-
-            if (!references || references.length !== 1) {
-                return callback(new Error("cannot find SuperType of " + dataTypeName.toString()));
-            }
-            const nodeId = references[0].nodeId;
-            return convertNodeIdToDataTypeAsync(session, nodeId, callback);
-        });
-    });
+    if (references?.length !== 1) {
+        throw new Error(`cannot find SuperType of ${dataTypeName.toString()}`);
+    }
+    const nodeId = references[0].nodeId;
+    return convertNodeIdToDataTypeAsync(session, nodeId);
 }
 
-/**
- * @method add_method
- * @private
- */
-function add_method(
-    proxyManager: UAProxyManager,
-    obj: any,
-    reference: ReferenceDescription,
-    outerCallback: (err?: Error) => void
-) {
+function convertToVariant(value: unknown, arg: ArgumentEx, _propName: string): Variant {
+    const dataType = arg._basicDataType || DataType.Null;
+    const arrayType =
+        arg.valueRank === 1 ? VariantArrayType.Array : arg.valueRank === -1 ? VariantArrayType.Scalar : VariantArrayType.Matrix;
 
-    const session = proxyManager.session;
+    if (value === undefined) {
+        throw new Error("expecting input argument ");
+    }
+    if (arrayType === VariantArrayType.Array) {
+        if (!Array.isArray(value)) {
+            throw new Error("expecting value to be an Array or a TypedArray");
+        }
+    }
+    return new Variant({ arrayType, dataType, value });
+}
 
-    const name = lowerFirstLetter(reference.browseName.name!);
+function convertToVariantArray(inputArgsDef: ArgumentEx[], inputArgs: Record<string, unknown>): Variant[] {
+    const inputArguments: Variant[] = inputArgsDef.map((arg: ArgumentEx) => {
+        const propName = lowerFirstLetter(arg.name || "");
+        const value = inputArgs[propName];
+        return convertToVariant(value, arg, propName);
+    });
+    return inputArguments;
+}
 
-    obj[name] = function functionCaller(
-        inputArgs: any,
-        callback: (err: Error | null, args?: any[]) => void
-    ) {
+import type { StatusCode } from "node-opcua-status-code";
+import type { ProxyNode } from "./proxy_transition.js";
 
-        assert(_.isFunction(callback));
+function makeFunction(obj: ProxyNodeUnderConstruction, methodName: string) {
+    return async function functionCaller(
+        this: ProxyNodeUnderConstruction,
+        inputArgs: Record<string, unknown>
+    ): Promise<{ statusCode: StatusCode; output?: Record<string, unknown> }> {
+        // proxyManager is a private field of ProxyBaseNode, not part of its public shape;
+        // functionCaller is installed onto instances as a dynamic method (obj[methodName] =
+        // methodObj.func) and needs it at the call site regardless.
+        const proxyManager = (this as unknown as { proxyManager: UAProxyManager }).proxyManager;
+        const session = proxyManager.session;
+
+        const methodDef = this.$methods[methodName];
         // convert input arguments into Variants
-        const inputArgsDef = obj[name].inputArguments || [];
+        const inputArgsDef = methodDef.inputArguments || [];
 
-        const inputArguments: Variant[] = inputArgsDef.map((arg: any) => {
-
-            const dataType = convertNodeIdToDataType(arg.dataType);
-
-            const arrayType = (arg.valueRank === 1) ? VariantArrayType.Array : VariantArrayType.Scalar;
-
-            // xx console.log("xxx ",arg.toString());
-            const propName = lowerFirstLetter(arg.name);
-
-            const value = inputArgs[propName];
-            if (value === undefined) {
-                throw new Error("expecting input argument " + propName);
-            }
-            if (arrayType === VariantArrayType.Array) {
-                if (!_.isArray(value)) {
-                    throw new Error("expecting value to be an Array or a TypedArray");
-                }
-            }
-            return new Variant({ arrayType, dataType, value });
-        });
+        const inputArguments: Variant[] = convertToVariantArray(inputArgsDef, inputArgs);
 
         const methodToCall = new CallMethodRequest({
             inputArguments,
-            methodId: reference.nodeId,
-            objectId: obj.nodeId,
+            methodId: methodDef.nodeId,
+            objectId: obj.nodeId
         });
 
-        session.call(methodToCall, (err: Error | null, callResult?: CallMethodResult) => {
+        const callResult = await session.call(methodToCall);
 
-            // istanbul ignore next
-            if (err) {
-                return callback(err);
-            }
-
-            callResult = callResult!;
-
-            if (callResult.statusCode !== StatusCodes.Good) {
-                return callback(new Error("Error " + callResult.statusCode.toString()));
-            }
-
-            callResult.outputArguments = callResult.outputArguments || [];
-
-            obj[name].outputArguments = obj[name].outputArguments || [];
-
-            if (callResult.outputArguments.length !== obj[name].outputArguments.length) {
-                return callback(new Error("Internal error callResult.outputArguments.length "
-                    + callResult.outputArguments.length + " " + obj[name].outputArguments.length));
-            }
-
-            const outputArgs: any = {};
-
-            const outputArgsDef = obj[name].outputArguments;
-
-            _.zip(outputArgsDef, callResult.outputArguments).forEach((pair: any) => {
-                const arg = pair[0];
-                const variant = pair[1];
-
-                const propName = lowerFirstLetter(arg.name);
-                outputArgs[propName] = variant.value;
-
-            });
-            callback(err, outputArgs);
-
-        });
-    };
-
-    function extractDataType(
-        arg: any,
-        callback: any
-    ): void {
-
-        if (arg.dataType && arg.dataType._dataType) {
-            setImmediate(callback); // already convertedr
-            return;
+        if (callResult.statusCode.isNotGood()) {
+            return { statusCode: callResult.statusCode };
         }
 
-        convertNodeIdToDataTypeAsync(session, arg.dataType, (err: Error | null, dataType?: DataType) => {
-            if (!err) {
-                arg.dataType._dataType = dataType;
-            }
-            callback(err);
+        callResult.outputArguments = callResult.outputArguments || [];
+
+        if (callResult.outputArguments.length !== methodDef.outputArguments.length) {
+            throw new Error(
+                "Internal error callResult.outputArguments.length " +
+                    callResult.outputArguments.length +
+                    " " +
+                    methodDef.outputArguments.length
+            );
+        }
+        const output: Record<string, unknown> = {};
+        methodDef.outputArguments.forEach((arg: Argument, index: number) => {
+            const variant = callResult?.outputArguments?.[index];
+            const propName = lowerFirstLetter(arg.name || "");
+            setOwnProperty(output, propName, variant?.value);
         });
+
+        return { statusCode: callResult.statusCode, output };
+    };
+}
+
+async function extractDataType(
+    session: IBasicSessionReadAsyncSimple & IBasicSessionBrowseAsyncSimple,
+    arg: ArgumentEx
+): Promise<void> {
+    if (arg.dataType && arg._basicDataType) {
+        return;
     }
+    const dataType = await convertNodeIdToDataTypeAsync(session, arg.dataType);
+    arg._basicDataType = dataType;
+}
+/**
+ 
+ * @private
+ */
+async function add_method(
+    proxyManager: UAProxyManager,
+    obj: ProxyNodeUnderConstruction,
+    reference: ReferenceDescription
+): Promise<void> {
+    const session = proxyManager.session;
 
-    const methodObj = {
-        browseName: name,
+    const methodName = lowerFirstLetter(reference.browseName.name || "");
+
+    let inputArguments: ArgumentEx[] = [];
+    let outputArguments: ArgumentEx[] = [];
+
+    const argumentDefinition = await session.getArgumentDefinition(reference.nodeId);
+    inputArguments = (argumentDefinition.inputArguments as ArgumentEx[]) || [];
+    outputArguments = (argumentDefinition.outputArguments as ArgumentEx[]) || [];
+
+    const promises: Promise<void>[] = [];
+    for (const arg of inputArguments || []) {
+        promises.push(extractDataType(session, arg));
+    }
+    for (const arg of outputArguments || []) {
+        promises.push(extractDataType(session, arg));
+    }
+    await Promise.all(promises);
+
+    const methodObj: MethodDescription = {
+        browseName: methodName,
         executableFlag: false,
-        func: obj[name],
+        func: makeFunction(obj, methodName),
         nodeId: reference.nodeId,
+        inputArguments,
+        outputArguments
     };
-    obj.$methods[name] = methodObj;
+    setOwnProperty(obj.$methods as unknown as Record<string, unknown>, methodName, methodObj);
+    // the callable is also exposed directly as obj[methodName](...), decorated with the
+    // same input/output argument metadata carried by methodObj, for convenience.
+    const callableMethod = methodObj.func as MethodDescription["func"] & {
+        inputArguments: ArgumentEx[];
+        outputArguments: ArgumentEx[];
+    };
+    callableMethod.inputArguments = inputArguments;
+    callableMethod.outputArguments = outputArguments;
+    setOwnProperty(obj as unknown as Record<string, unknown>, methodName, callableMethod);
 
-    // tslint:disable:no-shadowed-variable
-    async.series([
-
-        (callback: ErrorCallback) => {
-
-            session.getArgumentDefinition(reference.nodeId, (err: Error | null, args?: any) => {
-                // istanbul ignore next
-                if (err) {
-                    setImmediate(() => {
-                        callback(err);
-                    });
-                    return;
-                }
-                const inputArguments = args.inputArguments;
-                const outputArguments = args.outputArguments;
-
-                obj[name].inputArguments = inputArguments;
-                obj[name].outputArguments = outputArguments;
-
-                async.series([
-                    (callback: ErrorCallback) => {
-                        async.eachSeries(obj[name].inputArguments, extractDataType, (err) => callback(err!));
-                    },
-                    (callback: ErrorCallback) => {
-                        async.eachSeries(obj[name].outputArguments, extractDataType, (err) => callback(err!));
-                    }
-                ], (err) => callback(err!));
-            });
-        },
-
-        (callback: ErrorCallback) => {
-            proxyManager._monitor_execution_flag(methodObj, () => {
-                callback();
-            });
-        }
-    ], (err) => outerCallback(err!));
-
+    doDebug && debugLog("installing method name", methodName);
+    await proxyManager._monitor_execution_flag(methodObj);
 }
 
-function add_component(
+async function add_component(
     proxyManager: UAProxyManager,
-    obj: any,
-    reference: ReferenceDescription,
-    callback: (err?: Error) => void) {
-
-    const session = proxyManager.session;
-
+    obj: ProxyNodeUnderConstruction,
+    reference: ReferenceDescription
+): Promise<void> {
     const name = lowerFirstLetter(reference.browseName.name || "");
-
-    proxyManager.getObject(reference.nodeId, (err?: Error | null, childObj?: any) => {
-
-        // istanbul ignore else
-        if (!err) {
-            childObj = new ObjectExplorer({
-                name,
-                nodeId: reference.nodeId,
-                parent: obj,
-                proxyManager,
-            });
-            obj[name] = childObj;
-            obj.$components.push(childObj);
-
-            childObj.$resolve(callback);
-        } else {
-            callback(err);
-        }
+    await proxyManager.getObject(reference.nodeId);
+    const childObj = new ObjectExplorer({
+        name,
+        nodeId: reference.nodeId,
+        parent: obj,
+        proxyManager
     });
+    setOwnProperty(obj as unknown as Record<string, unknown>, name, childObj);
+    // childObj is an unresolved placeholder here; $resolve() below pushes the real,
+    // fully-typed ProxyNode once the child has been fetched.
+    obj.$components.push(childObj as unknown as ProxyNode);
+    await childObj.$resolve();
 }
 
-function addFolderElement(
+async function addFolderElement(
     proxyManager: UAProxyManager,
-    obj: any,
-    reference: ReferenceDescription,
-    callback: (err?: Error) => void
-) {
-
-    const session = proxyManager.session;
-
+    obj: ProxyNodeUnderConstruction,
+    reference: ReferenceDescription
+): Promise<void> {
     const name = lowerFirstLetter(reference.browseName.name || "");
 
     const childObj = new ObjectExplorer({
         name,
         nodeId: reference.nodeId,
         parent: obj,
-        proxyManager,
+        proxyManager
     });
 
-    obj[name] = childObj;
-    obj.$organizes.push(childObj);
-    childObj.$resolve(callback);
+    setOwnProperty(obj as unknown as Record<string, unknown>, name, childObj);
+    // childObj is an unresolved placeholder here; $resolve() below pushes the real,
+    // fully-typed ProxyNode once the child has been fetched.
+    obj.$organizes.push(childObj as unknown as ProxyNode);
+    await childObj.$resolve();
 }
 
-function add_property(
+async function add_property(
     proxyManager: UAProxyManager,
-    obj: any,
-    reference: ReferenceDescription,
-    callback: (err?: Error) => void
-) {
-
-    const session = proxyManager.session;
-
+    obj: ProxyNodeUnderConstruction,
+    reference: ReferenceDescription
+): Promise<void> {
     const name = lowerFirstLetter(reference.browseName.name || "");
 
-    obj[name] = new ProxyVariable(proxyManager, reference.nodeId, reference);
-    obj.$properties[name] = obj[name];
-
-    setImmediate(callback);
+    const propertyNode = new ProxyVariable(proxyManager, reference.nodeId, reference);
+    setOwnProperty(obj as unknown as Record<string, unknown>, name, propertyNode);
+    setOwnProperty(obj.$properties as unknown as Record<string, unknown>, name, propertyNode);
 }
 
-function add_typeDefinition(
-    proxyManager: UAProxyManager,
-    obj: any,
-    references: ReferenceDescription[],
-    callback: (err?: Error) => void
-): void {
-    const session = proxyManager.session;
+async function add_typeDefinition(
+    _proxyManager: UAProxyManager,
+    obj: ProxyNodeUnderConstruction,
+    references: ReferenceDescription[]
+): Promise<void> {
     references = references || [];
     if (references.length !== 1) {
-        // xx console.log(" cannot find type definition", references.length);
-        setImmediate(callback);
         return;
     }
     const reference = references[0];
     assert(!obj.typeDefinition, "type definition can only be set once");
     obj.typeDefinition = reference.browseName.name || "";
-    setImmediate(callback);
 }
 
-function addFromState(
+async function addFromState(
     proxyManager: UAProxyManager,
-    obj: any,
-    reference: ReferenceDescription,
-    callback: (err?: Error) => void
-) {
-    proxyManager.getObject(reference.nodeId, (err: Error | null, childObj: any) => {
-        if (err) {
-            callback(err);
-        }
-        obj.$fromState = childObj;
-        callback();
-    });
+    obj: ProxyNodeUnderConstruction,
+    reference: ReferenceDescription
+): Promise<void> {
+    const childObj = await proxyManager.getObject(reference.nodeId);
+    obj.$fromState = childObj;
 }
 
-function addToState(
+async function addToState(
     proxyManager: UAProxyManager,
-    obj: any,
-    reference: ReferenceDescription,
-    callback: (err?: Error) => void
-) {
-    proxyManager.getObject(reference.nodeId, (err: Error | null, childObj: any) => {
-        if (err) {
-            callback(err);
-        }
-        obj.$toState = childObj;
-        callback();
-    });
+    obj: ProxyNodeUnderConstruction,
+    reference: ReferenceDescription
+): Promise<void> {
+    const childObj = await proxyManager.getObject(reference.nodeId);
+    obj.$toState = childObj;
 }
-
 export class ObjectExplorer {
-
     public proxyManager: UAProxyManager;
     public name: string;
     public nodeId: NodeId;
-    public parent: any;
+    public parent: ProxyNodeUnderConstruction;
 
     constructor(options: ObjectExplorerOptions) {
         this.proxyManager = options.proxyManager;
@@ -416,32 +347,19 @@ export class ObjectExplorer {
         this.parent = options.parent;
     }
 
-    public $resolve(callback: (err?: Error) => void) {
-
-        this.proxyManager.getObject(
-            this.nodeId,
-            (err: Error | null, childObj: any) => {
-
-                // istanbul ignore next
-                if (err) {
-                    return callback(err);
-                }
-
-                this.parent[this.name] = childObj;
-                this.parent.$components.push(childObj);
-
-                callback();
-            });
+    public async $resolve(): Promise<void> {
+        const childObj = await this.proxyManager.getObject(this.nodeId);
+        setOwnProperty(this.parent as unknown as Record<string, unknown>, this.name, childObj);
+        this.parent.$components.push(childObj);
     }
-
 }
 
-export function readUAStructure(
-    proxyManager: UAProxyManager,
-    obj: any,
-    callback: ErrorCallback
-) {
+function t(references: ReferenceDescription[] | null) {
+    if (!references) return "";
+    return references.map((r: ReferenceDescription) => `${r.browseName.name} ${r.nodeId.toString()}`);
+}
 
+export async function readUAStructure(proxyManager: UAProxyManager, obj: ProxyNodeUnderConstruction): Promise<ProxyNode> {
     const session = proxyManager.session;
 
     //   0   Object
@@ -449,8 +367,7 @@ export function readUAStructure(
     //   2   Method
     const nodeId = obj.nodeId;
     const nodesToBrowse = [
-
-        // Components (except Methods)
+        // 0. Components (except Methods)
         {
             // BrowseDescription
             browseDirection: BrowseDirection.Forward,
@@ -458,9 +375,9 @@ export function readUAStructure(
             nodeClassMask: makeNodeClassMask("Object | Variable"), // we don't want Method here
             nodeId,
             referenceTypeId: makeRefId("HasComponent"),
-            resultMask,
+            resultMask
         },
-        // Properties
+        // 1. Properties
         {
             // BrowseDescription
             browseDirection: BrowseDirection.Forward,
@@ -471,7 +388,7 @@ export function readUAStructure(
             resultMask
         },
 
-        // Methods
+        // 2.  Methods
         {
             // BrowseDescription
             browseDirection: BrowseDirection.Forward,
@@ -518,77 +435,34 @@ export function readUAStructure(
             resultMask
         }
     ];
-    session.browse(nodesToBrowse, (err: Error | null, browseResults?: BrowseResult[]) => {
+    const browseResults = await session.browse(nodesToBrowse);
+    // c8 ignore next
+    if (doDebug) {
+        debugLog("Components", t(browseResults[0].references));
+        debugLog("Properties", t(browseResults[1].references));
+        debugLog("Methods", t(browseResults[2].references));
+    }
 
-        function t(references: ReferenceDescription[]) {
-            return references.map((r: ReferenceDescription) => r.browseName.name + " " + r.nodeId.toString());
-        }
+    const promises: Promise<void>[] = [];
 
-        browseResults = browseResults || [];
+    for (const reference of browseResults[0].references || []) {
+        promises.push(add_component(proxyManager, obj, reference));
+    }
+    for (const reference of browseResults[1].references || []) {
+        promises.push(add_property(proxyManager, obj, reference));
+    }
+    for (const reference of browseResults[2].references || []) {
+        promises.push(add_method(proxyManager, obj, reference));
+    }
+    browseResults[3].references?.length && promises.push(add_typeDefinition(proxyManager, obj, browseResults[3].references || []));
+    browseResults[4].references?.length && promises.push(addFromState(proxyManager, obj, browseResults[4].references[0]));
+    browseResults[5].references?.length && promises.push(addToState(proxyManager, obj, browseResults[5].references[0]));
+    for (const reference of browseResults[6].references || []) {
+        promises.push(addFolderElement(proxyManager, obj, reference));
+    }
 
-        // istanbul ignore next
-        if (err) {
-            return callback(err);
-        }
-
-        // xx console.log("Components", t(results[0].references));
-        // xx console.log("Properties", t(results[1].references));
-        // xx console.log("Methods", t(results[2].references));
-        async.series([
-
-            (callback: ErrorCallback) => {
-                async.mapSeries(browseResults![0].references!,
-                    (reference: ReferenceDescription, callback: ErrorCallback) =>
-                        add_component(proxyManager, obj, reference, callback), (err) => callback(err!));
-            },
-
-            (callback: ErrorCallback) => {
-                async.mapSeries(browseResults![1].references!,
-                    (reference: ReferenceDescription, callback: ErrorCallback) =>
-                        add_property(proxyManager, obj, reference, callback), (err) => callback(err!));
-            },
-
-            // now enrich our object with nice callable async methods
-            (callback: ErrorCallback) => {
-                async.mapSeries(browseResults![2].references!,
-                    (reference: ReferenceDescription, callback: ErrorCallback) =>
-                        add_method(proxyManager, obj, reference, callback), (err) => callback(err!));
-            },
-
-            // now set typeDefinition
-            (callback: ErrorCallback) => {
-                add_typeDefinition(proxyManager, obj, browseResults![3].references!, callback);
-            },
-
-            // FromState
-            (callback: ErrorCallback) => {
-                // fromState
-                const reference = browseResults![4].references ? browseResults![4].references![0] : null;
-                // fromState
-                if (reference) {
-                    return addFromState(proxyManager, obj, reference, callback);
-                }
-                callback();
-            },
-
-            // ToState
-            (callback: ErrorCallback) => {
-
-                const reference = browseResults![5].references ? browseResults![5].references![0] : null;
-                // fromState
-                if (reference) {
-                    return addToState(proxyManager, obj, reference, callback);
-                }
-                callback();
-            },
-
-            // Organizes
-            (callback: ErrorCallback) => {
-                async.mapSeries(browseResults![6].references!,
-                    (reference: ReferenceDescription, callback: ErrorCallback) =>
-                        addFolderElement(proxyManager, obj, reference, callback), (err) => callback(err!));
-            }
-
-        ], (err) => callback(err!));
-    });
+    await Promise.all(promises);
+    // $fromState/$toState are only ever set dynamically (addFromState/addToState above), so
+    // ProxyNodeUnderConstruction's index signature can't statically prove they're present.
+    return obj as unknown as ProxyNode;
 }

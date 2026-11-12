@@ -1,48 +1,48 @@
 {
-  "name": "node-opcua-model",
-  "version": "2.6.0-alpha.1",
-  "description": "pure nodejs OPCUA SDK - module - model",
-  "main": "index.js",
-  "scripts": {
-    "_build": "tsc -b",
-    "test": "mocha test"
-  },
-  "author": "Etienne Rossignon",
-  "license": "MIT",
-  "dependencies": {
-    "chalk": "^4.0.0",
-    "node-opcua-address-space": "^2.6.0-alpha.1",
-    "node-opcua-assert": "^2.6.0-alpha.1",
-    "node-opcua-basic-types": "^2.6.0-alpha.1",
-    "node-opcua-client": "^2.6.0-alpha.1",
-    "node-opcua-client-dynamic-extension-object": "^2.6.0-alpha.1",
-    "node-opcua-enum": "^2.6.0-alpha.1",
-    "node-opcua-factory": "^2.6.0-alpha.1",
-    "node-opcua-generator": "^2.6.0-alpha.1",
-    "node-opcua-nodeid": "^2.6.0-alpha.1",
-    "node-opcua-nodesets": "^2.6.0-alpha.1",
-    "node-opcua-schemas": "^2.6.0-alpha.1",
-    "node-opcua-service-browse": "^2.6.0-alpha.1",
-    "node-opcua-status-code": "^2.6.0-alpha.1",
-    "node-opcua-xml2json": "^2.6.0-alpha.1",
-    "underscore": "^1.10.2"
-  },
-  "devDependencies": {
-    "node-opcua-leak-detector": "^2.6.0-alpha.1",
-    "should": "^13.2.3"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git://github.com/node-opcua/node-opcua.git"
-  },
-  "keywords": [
-    "OPCUA",
-    "opcua",
-    "m2m",
-    "iot",
-    "opc ua",
-    "internet of things"
-  ],
-  "homepage": "http://node-opcua.github.io/",
-  "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c"
+    "name": "node-opcua-model",
+    "type": "module",
+    "version": "2.187.26",
+    "description": "pure nodejs OPCUA SDK - module model",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "private": true,
+    "scripts": {
+        "build": "tsc -b",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo tmp",
+        "test": "mocha",
+        "test:check": "tsc --noEmit -p test/tsconfig.json"
+    },
+    "author": "Etienne Rossignon",
+    "license": "MIT",
+    "dependencies": {
+        "command-line-args": "6.0.2",
+        "command-line-usage": "7.0.4",
+        "node-opcua-client-dynamic-extension-object": "2.187.26",
+        "node-opcua-pseudo-session": "2.187.26"
+    },
+    "devDependencies": {
+        "node-opcua-address-space": "2.187.26",
+        "node-opcua-assert": "2.186.7",
+        "node-opcua-leak-detector": "2.186.7",
+        "node-opcua-nodesets": "2.187.4",
+        "node-opcua-test-helpers": "2.184.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/node-opcua/node-opcua.git"
+    },
+    "keywords": [
+        "OPCUA",
+        "opcua",
+        "m2m",
+        "iot",
+        "opc ua",
+        "internet of things"
+    ],
+    "homepage": "http://node-opcua.github.io/",
+    "gitHead": "07dcdd8e8c7f2b55544c6e23023093e35674829c",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

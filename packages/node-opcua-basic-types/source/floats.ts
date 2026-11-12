@@ -1,16 +1,14 @@
 /***
  * @module node-opcua-basic-types
  */
-import * as _ from "underscore";
+import type { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
 
-import { BinaryStream, OutputBinaryStream } from "node-opcua-binary-stream";
-
-const minFloat = -3.4 * Math.pow(10, 38);
-const maxFloat = 3.4 * Math.pow(10, 38);
+const minFloat = -3.4 * 10 ** 38;
+const maxFloat = 3.4 * 10 ** 38;
 
 /**
  * return a random float value in the range of  min inclusive and  max exclusive
- * @method getRandomInt
+
  * @param min
  * @param max
  * @return {*}
@@ -20,8 +18,8 @@ function getRandomDouble(min: number, max: number) {
     return Math.random() * (max - min) + min;
 }
 
-export function isValidFloat(value: any): boolean {
-    if (!_.isFinite(value)) {
+export function isValidFloat(value: number): boolean {
+    if (!Number.isFinite(value)) {
         return false;
     }
     return value > minFloat && value < maxFloat;
@@ -45,12 +43,12 @@ export function encodeFloat(value: Float, stream: OutputBinaryStream): void {
     stream.writeFloat(value);
 }
 
-export function decodeFloat(stream: BinaryStream): Float {
+export function decodeFloat(stream: BinaryStream, _value?: number): Float {
     return stream.readFloat();
 }
 
-export function isValidDouble(value: any): boolean {
-    if (!_.isFinite(value)) {
+export function isValidDouble(value: number): boolean {
+    if (!Number.isFinite(value)) {
         return false;
     }
     return true;
@@ -62,23 +60,29 @@ export function randomDouble(): Double {
     return getRandomDouble(-1000000, 1000000);
 }
 
-export function encodeDouble(value: Double, stream: OutputBinaryStream) {
+export function encodeDouble(value: Double, stream: OutputBinaryStream): void {
     stream.writeDouble(value);
 }
 
-export function decodeDouble(stream: BinaryStream) {
+export function decodeDouble(stream: BinaryStream, _value?: number): Double {
     return stream.readDouble();
 }
 
-export function coerceFloat(value: any): Float {
+export function coerceFloat(value: number | null | string): Float {
     if (value === null || value === undefined) {
+        return 0.0;
+    }
+    if (typeof value === "number") {
         return value;
     }
     return parseFloat(value);
 }
 
-export function coerceDouble(value: any): Double {
+export function coerceDouble(value: number | null | string): Double {
     if (value === null || value === undefined) {
+        return 0.0;
+    }
+    if (typeof value === "number") {
         return value;
     }
     return parseFloat(value);

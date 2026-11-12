@@ -1,0 +1,156 @@
+import { make_debugLog } from "node-opcua-debug";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { GetEndpointsRequest } from "node-opcua-service-endpoints";
+import { packTcpMessage } from "node-opcua-transport";
+import * as fixture from "node-opcua-transport/testFixtures.js";
+import { openSecureChannelResponse1 } from "node-opcua-transport/testFixtures.js";
+import sinon from "sinon";
+
+import { ClientSecureChannelLayer } from "../dist/source/index.js";
+import { fakeAcknowledgeMessage, MockServerTransport } from "../dist/test_helpers/index.js";
+
+const _debugLog = make_debugLog("11-test_client_secure_channel_layer");
+
+describe("testing ClientSecureChannelLayer ", function (this: Mocha.Context) {
+    this.timeout(Math.max(120 * 1000, this.timeout()));
+
+    it("should create and close a ClientSecureChannelLayer", (done) => {
+        // here is a mock of the answer provided by the server
+        const mock = new MockServerTransport([
+            // ---------------------------------------------------- Transaction 1
+            // Client will send a HEl_message
+            // Server will reply with this :
+            packTcpMessage("ACK", fakeAcknowledgeMessage),
+
+            // ---------------------------------------------------- Transaction 2
+            // client will send a "OPN" OpenSecureChannelRequest
+            // Server will reply with this:
+            () => {
+                return openSecureChannelResponse1; // OpenChannelResponse
+            },
+            // ---------------------------------------------------- Transaction 3
+            // client will send a "CLO" CloseSecureChannelRequest
+            // Server will close the socket, without sending a response
+            //Xx packTcpMessage("CLO", fakeAcknowledgeMessage),
+            function (this: MockServerTransport) {
+                this.mockTransport.server.end();
+                return undefined; // ReplyEntry: no reply chunk for this transaction
+            },
+
+            () => {
+                done(new Error("no more packet to mock"));
+                return undefined; // ReplyEntry: no reply chunk for this transaction
+            }
+        ]);
+
+        mock.once("done", done);
+
+        const clientSecureChannel = new ClientSecureChannelLayer({});
+
+        clientSecureChannel.create("fake://localhost:2033/SomeAddress", (err) => {
+            if (err) {
+                return done(err);
+            }
+            clientSecureChannel.close((err) => {
+                done(err);
+            });
+        });
+    });
+
+    it("should use token provided by server in messages", (done) => {
+        const mock = new MockServerTransport([
+            // ---------------------------------------------------- Transaction 1
+            // Client will send a HEl_message
+            // Server will reply with this :
+            packTcpMessage("ACK", fakeAcknowledgeMessage),
+
+            // ---------------------------------------------------- Transaction 2
+            // client will send a "OPN" OpenSecureChannelRequest
+            // Server will reply with this:
+            fixture.openSecureChannelResponse1,
+
+            // ---------------------------------------------------- Transaction 3
+            // client will send a "CLO" CloseSecureChannelRequest
+            // Server will close the socket, without sending a response
+            function (this: MockServerTransport) {
+                this.mockTransport.server.end();
+                return undefined; // ReplyEntry: no reply chunk for this transaction
+            }
+        ]);
+
+        mock.on("done", done);
+
+        const secureChannel = new ClientSecureChannelLayer({});
+
+        secureChannel.create("fake://localhost:2033/SomeAddress", (err) => {
+            if (err) {
+                return done(err);
+            }
+
+            secureChannel.close((err) => {
+                done(err);
+            });
+        });
+    });
+
+    it("should callback with an error if performMessageTransaction is called before connection", (done) => {
+        const secureChannel = new ClientSecureChannelLayer({});
+
+        const message = new GetEndpointsRequest({});
+
+        secureChannel.performMessageTransaction(message, (err /*, response*/) => {
+            // err.message.should.equal("Client not connected");
+            (err as Error).message.should.match(/ClientSecureChannelLayer => Socket is closed !/);
+            done();
+        });
+    });
+
+    it("should expose the total number of bytes read and written", (done) => {
+        const mock = new MockServerTransport([
+            // ---------------------------------------------------- Transaction 1
+            // Client will send a HEl_message
+            // Server will reply with this :
+            packTcpMessage("ACK", fakeAcknowledgeMessage),
+
+            // ---------------------------------------------------- Transaction 2
+            // client will send a "OPN" OpenSecureChannelRequest
+            // Server will reply with this:
+            fixture.openSecureChannelResponse1,
+
+            // ---------------------------------------------------- Transaction 3
+            // client will send a "CLO" CloseSecureChannelRequest
+            // Server will close the socket, without sending a response
+            function (this: MockServerTransport) {
+                this.mockTransport.server.end();
+                return undefined; // ReplyEntry: no reply chunk for this transaction
+            }
+        ]);
+
+        mock.on("done", done);
+
+        const secureChannel = new ClientSecureChannelLayer({});
+
+        secureChannel.bytesRead.should.equal(0);
+        secureChannel.bytesWritten.should.equal(0);
+
+        secureChannel.create("fake://localhost:2033/SomeAddress", (err) => {
+            if (err) {
+                return done(err);
+            }
+
+            secureChannel.bytesRead.should.be.greaterThan(0);
+            secureChannel.bytesWritten.should.be.greaterThan(0);
+            secureChannel.transactionsPerformed.should.be.greaterThan(0);
+
+            secureChannel.isTransactionInProgress().should.eql(false);
+
+            const spyOnClose = sinon.spy();
+            secureChannel.on("close", spyOnClose);
+
+            secureChannel.close((err) => {
+                spyOnClose.callCount.should.eql(1, "secureChannel#close must be called once");
+                done(err);
+            });
+        });
+    });
+});

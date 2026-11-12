@@ -1,0 +1,98 @@
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { nodesets } from "node-opcua-nodesets";
+import should from "should";
+import { AddressSpace, type UAObject, type UAReferenceType } from "../dist/api/index.js";
+import { generateAddressSpace } from "../distNodeJS/index.js";
+
+interface UAMachineToolWithIdentification extends UAObject {
+    identification: UAObject & {
+        deviceClass: unknown;
+        softwareIdentification: unknown;
+        hardwareRevision: unknown;
+        manufacturer: unknown;
+        monthOfConstruction: unknown;
+        yearOfConstruction: unknown;
+        productCode: unknown;
+        serialNumber: unknown;
+        assetId: unknown;
+        componentName: unknown;
+        location: unknown;
+        initialOperationDate: unknown;
+        productInstanceUri: unknown;
+    };
+}
+
+describe("AddIns", () => {
+    let addressSpace: AddressSpace;
+    before(async () => {
+        addressSpace = AddressSpace.create();
+        await generateAddressSpace(addressSpace, [
+            nodesets.standard,
+            nodesets.di,
+            nodesets.ia,
+            nodesets.isa95JobControl,
+            nodesets.machinery,
+            nodesets.machineryJobs,
+            nodesets.machineTool
+        ]);
+    });
+    after(() => {
+        addressSpace.dispose();
+    });
+
+    it("Reference", () => {
+        const hasAddIn = addressSpace.findNode("HasAddIn")! as UAReferenceType;
+        const aggregates = addressSpace.findNode("Aggregates")! as UAReferenceType;
+        hasAddIn.isSubtypeOf(aggregates).should.eql(true);
+    });
+    it("AddIns", () => {
+        const nsMachinery = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/Machinery/");
+        const nsMachineTool = addressSpace.getNamespaceIndex("http://opcfoundation.org/UA/MachineTool/");
+        if (nsMachinery === -1) throw new Error("namespace not found");
+        if (nsMachineTool === -1) throw new Error("namespace not found");
+
+        const machineToolType = addressSpace.findObjectType("MachineToolType", nsMachineTool);
+        if (!machineToolType) throw new Error("MachineToolType not found");
+
+        const machines = addressSpace.rootFolder.objects.getFolderElementByName("Machines", nsMachinery);
+        if (!machines) throw new Error("Machines not found");
+
+        const machineTool = machineToolType.instantiate({
+            browseName: "MachineTool",
+            organizedBy: machines,
+            optionals: [
+                "Identification.DeviceClass",
+                "Identification.SoftwareIdentification",
+                "Identification.HardwareRevision",
+                "Identification.SoftwareRevision",
+                "Identification.Manufacturer",
+                "Identification.MonthOfConstruction",
+                "Identification.YearOfConstruction",
+                "Identification.ProductCode",
+                "Identification.SerialNumber",
+                "Identification.AssetId",
+                "Identification.ComponentName",
+                "Identification.Location",
+                "Identification.InitialOperationDate",
+                "Identification.ProductInstanceUri"
+            ]
+        }) as unknown as UAMachineToolWithIdentification;
+
+        console.log(machineTool.toString());
+        console.log(machineTool.identification.toString());
+
+        should.exist(machineTool.identification.deviceClass, "deviceClass must exist");
+        should.exist(machineTool.identification.softwareIdentification, "softwareIdentification must exist");
+        should.exist(machineTool.identification.hardwareRevision);
+        should.exist(machineTool.identification.manufacturer);
+        should.exist(machineTool.identification.monthOfConstruction);
+        should.exist(machineTool.identification.yearOfConstruction);
+        should.exist(machineTool.identification.productCode);
+        should.exist(machineTool.identification.serialNumber);
+        should.exist(machineTool.identification.assetId);
+        should.exist(machineTool.identification.componentName);
+        should.exist(machineTool.identification.location);
+        should.exist(machineTool.identification.initialOperationDate);
+        should.exist(machineTool.identification.productInstanceUri);
+    });
+});

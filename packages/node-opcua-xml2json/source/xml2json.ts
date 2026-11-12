@@ -3,57 +3,48 @@
  * node -> see if https://github.com/isaacs/sax-js could be used instead
  */
 
-// tslint:disable:max-classes-per-file
-// tslint:disable:no-var-requires
-// tslint:disable:unified-signatures
-
-import * as fs from "fs";
 import { assert } from "node-opcua-assert";
-import * as _ from "underscore";
-
-const LtxParser = require("ltx/lib/parsers/ltx.js");
+import { SaxLtx } from "./thirdparties/parser/lts.js";
 
 export type SimpleCallback = (err?: Error) => void;
 export type Callback<T> = (err?: Error | null, result?: T) => void;
-
-declare interface LtxParser {
-    write(str: string): void;
-
-    end(): void;
-
-    on(eventName: "startElement", eventHandler: (name: string, attrs: XmlAttributes) => void): void;
-
-    on(eventName: "endElement", eventHandler: (name: string) => void): void;
-
-    on(eventName: "text", eventHandler: (name: string) => void): void;
-
-    on(eventName: "close", eventHandler: () => void): void;
-
-}
 
 export interface Parser {
     [key: string]: ReaderState;
 }
 
 /**
- * @static
+ * the reader states of a definition, in a table of this engine's own. A definition is a plain
+ * object the caller may hand to any number of parsers (the shared Definition reader of the
+ * nodeset loader, for one), while a reader state carries the element being read: its parent, its
+ * attributes, its text so far. So the definition is never written to; each parser builds its
+ * states from it. A definition that refers to itself, directly or through a child, gets one state
+ * per engine for the cycle, the one being built when the cycle closes.
  * @private
- * @method _coerceParser
- * @param parser {map<ReaderState|options>}
- * @return {map}
  */
-function _coerceParser(parser: ParserLike): Parser {
-
-    for (const name of Object.keys(parser)) {
-        if (parser[name] && !(parser[name] instanceof ReaderState)) {
-            // this is to prevent recursion
-            const tmp = parser[name];
-            delete parser[name];
-            parser[name] = new ReaderState(tmp);
-        }
+function _coerceParser(parser: ParserLike | undefined): Parser {
+    // no prototype: an element name is looked up in this table for every element of the document,
+    // one hash probe that cannot find an Object member by mistake
+    const table: Parser = Object.create(null);
+    if (!parser) {
+        return table;
     }
-    return parser as Parser;
+    for (const name of Object.keys(parser)) {
+        const entry = parser[name];
+        if (!entry) {
+            continue;
+        }
+        table[name] = entry instanceof ReaderState ? entry : (statesUnderConstruction.get(entry) ?? new ReaderState(entry));
+    }
+    return table;
 }
+
+/**
+ * the states being built from a definition, for the duration of one root construction: the way a
+ * definition that closes a cycle finds the state already under way instead of recursing for ever
+ */
+let statesUnderConstruction = new WeakMap<ReaderStateParserLike, ReaderState>();
+let constructionDepth = 0;
 
 export interface XmlAttributes {
     [key: string]: string;
@@ -61,15 +52,9 @@ export interface XmlAttributes {
 
 export interface ReaderStateParser {
     parser?: ParserLike;
-    init?: (
-        this: IReaderState,
-        name: string,
-        attrs: XmlAttributes,
-        parent: IReaderState,
-        engine: Xml2Json
-    ) => void;
+    init?: (this: IReaderState, name: string, attrs: XmlAttributes, parent: IReaderState, engine: Xml2Json) => void;
     finish?: (this: IReaderState) => void;
-    startElement?: (this: IReaderState, name: string, attrs: XmlAttributes) => void;
+    startElement?: (this: IReaderState, name: string, attrs: XmlAttributes, qualifiedName?: string) => void;
     endElement?: (this: IReaderState, name: string) => void;
 }
 
@@ -79,125 +64,100 @@ export interface ParserLike {
 
 export interface ReaderStateParserLike {
     parser?: ParserLike;
-    init?: (
-        this: any,
-        name: string,
-        attrs: XmlAttributes,
-        parent: IReaderState,
-        engine: Xml2Json
-    ) => void;
+    // `this` here is an open extension point — callers across the workspace attach domain-specific
+    // shapes (e.g. EUInformationParserLevel2) that only duck-type against ReaderState, so a concrete
+    // `this: ReaderState` breaks those call sites structurally.
+    // biome-ignore lint/suspicious/noExplicitAny: see comment above
+    init?: (this: any, name: string, attrs: XmlAttributes, parent: IReaderState, engine: Xml2Json) => void;
+    // biome-ignore lint/suspicious/noExplicitAny: see comment above
     finish?: (this: any) => void;
-    startElement?: (this: any, name: string, attrs: XmlAttributes) => void;
+    // biome-ignore lint/suspicious/noExplicitAny: see comment above
+    startElement?: (this: any, name: string, attrs: XmlAttributes, qualifiedName?: string) => void;
+    // biome-ignore lint/suspicious/noExplicitAny: see comment above
     endElement?: (this: any, name: string) => void;
 }
 
 export interface IReaderState {
-
-    _on_init(
-        elementName: string,
-        attrs: XmlAttributes,
-        parent: IReaderState,
-        level: number,
-        engine: Xml2Json): void;
+    _on_init(elementName: string, attrs: XmlAttributes, parent: IReaderState, level: number, engine: Xml2Json): void;
 
     _on_finish(): void;
 
-    _on_startElement(level: number, elementName: string, attrs: XmlAttributes): void;
+    _on_startElement(level: number, elementName: string, attrs: XmlAttributes, qualifiedName?: string): void;
 
-    _on_endElement(level: number, elementName: string): void;
+    _on_endElement(level: number, elementName: string, qualifiedName?: string): void;
 
     _on_endElement2(level: number, elementName: string): void;
 
     _on_text(text: string): void;
 }
 
-
-export class ReaderStateBase {
-}
-export interface ReaderStateBase extends IReaderState {
-}
+// biome-ignore lint/suspicious/noUnsafeDeclarationMerging: interface adds typed members/overloads for this class
+export class ReaderStateBase {}
+export interface ReaderStateBase extends IReaderState {}
 /**
- * @class ReaderState
  * @private
- * @param options
- * @param [options.parser=null]  {map<ReaderState|options}}
- * @param [options.init|null]
- * @param [options.finish]
- * @param [options.startElement]
- * @param [options.endElement]
  */
 export class ReaderState extends ReaderStateBase {
-
-    public _init?: (
-        name: string, attrs: XmlAttributes,
-        parent: IReaderState, engine: Xml2Json
-    ) => void;
+    public _init?: (name: string, attrs: XmlAttributes, parent: IReaderState, engine: Xml2Json) => void;
     public _finish?: () => void;
-    public _startElement?: (name: string, attrs: XmlAttributes) => void;
+    public _startElement?: (name: string, attrs: XmlAttributes, qualifiedName?: string) => void;
     public _endElement?: (name: string) => void;
 
-    public parser: any;
+    public parser: Parser;
     public attrs?: XmlAttributes;
-    public chunks: any[] = [];
-    public text: string = "";
-    public name?: string = "";
-    public level: number = -1;
-    public currentLevel: number = -1;
+    public chunks: string[] = [];
+    public text = "";
+    public name? = "";
+    public level = -1;
+    public currentLevel = -1;
 
     public engine?: Xml2Json;
 
     public parent?: IReaderState;
     public root?: Xml2Json;
-    public data?: any;
+    private _data?: Record<string, unknown>;
+
+    /** scratch space for the reader, fresh for every element it reads, allocated on first use */
+    public get data(): Record<string, unknown> {
+        if (!this._data) {
+            this._data = {};
+        }
+        return this._data;
+    }
+    public set data(value: Record<string, unknown> | undefined) {
+        this._data = value;
+    }
 
     constructor(options: ReaderStateParser | ReaderState) {
-
         super();
-        // ensure options object has only expected properties
-        options.parser = options.parser || {};
-
-        if (!(options instanceof ReaderStateBase)) {
-
-            const fields = _.keys(options);
-            const invalid_fields = _.difference(fields, ["parser", "init", "finish", "startElement", "endElement"]);
-
-            /* istanbul ignore next*/
-            if (invalid_fields.length !== 0) {
-                // tslint:disable:no-console
-                throw new Error("Invalid filed detected in ReaderState Parser ! : " +
-                    invalid_fields.join(" - ") +
-                    " t =" + options.constructor.name);
-            }
-            this._init = options.init;
-            this._finish = options.finish;
-            this._startElement = options.startElement;
-            this._endElement = options.endElement;
+        if (options instanceof ReaderStateBase) {
+            this.parser = options.parser;
+            return;
         }
-
-        this.parser = _coerceParser(options.parser);
+        this._init = options.init;
+        this._finish = options.finish;
+        this._startElement = options.startElement;
+        this._endElement = options.endElement;
+        if (constructionDepth === 0) {
+            statesUnderConstruction = new WeakMap();
+        }
+        constructionDepth += 1;
+        try {
+            statesUnderConstruction.set(options, this);
+            this.parser = _coerceParser(options.parser);
+        } finally {
+            constructionDepth -= 1;
+        }
     }
 
     /**
-     * @method _on_init
-     * @param elementName  - the name of the element
-     * @param attrs
-     * @param parent
-     * @param level
-     * @param engine
      * @protected
      */
-    public _on_init(
-        elementName: string,
-        attrs: XmlAttributes,
-        parent: IReaderState,
-        level: number,
-        engine: Xml2Json
-    ) {
-
+    public _on_init(elementName: string, attrs: XmlAttributes, parent: IReaderState, level: number, engine: Xml2Json): void {
         this.name = elementName;
         this.parent = parent;
         this.engine = engine;
-        this.data = {};
+        this._data = undefined;
         this.level = level;
         this.currentLevel = this.level;
         this.attrs = attrs;
@@ -206,56 +166,53 @@ export class ReaderState extends ReaderStateBase {
             this._init(elementName, attrs, parent, engine);
         }
     }
-
-    public _on_finish() {
+    /**
+     * @protected
+     */
+    public _on_finish(): void {
         if (this._finish) {
             this._finish();
         }
     }
 
     /**
-     * @param level
-     * @param elementName   - the name of the element
-     * @param attrs
      * @protected
      */
-    public _on_startElement(level: number, elementName: string, attrs: XmlAttributes) {
-
+    public _on_startElement(level: number, elementName: string, attrs: XmlAttributes, qualifiedName?: string): void {
         this.currentLevel = level;
-        // console.log("wxxxx _on_startElement#" + this.name, elementName, this.currentLevel);
 
         this.chunks = [];
         this.text = "";
 
         if (this._startElement) {
-            this._startElement(elementName, attrs);
+            this._startElement(elementName, attrs, qualifiedName);
         }
-        if (this.engine && this.parser.hasOwnProperty(elementName)) {
-            // console.log("promoting ", elementName, this.level);
-            this.engine._promote(this.parser[elementName], level, elementName, attrs);
+        const child = this.parser[elementName];
+        if (this.engine && child) {
+            this.engine._promote(child, level, elementName, attrs);
         }
     }
 
-    public _on_endElement2(level: number, elementName: string): void {
+    /**
+     * @protected
+     */
+    public _on_endElement2(_level: number, elementName: string): void {
         if (this._endElement) {
             this._endElement(elementName);
         }
     }
 
     /**
-     * @method _on_endElement
+
      * @protected
      */
     public _on_endElement(level: number, elementName: string): void {
-        // console.log("wxxxx _on_endElement#" + this.name, elementName, level, this.currentLevel);
         assert(this.attrs);
         this.chunks = this.chunks || [];
 
         if (this.level > level) {
-
             // we end a child element of this node
             this._on_endElement2(level, elementName);
-
         } else if (this.level === level) {
             // we received the end event of this node
             // we need to finish
@@ -263,15 +220,13 @@ export class ReaderState extends ReaderStateBase {
             this.chunks = [];
             // this is the end
             this._on_finish();
-            if (this.parent && (this.parent as any).parser && (this.parent as any).parser.hasOwnProperty(elementName)) {
-                // console.log("xxx    demoting#" + this.name, elementName, this.level);
-                this.engine!._demote(this, level, elementName);
+            if (this.parent instanceof ReaderState && this.parent.parser[elementName]) {
+                this.engine?._demote(this, level, elementName);
             }
         }
     }
 
     /**
-     * @method _on_text
      * @param text {String} the text found inside the element
      * @protected
      */
@@ -287,26 +242,29 @@ export class ReaderState extends ReaderStateBase {
 
 const regexp = /(([^:]+):)?(.*)/;
 
-function resolve_namespace(name: string) {
+interface ResolvedName {
+    ns: string | undefined;
+    tag: string;
+}
+
+// a document uses a few dozen distinct element names, each of them thousands of times
+const resolvedNames = new Map<string, ResolvedName>();
+
+function resolve_namespace(name: string): ResolvedName {
+    const known = resolvedNames.get(name);
+    if (known) {
+        return known;
+    }
     const m = name.match(regexp);
     if (!m) {
         throw new Error("Invalid match");
     }
-    return {
-        ns: m[2],
-        tag: m[3]
-    };
+    const resolved: ResolvedName = { ns: m[2], tag: m[3] };
+    resolvedNames.set(name, resolved);
+    return resolved;
 }
 
 /**
- * @class Xml2Json
- * @param options - the state machine as  a ReaderState node.
- * @param [options.parser=null]  {ReaderState}
- * @param [options.init|null]
- * @param [options.finish]
- * @param [options.startElement]
- * @param [options.endElement]
- * @constructor
  *
  * @example
  *  var parser = new Xml2Json({
@@ -339,154 +297,199 @@ function resolve_namespace(name: string) {
  *       done();
  *   });
  */
-export class Xml2Json {
+/** how many times a reader state is active at once, kept on the state itself */
+const activations = Symbol("activations");
+interface ActivationCounted {
+    [activations]?: number;
+}
 
-    public currentLevel: number = 0;
-    private state_stack: any[] = [];
+export class Xml2Json {
+    public currentLevel = 0;
+    // two parallel stacks rather than one record per element: an element is pushed and popped
+    // for each of the hundreds of thousands a nodeset carries
+    private state_stack: Array<IReaderState | null> = [];
+    private backup_stack: Array<Record<string, unknown> | null> = [];
     private current_state: IReaderState | null = null;
+    private sax: SaxLtx | null = null;
+    private decoder: TextDecoder | null = null;
+    private atStart = false;
 
     constructor(options: ReaderStateParser) {
-        const state = (options instanceof ReaderStateBase)
-            ? options as ReaderState : new ReaderState(options);
+        const state = options instanceof ReaderStateBase ? (options as ReaderState) : new ReaderState(options);
         state.root = this;
 
         this.state_stack = [];
+        this.backup_stack = [];
         this.current_state = null;
         this._promote(state, 0);
     }
 
-    /**
-     * @method parseString
-     * @async
-     */
-    public parseString(xml_text: string): Promise<any>;
-    public parseString(xml_text: string, callback: Callback<any> | SimpleCallback): void;
-    public parseString(xml_text: string, callback?: Callback<any> | SimpleCallback): any {
-        const parser = this._prepareParser(callback!);
-        parser.write(xml_text);
-        parser.end();
+    public parseString(xml_text: string): Record<string, unknown> {
+        return this.__parseInternal(xml_text);
     }
 
     /**
-     * @method  parse
-     * @async
-     * @param xmlFile - the name of the xml file to parse.
+     * parse a document that arrives in pieces: text, or UTF-8 bytes decoded as they come (a
+     * multi-byte character or the byte-order mark may straddle two chunks)
      */
-    public parse(xmlFile: string): Promise<any>;
-    public parse(xmlFile: string, callback: Callback<any> | SimpleCallback): void;
-    public parse(xmlFile: string, callback?: Callback<any> | SimpleCallback): any {
-
-        if (!callback) {
-            throw new Error("internal error");
+    public async parseStream(
+        chunks: AsyncIterable<string | Uint8Array> | Iterable<string | Uint8Array>
+    ): Promise<Record<string, unknown>> {
+        this.begin();
+        for await (const chunk of chunks) {
+            this.write(chunk);
         }
-        const readWholeFile = true;
-        if (readWholeFile) {
+        return this.end();
+    }
 
-            // slightly faster but require more memory ..
-            fs.readFile(xmlFile, (err: Error | null, data: Buffer) => {
-                if (err) {
-                    return callback(err);
+    /** start a document that {@link write} will feed and {@link end} will finish */
+    public begin(): void {
+        this.currentLevel = 0;
+        this.atStart = true;
+        this.decoder = null;
+        // direct handlers rather than events, and the blank runs between tags dropped by the
+        // parser before they are unescaped: see SaxLtxHandlers
+        const sax = new SaxLtx({
+            skipBlankText: true,
+            onStartElement: (name: string, attrs: XmlAttributes) => {
+                const tag_ns = resolve_namespace(name);
+                this.currentLevel += 1;
+                if (this.current_state) {
+                    // the stripped tag is what every parser matches on; the qualified name rides
+                    // alongside for the one reader that must reproduce the document, the fragment
+                    // cloner, which would otherwise turn <ua:ModelInfo> into <ModelInfo>
+                    this.current_state._on_startElement(this.currentLevel, tag_ns.tag, attrs, name);
                 }
-                if (data[0] === 0xEF && data[1] === 0xBB && data[2] === 0xBF) {
-                    data = data.slice(3);
+            },
+            onEndElement: (name: string) => {
+                const tag_ns = resolve_namespace(name);
+                if (this.current_state) {
+                    this.current_state._on_endElement(this.currentLevel, tag_ns.tag, name);
                 }
-                const dataAsString = data.toString();
-                const parser = this._prepareParser(callback);
-                parser.write(dataAsString);
-                parser.end();
-            });
+                this.currentLevel -= 1;
+                if (this.currentLevel === 0) {
+                    sax.emit("close");
+                }
+            },
+            onText: (text: string) => {
+                // the reader state trims what it receives; nothing blank reaches this point
+                if (this.current_state) {
+                    this.current_state._on_text(text);
+                }
+            }
+        });
+        this.sax = sax;
+    }
+
+    /** feed the next piece of the document started by {@link begin} */
+    public write(chunk: string | Uint8Array): void {
+        const sax = this.sax;
+        if (!sax) {
+            throw new Error("Xml2Json#write: begin() must be called first");
+        }
+        let text: string;
+        if (typeof chunk === "string") {
+            text = chunk;
         } else {
-
-            const Bomstrip = require("bomstrip");
-
-            const parser = this._prepareParser(callback);
-
-            fs.createReadStream(xmlFile, { autoClose: true, encoding: "utf8" })
-                .pipe(new Bomstrip())
-                .pipe(parser);
-
+            this.decoder = this.decoder || new TextDecoder("utf-8");
+            text = this.decoder.decode(chunk, { stream: true });
         }
+        if (text.length === 0) {
+            return;
+        }
+        if (this.atStart) {
+            this.atStart = false;
+            if (text.charCodeAt(0) === 0xfeff) {
+                text = text.slice(1);
+            }
+        }
+        sax.write(text);
     }
 
+    /** finish the document started by {@link begin} and return what the reader states built */
+    public end(): Record<string, unknown> {
+        const sax = this.sax;
+        if (!sax) {
+            throw new Error("Xml2Json#end: begin() must be called first");
+        }
+        if (this.decoder) {
+            const tail = this.decoder.decode();
+            this.decoder = null;
+            if (tail.length > 0) {
+                sax.write(tail);
+            }
+        }
+        sax.end("");
+        this.sax = null;
+        if (!this.current_state) {
+            return {};
+        }
+        return (this.current_state as unknown as { _pojo: Record<string, unknown> })._pojo;
+    }
     /**
-     * @param new_state
-     * @param name
-     * @param attr
      * @private
      * @internal
      */
-    public _promote(new_state: IReaderState, level: number, name?: string, attr?: XmlAttributes) {
+    public _promote(new_state: IReaderState, level: number, name?: string, attr?: XmlAttributes): void {
         attr = attr || {};
-        this.state_stack.push({
-            backup: {},
-            state: this.current_state
-        });
+
+        // a reader state carries the state of the element being read, so the same instance cannot be
+        // active at two levels at once. This happens when a data type refers to itself, directly or
+        // indirectly: the reader of the nested element is then the very same object as the outer one.
+        // In that case only, take a copy of the outer activation and restore it in _demote.
+        const counted = new_state as ActivationCounted;
+        const active = counted[activations] || 0;
+        counted[activations] = active + 1;
+
+        this.state_stack.push(this.current_state);
+        this.backup_stack.push(active > 0 ? { ...(new_state as unknown as Record<string, unknown>) } : null);
 
         const parent = this.current_state;
         this.current_state = new_state;
+        // parent is null only for the root element; every _on_init implementation in this codebase
+        // names the parameter `_parent` (unused), so widening the public IReaderState signature to
+        // accept null would ripple into every consumer package that already treats it as non-null.
+        // biome-ignore lint/style/noNonNullAssertion: see comment above
         this.current_state._on_init(name || "???", attr, parent!, level, this);
     }
 
     /**
-     *
      * @private
      * @internal
      */
-    public _demote(cur_state: IReaderState, level: number, elementName: string) {
+    public _demote(cur_state: IReaderState, level: number, elementName: string): void {
         ///  assert(this.current_state === cur_state);
-        const { state, backup } = this.state_stack.pop();
+        if (this.state_stack.length === 0) {
+            throw new Error("_demote called without a matching _promote");
+        }
+        const state = this.state_stack.pop() as IReaderState | null;
+        const backup = this.backup_stack.pop() as Record<string, unknown> | null;
         this.current_state = state;
         if (this.current_state) {
             this.current_state._on_endElement2(level, elementName);
         }
+
+        const counted = cur_state as ActivationCounted;
+        counted[activations] = (counted[activations] || 1) - 1;
+        if (backup) {
+            // cur_state was a nested activation of a state that is still active at an outer level:
+            // put the outer element back the way it was. The parent has already consumed the nested
+            // value in _on_endElement2 above, so nothing is lost here.
+            const state_as_object = cur_state as unknown as Record<string, unknown>;
+            for (const key of Object.keys(state_as_object)) {
+                delete state_as_object[key];
+            }
+            Object.assign(state_as_object, backup);
+        }
     }
 
-    private _prepareParser(callback: Callback<any> | SimpleCallback): LtxParser {
-
-        assert(callback instanceof Function);
-        const parser = new LtxParser();
-        this.currentLevel = 0;
-        parser.on("startElement", (name: string, attrs: XmlAttributes) => {
-            const tag_ns = resolve_namespace(name);
-            this.currentLevel += 1;
-            if (this.current_state) {
-                this.current_state._on_startElement(this.currentLevel, tag_ns.tag, attrs);
-            }
-        });
-        parser.on("endElement", (name: string) => {
-            const tag_ns = resolve_namespace(name);
-            if (this.current_state) {
-                this.current_state._on_endElement(this.currentLevel, tag_ns.tag);
-            }
-            this.currentLevel -= 1;
-            if (this.currentLevel === 0) {
-                parser.emit("close");
-            }
-        });
-        parser.on("text", (text: string) => {
-            text = text.trim();
-            if (text.length === 0) {
-                return;
-            }
-            if (this.current_state) {
-                this.current_state._on_text(text);
-            }
-        });
-        parser.on("close",
-            () => {
-                if (callback) {
-                    (callback as any)(null, (this.current_state! as any)._pojo);
-                }
-            });
-        return parser;
+    /**
+     * @private
+     * @internal
+     */
+    protected __parseInternal(data: string): Record<string, unknown> {
+        this.begin();
+        this.write(data);
+        return this.end();
     }
 }
-
-
-// tslint:disable:no-var-requires
-const thenify = require("thenify");
-const opts = { multiArgs: false };
-Xml2Json.prototype.parseString =
-    thenify.withCallback(Xml2Json.prototype.parseString, opts);
-Xml2Json.prototype.parse =
-    thenify.withCallback(Xml2Json.prototype.parse, opts);

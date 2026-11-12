@@ -1,0 +1,70 @@
+import type { UAMethod } from "node-opcua-address-space-base";
+import type { UABaseDataVariable } from "node-opcua-nodeset-ua/dist/ua_base_data_variable.js";
+import type { UATemporaryFileTransfer } from "node-opcua-nodeset-ua/dist/ua_temporary_file_transfer.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { DTRecipeTargetValue } from "./dt_recipe_target_value.js";
+import type { DTRecipeThreshold } from "./dt_recipe_threshold.js";
+import type { UAMaterial } from "./ua_material.js";
+import type { UAProductionPreset } from "./ua_production_preset.js";
+import type { UARecipeManagement } from "./ua_recipe_management.js";
+import type { UAScaleDevice, UAScaleDevice_Base } from "./ua_scale_device.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UARecipeScale_recipes extends Omit<UARecipeManagement, "addRecipe"|"$Recipe_no$"|"removeRecipe"> { // Object
+      /**
+       * addRecipe
+       * Method to add an additional recipe of RecipeType.
+       */
+      addRecipe?: UAMethod;
+   // PlaceHolder for $Recipe_no$
+      recipeUpload?: UATemporaryFileTransfer;
+      /**
+       * removeRecipe
+       * Method to remove a recipe of RecipeType.
+       */
+      removeRecipe?: UAMethod;
+}
+/**
+ * RecipeScaleType represents a recipe scale.
+ *
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/Scales/V2/                      |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |RecipeScaleType i=7                                         |
+ * |isAbstract      |false                                                       |
+ */
+export interface UARecipeScale_Base extends UAScaleDevice_Base {
+    abortRecipe?: UAMethod;
+    continueRecipe?: UAMethod;
+    /**
+     * productionPreset
+     * Contains the productions presets.
+     */
+    productionPreset?: UAProductionPreset;
+    /**
+     * recipes
+     * Defines a folder that contains all recipes.
+     * Elements in this folder must have the RecipeType.
+     */
+    recipes?: UARecipeScale_recipes;
+    skipCurrentRecipeElement?: UAMethod;
+    startRecipe?: UAMethod;
+    stopRecipe?: UAMethod;
+    supportedMaterial?: UAMaterial;
+    /**
+     * supportedTargetValues
+     * Defines a list of values that may be set via the
+     * recipe.
+     */
+    supportedTargetValues?: UABaseDataVariable<DTRecipeTargetValue[], DataType.ExtensionObject>;
+    /**
+     * supportedThresholdValues
+     * Defines a list of threshold values that may be
+     * used within one recipe.
+     */
+    supportedThresholdValues?: UABaseDataVariable<DTRecipeThreshold[], DataType.ExtensionObject>;
+}
+export interface UARecipeScale extends Omit<UAScaleDevice, "productionPreset">, UARecipeScale_Base {}

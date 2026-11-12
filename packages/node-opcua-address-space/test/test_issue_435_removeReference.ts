@@ -1,16 +1,16 @@
-import * as nodesets from "node-opcua-nodesets";
-import * as should from "should";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { nodesets } from "node-opcua-nodesets";
+import should from "should";
+import { AddressSpace, type BaseNode } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
+import { type BoilerType, createBoilerType } from "../testHelpers.js";
 
-import { generateAddressSpace } from "..";
-import { AddressSpace, BaseNode } from "..";
+interface AddressSpaceWithPrivateNamespaceIndex {
+    _private_namespaceIndex: number;
+}
 
-import { BoilerType, createBoilerType } from "..";
-
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
 describe("UANode#removeReference", () => {
-
-    const nodesetFilename = nodesets.standard_nodeset_file;
+    const nodesetFilename = nodesets.standard;
     let addressSpace: AddressSpace;
     let boilerType: BoilerType;
     before(async () => {
@@ -18,8 +18,9 @@ describe("UANode#removeReference", () => {
         const namespace = addressSpace.registerNamespace("Private");
         namespace.index.should.eql(1);
 
-        addressSpace.getNamespace("Private").index.should.eql(
-            (addressSpace as any)._private_namespaceIndex);
+        addressSpace
+            .getNamespace("Private")
+            .index.should.eql((addressSpace as unknown as AddressSpaceWithPrivateNamespaceIndex)._private_namespaceIndex);
 
         await generateAddressSpace(addressSpace, nodesetFilename);
         boilerType = createBoilerType(namespace);
@@ -31,7 +32,6 @@ describe("UANode#removeReference", () => {
     });
 
     it("should be possible to remove a reference ", () => {
-
         const boiler = boilerType.instantiate({
             browseName: "Boiler#1",
             nodeId: "ns=1;s=MyBoiler"
@@ -55,7 +55,5 @@ describe("UANode#removeReference", () => {
 
         boiler.removeReference({ referenceType: "HasComponent", nodeId: boiler.outputPipe.nodeId });
         should.not.exist(boiler.outputPipe);
-
     });
-
 });

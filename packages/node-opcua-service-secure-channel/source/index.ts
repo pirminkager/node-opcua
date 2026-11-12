@@ -1,63 +1,44 @@
 /**
  * @module node-opcua-service-secure-channel
  */
-// tslint:disable:max-line-length
 import { assert } from "node-opcua-assert";
-import { AsymmetricAlgorithmSecurityHeader } from "./AsymmetricAlgorithmSecurityHeader";
-import { SymmetricAlgorithmSecurityHeader } from "./SymmetricAlgorithmSecurityHeader";
-
-import {
-    _enumerationMessageSecurityMode,
-    ChannelSecurityToken,
-    CloseSecureChannelRequest,
-    CloseSecureChannelResponse,
-    MessageSecurityMode,
-    OpenSecureChannelRequest,
-    OpenSecureChannelResponse,
-    RequestHeader,
-    ResponseHeader,
-    SecurityTokenRequestType,
-    ServiceFault,
-    SignatureData,
-    UserTokenPolicy
-} from "node-opcua-types";
+import { ChannelSecurityToken, RequestHeader, ResponseHeader, SignatureData } from "node-opcua-types";
 
 export {
+    _enumerationMessageSecurityMode,
     ChannelSecurityToken,
-    OpenSecureChannelRequest,
-    OpenSecureChannelResponse,
     CloseSecureChannelRequest,
     CloseSecureChannelResponse,
-    ServiceFault,
-
-    SecurityTokenRequestType,
-    ResponseHeader,
-    RequestHeader,
-    SignatureData,
     MessageSecurityMode,
-    _enumerationMessageSecurityMode,
+    OpenSecureChannelRequest,
+    OpenSecureChannelResponse,
+    RequestHeader,
+    ResponseHeader,
+    SecurityTokenRequestType,
+    ServiceFault,
+    SignatureData,
     UserTokenPolicy
 } from "node-opcua-types";
 
-export { AsymmetricAlgorithmSecurityHeader } from "./AsymmetricAlgorithmSecurityHeader";
-export { SymmetricAlgorithmSecurityHeader } from "./SymmetricAlgorithmSecurityHeader";
-export * from "./message_security_mode";
+export { AsymmetricAlgorithmSecurityHeader } from "./AsymmetricAlgorithmSecurityHeader.js";
+export * from "./message_security_mode.js";
+export { SymmetricAlgorithmSecurityHeader } from "./SymmetricAlgorithmSecurityHeader.js";
 
 // createdAt
-ChannelSecurityToken.schema.fields[2].defaultValue =  () => new Date();
+ChannelSecurityToken.schema.fields[2].defaultValue = () => new Date();
 // revisedLifetime
-ChannelSecurityToken.schema.fields[3].defaultValue =  () => 30000;
+ChannelSecurityToken.schema.fields[3].defaultValue = () => 30000;
 
 export function hasTokenExpired(token: ChannelSecurityToken): boolean {
-
-    return (token.createdAt !== null)
-        && (token.createdAt.getTime() + token.revisedLifetime) < Date.now();
+    return token.createdAt !== null && token.createdAt.getTime() + token.revisedLifetime < Date.now();
 }
 
 Object.defineProperty(ChannelSecurityToken.prototype, "expired", {
-    get() { return hasTokenExpired(this as ChannelSecurityToken); },
+    get() {
+        return hasTokenExpired(this as ChannelSecurityToken);
+    },
     configurable: true,
-    enumerable: true,
+    enumerable: true
 });
 
 // ErrorMessage
@@ -74,7 +55,7 @@ RequestHeader.schema.fields[1].defaultValue = () => new Date();
 // 2. requestHandle               IntegerId "     A requestHandle associated with the request. This client defined handle can
 //                                                be used to cancel the request. It is also returned in the response.
 assert(RequestHeader.schema.fields[2].name === "requestHandle");
-RequestHeader.schema.fields[2].defaultValue = 0xDEADBEEF;
+RequestHeader.schema.fields[2].defaultValue = 0xdeadbeef;
 // 3. returnDiagnostics           UInt32          A bit mask that identifies the types of vendor-specific diagnostics to be
 //                                                returned in diagnosticInfo response parameters.
 // 4. auditEntryId                UAString        An identifier that identifies the Client's security audit log entry associated with
@@ -88,7 +69,7 @@ RequestHeader.schema.fields[6].defaultValue = () => null;
 // Response Header,
 // 0. timestamp                 UtcTime           The time the Server sent the response.
 assert(ResponseHeader.schema.fields[0].name === "timestamp");
-ResponseHeader.schema.fields[0].defaultValue = () => new Date() ;
+ResponseHeader.schema.fields[0].defaultValue = () => new Date();
 // 1. requestHandle             IntegerId          The requestHandle given by the Client to the request.
 // 2. serviceResult             StatusCode         OPC UA-defined result of the Service invocation.
 // 3. serviceDiagnostics        DiagnosticInfo     The diagnostics associated with the ServiceResult.

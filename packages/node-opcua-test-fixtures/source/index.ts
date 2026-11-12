@@ -1,5 +1,8 @@
-import * as  path from "path";
+import path from "node:path";
+
+const here = import.meta.dirname;
+
 export function getFixture(relativeName: string) {
-    const filename =  path.join(__dirname, ".." , relativeName);
+    const filename = path.join(here, "..", relativeName);
     return filename;
 }

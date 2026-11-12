@@ -1,0 +1,127 @@
+import { BinaryStream } from "node-opcua-binary-stream";
+import { getExtensionObjectConstructor } from "node-opcua-client-dynamic-extension-object";
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
+import { resolveNodeId } from "node-opcua-nodeid";
+import { nodesets } from "node-opcua-nodesets";
+import { DataType, Variant } from "node-opcua-variant";
+import should from "should";
+import sinon from "sinon";
+//
+import { AddressSpace, adjustNamespaceArray, PseudoSession } from "../dist/api/index.js";
+import { generateAddressSpace } from "../distNodeJS/index.js";
+import { getAddressSpaceFixture } from "../test_helpers/get_address_space_fixture.js";
+
+describe("Test Extension Object in pure 1.04 version (only DataTypeDefinition available)", () => {
+    let addressSpace: AddressSpace;
+    before(async () => {
+        addressSpace = AddressSpace.create();
+        await generateAddressSpace(addressSpace, [nodesets.standard, getAddressSpaceFixture("datatype_as_per_1.04.xml")]);
+        adjustNamespaceArray(addressSpace);
+    });
+    after(() => {
+        addressSpace.dispose();
+    });
+
+    it("WY1- should exposed a custom DataType structure and be able to create an instance in addressSpace context", async () => {
+        const nsA = addressSpace.getNamespaceIndex("http://A");
+        const dataTypeNodeId = addressSpace.findDataType("MyStructure", nsA);
+        should.exist(dataTypeNodeId);
+        const _o = addressSpace.constructExtensionObject(dataTypeNodeId!, {});
+    });
+
+    it("WY2- PseudoSession & getExtensionObjectConstructor ", async () => {
+        const session = new PseudoSession(addressSpace);
+        const browseSpy = sinon.spy(session, "browse");
+        const browseNextSpy = sinon.spy(session, "browseNext");
+
+        const dataTypeNodeId = resolveNodeId("ns=1;i=3001");
+        const F = await getExtensionObjectConstructor(session, dataTypeNodeId);
+        should.exist(F);
+        F.should.be.a.Function;
+        const o = new F({});
+        console.log(o.toJSON());
+        console.log("browseSpy =  ", browseSpy.callCount, "browseNextSpy =  ", browseNextSpy.callCount);
+    });
+
+    it("WY3- PseudoSession & getExtensionObjectConstructor with requestedMaxReferencesPerNode", async () => {
+        const session = new PseudoSession(addressSpace);
+        const browseSpy = sinon.spy(session, "browse");
+        const browseNextSpy = sinon.spy(session, "browseNext");
+
+        session.requestedMaxReferencesPerNode = 2;
+
+        // console.log("§§§§§§§§§§§§§§§§§§§§§§§§§§§§§");
+
+        const dataTypeNodeId = resolveNodeId("ns=1;i=3001");
+        const F = await getExtensionObjectConstructor(session, dataTypeNodeId);
+        should.exist(F);
+        F.should.be.a.Function;
+        const o = new F({});
+        console.log(o.toJSON());
+        console.log("browseSpy =  ", browseSpy.callCount, "browseNextSpy =  ", browseNextSpy.callCount);
+    });
+
+    it("WY4 - Extension Object with Matrix", () => {
+        const nsA = addressSpace.getNamespaceIndex("http://A");
+        const dataTypeNodeId = addressSpace.findDataType("MyStructureWithMatrix", nsA);
+        should.exist(dataTypeNodeId);
+        const o = addressSpace.constructExtensionObject(dataTypeNodeId!, {
+            matrix: [
+                [
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0]
+                ],
+                [
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0]
+                ]
+            ]
+        });
+        console.log(o.toString());
+
+        const va = new Variant({ dataType: DataType.ExtensionObject, value: o });
+        const stream = new BinaryStream(va.binaryStoreSize());
+        o.encode(stream);
+
+        const vb = new Variant();
+        stream.rewind();
+        vb.decode(stream);
+    });
+});
+
+describe("Test Extension Object in pure 1.04 version - DataType deriving from DataType in namespace 0", () => {
+    let addressSpace: AddressSpace;
+    before(async () => {
+        addressSpace = AddressSpace.create();
+        await generateAddressSpace(addressSpace, [nodesets.standard, getAddressSpaceFixture("dataType_issue.xml")]);
+    });
+    after(() => {
+        addressSpace.dispose();
+    });
+
+    it("WZ1- should exposed a custom DataType structure and be able to create an instance in addressSpace context", async () => {
+        const nsA = addressSpace.getNamespaceIndex("http://A");
+        const dataTypeNodeId = addressSpace.findDataType("MyCustomDataType", nsA);
+        should.exist(dataTypeNodeId);
+        should(dataTypeNodeId?.nodeId.toString()).eql("ns=1;i=3011");
+        const _o = addressSpace.constructExtensionObject(dataTypeNodeId!, {});
+    });
+
+    it("WZ2- PseudoSession & getExtensionObjectConstructor ", async () => {
+        const session = new PseudoSession(addressSpace);
+        const browseSpy = sinon.spy(session, "browse");
+        const browseNextSpy = sinon.spy(session, "browseNext");
+
+        const _d = addressSpace.findDataType("MyCustomDataType");
+
+        const dataTypeNodeId = resolveNodeId("ns=1;i=3011");
+        const F = await getExtensionObjectConstructor(session, dataTypeNodeId);
+        should.exist(F);
+        F.should.be.a.Function;
+        const o = new F({});
+        console.log(o.toJSON());
+        console.log("browseSpy =  ", browseSpy.callCount, "browseNextSpy =  ", browseNextSpy.callCount);
+    });
+});

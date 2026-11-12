@@ -8,20 +8,16 @@
 
 export {
     AsymmetricAlgorithmSecurityHeader,
-    SymmetricAlgorithmSecurityHeader,
+    CloseSecureChannelRequest,
+    CloseSecureChannelResponse,
+    OpenSecureChannelRequest,
+    OpenSecureChannelResponse,
+    ServiceFault,
+    SymmetricAlgorithmSecurityHeader
 } from "node-opcua-service-secure-channel";
-
 export {
     AcknowledgeMessage,
     HelloMessage
 } from "node-opcua-transport";
-export {
-    OpenSecureChannelRequest,
-    OpenSecureChannelResponse,
-    CloseSecureChannelRequest,
-    CloseSecureChannelResponse,
-    ServiceFault
-} from "node-opcua-service-secure-channel";
 
-export { MessageChunker } from "./message_chunker";
-export { chooseSecurityHeader } from "./secure_message_chunk_manager";
+export { MessageChunker } from "./message_chunker.js";

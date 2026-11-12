@@ -1,0 +1,35 @@
+import type { UAObject, UAProperty } from "node-opcua-address-space-base";
+import type { UInt32 } from "node-opcua-basic-types";
+import type { UAAnalogUnit } from "node-opcua-nodeset-ua/dist/ua_analog_unit.js";
+import type { DataType } from "node-opcua-variant";
+
+import type { UAAnalogSignal_$SignalCalibrationIdentifier$ } from "./ua_analog_signal.js";
+import type { UAAnalyticalSignal, UAAnalyticalSignal_Base } from "./ua_analytical_signal.js";
+
+// ----- this file has been automatically generated - do not edit
+
+export interface UAAmperometricSignal_$SignalCalibrationIdentifier$ extends UAAnalogSignal_$SignalCalibrationIdentifier$ { // Object
+      absoluteAirPressure?: UAAnalogUnit<number, DataType.Float>;
+      amperometricSensorSlope?: UAAnalogUnit<number, DataType.Float>;
+      amperometricSensorZeroPoint?: UAAnalogUnit<number, DataType.Float>;
+      sensorT90?: UAProperty<number, DataType.Float>;
+}
+export interface UAAmperometricSignal_signalConditionSet extends UAObject { // Object
+      sensorCleaningsCounter?: UAProperty<UInt32, DataType.UInt32>;
+      sensorNextCalibration?: UAAnalogUnit<UInt32, DataType.UInt32>;
+      sensorSterilisationsCounter?: UAProperty<UInt32, DataType.UInt32>;
+      sensingElementTemperature?: UAAnalogUnit<number, DataType.Float>;
+}
+/**
+ * |                |                                                            |
+ * |----------------|------------------------------------------------------------|
+ * |namespace       |http://opcfoundation.org/UA/PADIM/                          |
+ * |nodeClass       |ObjectType                                                  |
+ * |typedDefinition |AmperometricSignalType i=1066                               |
+ * |isAbstract      |false                                                       |
+ */
+export interface UAAmperometricSignal_Base extends UAAnalyticalSignal_Base {
+   // PlaceHolder for $SignalCalibrationIdentifier$
+    signalConditionSet?: UAAmperometricSignal_signalConditionSet;
+}
+export interface UAAmperometricSignal extends Omit<UAAnalyticalSignal, "$SignalCalibrationIdentifier$"|"signalConditionSet">, UAAmperometricSignal_Base {}

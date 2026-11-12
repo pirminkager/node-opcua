@@ -1,28 +1,19 @@
-
-import * as mocha from "mocha";
 import { AttributeIds } from "node-opcua-data-model";
-import { StatusCodes } from "node-opcua-status-code";
-import { DataType } from "node-opcua-variant";
-import * as should from "should";
-import { getMiniAddressSpace } from "../";
-
+import { describeWithLeakDetector as describe } from "node-opcua-leak-detector";
 import { nodesets } from "node-opcua-nodesets";
+import { StatusCodes } from "node-opcua-status-code";
 import { StructureDefinition } from "node-opcua-types";
-import { AddressSpace, SessionContext, UADataType } from "..";
-import { generateAddressSpace } from "..";
+import should from "should";
+import { AddressSpace, SessionContext } from "../dist/api/index.js";
+import { generateAddressSpace } from "../nodeJS.js";
 
-const context = SessionContext.defaultContext;
+const _context = SessionContext.defaultContext;
 
-// tslint:disable-next-line:no-var-requires
-const describe = require("node-opcua-leak-detector").describeWithLeakDetector;
-describe("testing UADataype -  Attribute", () => {
-
+describe("testing UADataType -  Attribute", () => {
     let addressSpace: AddressSpace;
     before(async () => {
         addressSpace = AddressSpace.create();
-        const nodesetFilename = [
-            nodesets.standard
-        ];
+        const nodesetFilename = [nodesets.standard];
         await generateAddressSpace(addressSpace, nodesetFilename);
     });
     after(async () => {
@@ -30,15 +21,18 @@ describe("testing UADataype -  Attribute", () => {
     });
 
     it("DTX1 should extract Definition from DataType enumeration type 1", async () => {
+        /** todo */
     });
     it("DTX2 should extract Definition from DataType enumeration type 2", async () => {
+        /** todo */
     });
     it("DTX3 should extract Definition from DataType enumeration type 3", async () => {
+        /** todo */
     });
     it("DTX4 should extract Definition from DataType structure", async () => {
-
-        const dataTypeSchemaHeader = addressSpace.findDataType("DataTypeSchemaHeader")!;
+        const dataTypeSchemaHeader = addressSpace.findDataType("DataTypeSchemaHeader");
         should.exist(dataTypeSchemaHeader);
+        if (!dataTypeSchemaHeader) return;
 
         const dataTypeDefinitionDataValue = dataTypeSchemaHeader.readAttribute(null, AttributeIds.DataTypeDefinition);
         should.exist(dataTypeDefinitionDataValue);
@@ -46,8 +40,63 @@ describe("testing UADataype -  Attribute", () => {
 
         const dataTypeDefinition = dataTypeDefinitionDataValue.value.value;
         dataTypeDefinition.should.be.instanceOf(StructureDefinition);
-        console.log(dataTypeDefinition.toString());
+        //xx debugLog(dataTypeDefinition.toString());
+    });
+});
 
+describe("testing UADataType -  Attribute", () => {
+    let addressSpace: AddressSpace;
+    before(async () => {
+        addressSpace = AddressSpace.create();
+        const nodesetFilename = [nodesets.standard];
+        await generateAddressSpace(addressSpace, nodesetFilename);
+        addressSpace.registerNamespace("PRIVATE");
+    });
+    after(async () => {
+        addressSpace.dispose();
     });
 
+    it("DTX5 should extract Definition from DataType structure", async () => {
+        const ns = addressSpace.getOwnNamespace();
+
+        const _dataType = ns.createDataType({
+            browseName: "MyDataType",
+            isAbstract: true,
+            subtypeOf: "Structure",
+            partialDefinition: [
+                {
+                    dataType: "Double",
+                    description: "the list of values",
+                    name: "Values",
+                    valueRank: 1
+                }
+            ]
+        });
+    });
+
+    it("DTX6 should default missing field dataType to BaseDataType (i=24)", async () => {
+        const ns = addressSpace.getOwnNamespace();
+
+        const dataType = ns.createDataType({
+            browseName: "MyDataTypeWithMissingFieldDataType",
+            isAbstract: false,
+            subtypeOf: "Structure",
+            partialDefinition: [
+                {
+                    // dataType intentionally omitted
+                    description: "a field with no explicit DataType",
+                    name: "Value",
+                    valueRank: -1
+                }
+            ]
+        });
+
+        const definition = dataType.getStructureDefinition();
+        definition.should.be.instanceOf(StructureDefinition);
+
+        should(definition.fields?.length).eql(1);
+        should(definition.fields?.[0].name).eql("Value");
+        // Must be BaseDataType (ns=0;i=24), not Null NodeId (ns=0;i=0)
+        should(definition.fields?.[0].dataType.toString()).eql("ns=0;i=24");
+    });
 });

@@ -1,36 +1,41 @@
 {
-	"name": "node-opcua-benchmarker",
-	"version": "2.6.0-alpha.1",
-	"description": "pure nodejs OPCUA SDK - module -benchmarker",
-	"main": "./dist/index.js",
-	"types": "./dist/index.d.ts",
-	"scripts": {
-		"build": "tsc -b",
-		"clean": "node -e \"require('rimraf').sync('dist');\"",
-		"lint": "tslint source/**/*.ts"
-	},
-	"dependencies": {
-		"async": "^3.2.0",
-		"node-opcua-assert": "^2.6.0-alpha.1",
-		"underscore": "^1.10.2"
-	},
-	"author": "Etienne Rossignon",
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git://github.com/node-opcua/node-opcua.git"
-	},
-	"keywords": [
-		"OPCUA",
-		"opcua",
-		"m2m",
-		"iot",
-		"opc ua",
-		"internet of things"
-	],
-	"homepage": "http://node-opcua.github.io/",
-	"devDependencies": {
-		"@types/underscore": "^1.10.0"
-	},
-	"gitHead": "e4d73afdfcccb3491423149d9b9785888f4ebb3c"
+    "name": "node-opcua-benchmarker",
+    "type": "module",
+    "version": "2.187.0",
+    "description": "pure nodejs OPCUA SDK - module benchmarker",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "scripts": {
+        "build": "tsc -b",
+        "clean": "npx rimraf -g node_modules dist *.tsbuildinfo",
+        "lint": "biome check --no-errors-on-unmatched .",
+        "test:check": "tsc --noEmit -p test/tsconfig.json",
+        "test": "mocha"
+    },
+    "engines": {
+        "node": ">=22.13.0"
+    },
+    "dependencies": {
+        "node-opcua-utils": "2.187.0"
+    },
+    "author": "Etienne Rossignon",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git://github.com/node-opcua/node-opcua.git"
+    },
+    "keywords": [
+        "OPCUA",
+        "opcua",
+        "m2m",
+        "iot",
+        "opc ua",
+        "internet of things"
+    ],
+    "homepage": "http://node-opcua.github.io/",
+    "gitHead": "064029878247adf2fa5d14a8124e1930431e2428",
+    "files": [
+        "dist",
+        "source"
+    ]
 }

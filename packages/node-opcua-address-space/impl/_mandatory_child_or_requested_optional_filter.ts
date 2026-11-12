@@ -1,0 +1,120 @@
+import {
+    type BaseNode,
+    type CloneFilter,
+    fullPath2,
+    type UAMethod,
+    type UAObject,
+    type UAReference,
+    type UAVariable
+} from "node-opcua-address-space-base";
+import { assert } from "node-opcua-assert";
+import { BrowseDirection } from "node-opcua-data-model";
+import { checkDebugFlag, make_errorLog, make_warningLog } from "node-opcua-debug";
+
+// const debugLog = make_debugLog("_mandatory_child_or_requested_optional_filter");
+const _doDebug = checkDebugFlag("_mandatory_child_or_requested_optional_filter");
+const warningLog = make_warningLog("_mandatory_child_or_requested_optional_filter");
+const errorLog = make_errorLog("_mandatory_child_or_requested_optional_filter");
+const doTrace = checkDebugFlag("INSTANTIATE");
+const traceLog = errorLog;
+
+export interface OptionalMap {
+    [key: string]: OptionalMap;
+}
+export class MandatoryChildOrRequestedOptionalFilter implements CloneFilter {
+    private readonly optionalsMap: OptionalMap;
+    private readonly references: UAReference[];
+    private readonly copyAlsoAllOptionals: boolean = false;
+    /**
+     * the clone is an instance declaration of a type (instantiate() inside a type): it takes the
+     * placeholders of its type that `optionals` requests, and only those. The ModelCompiler emits
+     * a placeholder in an instance declaration when the design declares it (OPC 10000-100 DI
+     * DeviceType/DeviceTypeImage/<ImageIdentifier>), not every placeholder of the member's type
+     * (DI TopologyElementType/Identification carries no <GroupIdentifier>). An instance never
+     * takes one.
+     */
+    private readonly keepPlaceholders: boolean = false;
+
+    constructor(instance: BaseNode, copyAlsoAllOptionals: boolean, optionalsMap: OptionalMap, keepPlaceholders = false) {
+        this.copyAlsoAllOptionals = copyAlsoAllOptionals;
+        this.keepPlaceholders = keepPlaceholders;
+        // should we clone the node to be a component or propertyOf of a instance
+        assert(null !== instance);
+        this.optionalsMap = optionalsMap;
+        this.references = instance.findReferencesEx("Aggregates", BrowseDirection.Forward);
+    }
+
+    public shouldKeep(node: BaseNode): boolean {
+        const addressSpace = node.addressSpace;
+
+        const alreadyIn = this.references.filter((r: UAReference) => {
+            const n = addressSpace.findNode(r.nodeId);
+            /* c8 ignore next */
+            if (!n) {
+                warningLog(" cannot find node ", r.nodeId.toString());
+                return false;
+            }
+            return n.browseName?.name?.toString() === node.browseName?.name?.toString();
+        });
+
+        if (alreadyIn.length > 0) {
+            assert(alreadyIn.length === 1, "Duplication found ?");
+            // a child with the same browse name has already been install
+            // probably from a SuperClass, we should ignore this.
+            return false; // ignore
+        }
+
+        const modellingRule = node.modellingRule;
+
+        switch (modellingRule) {
+            case null:
+            case undefined:
+                /* c8 ignore next */
+                doTrace && traceLog("node ", fullPath2(node), " has no modellingRule ", node ? fullPath2(node) : "");
+                /**
+                 * in some badly generated NodeSet2.xml file, the modellingRule is not specified
+                 *
+                 * but in some other NodeSet2.xml, this means that the data are only attached to the Type node and shall not be
+                 * instantiate in the corresponding instance (example is the state variable of a finite state machine that are only
+                 * defined in the Type node)
+                 *
+                 * we should not consider it as an error, and treat it as not present
+                 */
+                return false;
+
+            case "Mandatory":
+                return true; // keep;
+            case "Optional":
+                // only if in requested optionals
+                return this.copyAlsoAllOptionals || (node.browseName?.name || "") in this.optionalsMap;
+            case "OptionalPlaceholder":
+            case "MandatoryPlaceholder":
+                return this.keepPlaceholders && (node.browseName?.name || "") in this.optionalsMap;
+            default:
+                return false; // ignored
+        }
+    }
+
+    public filterFor(childInstance: UAVariable | UAObject | UAMethod): CloneFilter {
+        const browseName: string = childInstance.browseName.name || "";
+
+        let map: OptionalMap = Object.create(null);
+
+        if (browseName in this.optionalsMap) {
+            map = this.optionalsMap[browseName] as OptionalMap;
+        }
+        /* c8 ignore next */
+        doTrace && traceLog("filterFor ", browseName, map);
+        // a placeholder's copy takes its own members, not the placeholders of its type: the walk
+        // would never end on a type whose placeholder is typed by a type holding one in turn
+        const isPlaceholder =
+            childInstance.modellingRule === "OptionalPlaceholder" || childInstance.modellingRule === "MandatoryPlaceholder";
+        const newFilter = new MandatoryChildOrRequestedOptionalFilter(
+            childInstance,
+            false,
+            map,
+            this.keepPlaceholders && !isPlaceholder
+        );
+        return newFilter;
+    }
+}
